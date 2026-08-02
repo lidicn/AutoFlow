@@ -29,7 +29,7 @@ classifiers = [
     "Operating System :: OS Independent",
     "Topic :: Home Automation",
 ]
-urls = { Homepage = "https://github.com/lidicn/autoflow-gateway", Repository = "https://github.com/lidicn/autoflow-gateway" }
+urls = { Homepage = "https://github.com/lidicn/AutoFlow", Repository = "https://github.com/lidicn/AutoFlow" }
 
 [project.scripts]
 autoflow = "autoflow_gateway.cli:main"

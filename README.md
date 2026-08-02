@@ -53,7 +53,7 @@ autoflow_gateway/
 一句话拉起完整网关（MCP + WebUI 同端口 `:8000`）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lidicn/autoflow-gateway/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/lidicn/AutoFlow/main/install.sh | sh
 ```
 
 脚本会自动：检查/安装 Docker → 拉取仓库构建上下文 → `docker compose up -d --build` → 等待 WebUI 就绪。

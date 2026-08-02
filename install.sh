@@ -3,10 +3,10 @@
 # AutoFlow 一键安装脚本（Docker）
 # ============================================================
 # 用法（默认从 GitHub 拉取源码并在本机构建镜像）：
-#   curl -fsSL https://raw.githubusercontent.com/lidicn/autoflow-gateway/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/lidicn/AutoFlow/main/install.sh | sh
 #
 # 环境变量 / 参数：
-#   REPO=lidicn/autoflow-gateway   仓库（fork 时改这里）
+#   REPO=lidicn/AutoFlow   仓库（fork 时改这里）
 #   BRANCH=main                    分支
 #   INSTALL_DIR=/opt/autoflow      安装目录（macOS 默认 ~/autoflow）
 #   sh install.sh --install-docker 本机没装 Docker 时顺带安装（仅 Linux）
@@ -15,7 +15,7 @@
 # ============================================================
 set -euo pipefail
 
-REPO="${REPO:-lidicn/autoflow-gateway}"
+REPO="${REPO:-lidicn/AutoFlow}"
 BRANCH="${BRANCH:-main}"
 if [ "$(uname)" = "Darwin" ]; then
   DEFAULT_DIR="$HOME/autoflow"
