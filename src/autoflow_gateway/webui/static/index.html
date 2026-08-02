@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>AutoFlow 网关</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">⌁</span>
+        <span class="title">AutoFlow 网关</span>
+      </div>
+      <div class="topbar-right">
+        <span id="envBadge" class="badge env">…</span>
+        <button id="tokenBtn" class="btn ghost" title="设置 WebUI 访问令牌">🔑</button>
+        <button id="tpBtn" class="btn ghost" title="DSL 验证任务池开关（关闭后 agent 调用将被拒绝）">🧪</button>
+        <button id="rnBtn" class="btn ghost" title="原生节点逃逸开关（中风险逃生舱，可随时关闭）"><span class="btn-emoji">🧬</span><span class="btn-text">逃逸</span></button>
+        <button id="dpBtn" class="btn ghost" title="部署策略（compiler_auto 下编译器产物标「可信」可自动部署，raw 仍须人审）">⚖</button>
+      </div>
+    </header>
+
+    <!-- 桌面侧边导航 -->
+    <nav class="sidebar" id="sidebar">
+      <button class="navitem" data-tab="dashboard"><span class="ic">▣</span>概览</button>
+      <button class="navitem" data-tab="pending"><span class="ic">⚠</span>确认闸</button>
+      <button class="navitem" data-tab="proposals"><span class="ic">✨</span>提案</button>
+      <button class="navitem" data-tab="deployed"><span class="ic">🚀</span>已部署</button>
+      <button class="navitem" data-tab="subflows"><span class="ic">🔗</span>子流程</button>
+      <button class="navitem" data-tab="agents"><span class="ic">🤖</span>Agents</button>
+      <button class="navitem" data-tab="diagnostics"><span class="ic">🩺</span>诊断</button>
+      <button class="navitem" data-tab="notes"><span class="ic">📝</span>笔记</button>
+      <button class="navitem" data-tab="settings"><span class="ic">⚙️</span>设置</button>
+    </nav>
+
+    <main class="content" id="content">
+      <section class="view" id="view-dashboard" hidden></section>
+      <section class="view" id="view-pending" hidden></section>
+      <section class="view" id="view-proposals" hidden></section>
+      <section class="view" id="view-deployed" hidden></section>
+      <section class="view" id="view-subflows" hidden></section>
+      <section class="view" id="view-agents" hidden></section>
+      <section class="view" id="view-diagnostics" hidden></section>
+      <section class="view" id="view-notes" hidden></section>
+      <section class="view" id="view-settings" hidden></section>
+    </main>
+
+    <!-- 移动端底部导航 -->
+    <nav class="bottomnav" id="bottomnav">
+      <button class="navitem" data-tab="dashboard"><span class="ic">▣</span>概览</button>
+      <button class="navitem" data-tab="pending"><span class="ic">⚠</span>确认</button>
+      <button class="navitem" data-tab="proposals"><span class="ic">✨</span>提案</button>
+      <button class="navitem" data-tab="deployed"><span class="ic">🚀</span>已部署</button>
+      <button class="navitem" data-tab="subflows"><span class="ic">🔗</span>子流程</button>
+      <button class="navitem" data-tab="agents"><span class="ic">🤖</span>Agents</button>
+      <button class="navitem" data-tab="diagnostics"><span class="ic">🩺</span>诊断</button>
+      <button class="navitem" data-tab="notes"><span class="ic">📝</span>笔记</button>
+      <button class="navitem" data-tab="settings"><span class="ic">⚙️</span>设置</button>
+    </nav>
+  </div>
+
+  <div class="modal-mask" id="modalMask" hidden>
+    <div class="modal">
+      <div class="modal-head"><span id="modalTitle">提示</span><button class="btn ghost" id="modalClose">✕</button></div>
+      <div class="modal-body" id="modalBody"></div>
+    </div>
+  </div>
+
+    <!-- 首次运行免责声明（C11/C21） -->
+    <div class="modal-mask" id="firstRunMask" hidden>
+      <div class="modal first-run">
+        <div class="modal-head"><span>首次运行 · 风险须知</span></div>
+        <div class="modal-body">
+          <p>AutoFlow 网关可控制 <strong>真实电器与物理设备</strong>。误操作可能造成现实世界后果（设备损坏、能耗、安全隐患）。</p>
+          <p>继续使用即表示你已理解并接受这一风险，并确认你对此运行环境拥有合法控制权。</p>
+          <label class="ck"><input type="checkbox" id="firstRunAck" /> 我已理解并接受上述风险</label>
+        </div>
+        <div class="modal-foot">
+          <button class="btn primary" id="firstRunAccept" disabled>进入</button>
+        </div>
+      </div>
+    </div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

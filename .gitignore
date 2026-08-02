@@ -1,0 +1,68 @@
+# 凭证 / 本地环境（含 NR/HA 密码，切勿提交）
+.env
+.env.*
+!.env.example
+# WebUI 访问令牌（af-ui-...，切勿提交）
+**/.webui_token
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 运行时数据（部署账本、待确认、备份等）
+data/
+*.log
+
+# 工作记忆（含 MCP 身份码等明文，切勿提交）
+.workbuddy/
+
+# 含 Bark key 的散落文件（任意层级）
+bark_full.json
+bark_notify.js
+
+# Node-RED 凭据（含 HA token + credentialSecret，切勿提交）
+flows_cred.json
+
+# 第三方服务安装器（可重新下载，非源码）
+nssm.exe
+
+# ===== AutoFlow 含密钥/产物的散落文件（不进版本库）=====
+# 真实 flow 导出（含 HA JWT / Basic Auth 明文密码 / NAS IP）
+*.json
+# 历史备份目录
+backups/
+nr_backup/
+# autoflow_gateway 根下调试 / 临时脚本
+_*.py
+_bark_watch.py
+_build_night_home.py
+# 运行/验证产物目录
+verify_out/
+.verify/
+_archive_restarts/
+# 根目录调试脚本与临时 bat
+/_d*.py
+/_db*.py
+/_di*.py
+/_fix_*.py
+/*.bat
+
+# A4 归档区：根目录临时脚本与一次性 flow 导出移入此处（不进版本库）
+scratch/
+
+# 深层历史调试目录（含 build_subflows.py 等 dev 脚本，已移出发布版）整体忽略，
+# 但保留运行时依赖 subflows_built.json（ensure_history_subflow 需读取）
+src/autoflow_gateway/nr_subflows/history/*
+!src/autoflow_gateway/nr_subflows/history/subflows_built.json
+# Windows 服务脚本（install_service.ps1 / uninstall_service.ps1 等）不发布
+*.ps1
+# 根目录 backups（区别于 backups）
+/backups/
+# 运行/调试产物（非 .log 后缀）
+*.err
+_*.md
+_*.jsonl
+
+# 个人 HA 配置导出（含 Bark key / NAS IP，非 AutoFlow 源码）
+/smarthome-assistant/

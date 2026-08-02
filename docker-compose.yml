@@ -1,0 +1,34 @@
+services:
+  autoflow_gateway:
+    build: .
+    container_name: autoflow_gateway
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # 环境分级：staging / prod（仅 data/ 子目录隔离；NR 默认 1880）
+      # bare 部署直接填真实 HA/NR，固定 prod（连接设置落盘 data/prod/connections.json）
+      AUTOFLLOW_ENV: "prod"
+      # ── HA / NR / Bark 连接：一律走 WebUI「连接设置」面板填写 ──
+      # 见 connections.apply_saved_to_env：UI 值覆盖本文件 env，以 WebUI 为唯一真相源。
+      # 此处显式留空，避免网关带着占位符「假连接」。凭据绝不进 git / 不写死在此文件。
+      HASS_SERVER: ""
+      HASS_TOKEN: ""
+      NR_URL: ""
+      NR_USER: ""
+      NR_PASS: ""
+      # ── WebUI 访问令牌引导 ──
+      # bare 部署无 AF_WEBUI_TOKEN 且无 data/.webui_token 时，自动生成随机令牌落盘，
+      # 否则外部 IP 会被 guarded() 拦 403 而进不去 WebUI。设为 1 开启（本地开发可删）。
+      AF_WEBUI_TOKEN_AUTO: "1"
+      # ── MCP ──
+      AF_MCP_HOST: "0.0.0.0"
+      AF_MCP_PORT: "8000"
+      AF_MCP_PATH: "/mcp"
+    volumes:
+      # 源码热编辑：NAS 共享盘改 src，docker compose restart 即生效（配合 Dockerfile 的 -e 安装）
+      - ./src:/app/src
+      # 技能指导文档（autoflow_get_skill 拉取源）：本地改 skills/，docker compose restart 即生效
+      - ./skills:/app/skills
+      # 共享态/备份/连接设置持久化（容器重启不丢；WebUI 生成的 .webui_token 也在这里）
+      - ./data:/data
