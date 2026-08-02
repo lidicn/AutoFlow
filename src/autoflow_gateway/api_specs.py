@@ -18,6 +18,7 @@ kind 取值：
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -78,164 +79,24 @@ class ApiSpec:
 
 # ── 单一真相源：所有 API 能力在此登记一次 ────────────────────────────────
 # 豆包对话中枢（NR d5a38c4777f84f35）已自带按 人设+场景 的对话记忆。
-API_SPECS: list[ApiSpec] = [
-    ApiSpec(
-        name="llm_doubao_chat",
-        title="豆包大模型对话",
-        kind="http_api",
-        url="http://<NAS_IP>:1880/llm/chat",
-        method="POST",
-        extract="payload.reply",
-        params={
-            "user_msg": Param("user_msg", required=True, desc="用户消息内容"),
-            "user": Param("user", required=False, default="大佬",
-                          desc="对话人设：大佬/凯文/爱美丽"),
-            "scenario": Param("scenario", required=False, default="书房",
-                              desc="场景标签，影响记忆隔离与语气（中枢按 人设+场景 存对话历史）"),
-            "model": Param("model", required=False, default="doubao", desc="模型名"),
-        },
-        description="调用豆包中枢生成中文回复（闲聊/提醒/总结/文生图描述等）。网关自动拼装请求体、调用、提取 reply，"
-                    "agent 完全不接触 URL/鉴权/JSON 解析。返回 reply 字段（msg.payload.reply）供后续 提取/调用子流程 复用。",
-        notes=(
-            "底层走家中豆包中枢（NR d5a38c4777f84f35，已自带按 人设+场景 的对话记忆）。"
-            "调用后 reply 在 msg.payload.reply，例：提取: 回复 = payload.reply → 调用子流程: demo_notify(text=`回复`)。"
-            "kind=http_api 由编译器内联为 change(设参)→http request→(reply 落在 msg.payload)，无需 NR 子流程定义。"
-        ),
-    ),
+def _load_api_specs() -> list[ApiSpec]:
+    """从 data/api_specs.json 加载 API 能力声明（数据/代码分离）。
 
-    ApiSpec(
-        name="llm_doubao_say",
-        title="豆包对话并语音播报",
-        kind="link_out",
-        url="http://<NAS_IP>:1880/llm/chat",
-        method="POST",
-        extract="payload.reply",
-        entry_link_id="af_apisay_in",
-        nr_downstream_link_id="b595563939283231",  # TTS 队列入口
-        nr_assemble="{'text': payload.reply, 'room': payload.scenario, 'level': '一般'}",
-        params={
-            "user_msg": Param("user_msg", required=True, desc="用户消息内容"),
-            "user": Param("user", required=False, default="大佬", desc="对话人设：大佬/凯文/爱美丽"),
-            "scenario": Param("scenario", required=False, default="书房", desc="场景标签（同时作为 TTS 播报房间）"),
-            "model": Param("model", required=False, default="doubao", desc="模型名"),
-        },
-        description="调用豆包对话并把回复自动语音播报（fire-and-forget）。底层 flow 位于「AutoFlow API」tab，"
-                    "经 link out 进 TTS 队列。agent 无需接触 URL/鉴权，一行即可「聊天+播报」。",
-        notes=(
-            "与 llm_doubao_chat 区别：say 是 fire-and-forget（自动播报、不回传 reply）；"
-            "chat 是 request-response（回传 reply 供 提取/链式调用）。两者都走家中豆包中枢。"
-            "entry_link_id=af_apisay_in 指向「AutoFlow API」tab 内的 llm_doubao_say 入口；"
-            "该入口及后端 http/组装/link out 链由 api_specs.build_nr_tab_flows 从本 spec 自动生成，"
-            "不再手搓（避免 网关注册 与 NR flow 两处不一致）。"
-        ),
-    ),
+    代码只保留 ApiSpec 结构与派生逻辑；具体能力清单是数据，存于
+    src/autoflow_gateway/data/api_specs.json（占位符，无密钥，进版本库）。
+    """
+    path = os.path.join(os.path.dirname(__file__), "data", "api_specs.json")
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    specs: list[ApiSpec] = []
+    for d in raw:
+        params = {k: Param(**pv) for k, pv in (d.get("params") or {}).items()}
+        rest = {k: v for k, v in d.items() if k != "params"}
+        specs.append(ApiSpec(params=params, **rest))
+    return specs
 
-    ApiSpec(
-        name="llm_doubao_image",
-        title="豆包文生图",
-        kind="http_api",
-        url="http://<NAS_IP>:1880/llm/image",
-        method="POST",
-        extract="payload.image_url",
-        params={
-            "prompt": Param("prompt", required=True,
-                            desc="图像生成提示词（画面描述，如 '一只赛博朋克风格的猫'）"),
-        },
-        description="调用豆包中枢生成图片，返回图片 URL（规整进 msg.payload.reply）。网关自动拼装请求体并提取 image_url，"
-                    "agent 不接触 URL/鉴权。例：调用子流程: llm_doubao_image(prompt=`一只赛博朋克风格的猫`) "
-                    "→ 提取: 图片链接 = payload.reply。",
-        notes=(
-            "底层走家中豆包中枢（NR d5a38c4777f84f35）的 /llm/image 端点。"
-            "中枢把入参 body.prompt 作为提示词（缺省 '一只可爱的猫'），响应体 {image_url}；"
-            "网关把 image_url 规整进 msg.payload.reply，与对话类能力返回值位置一致。"
-            "kind=http_api 由编译器内联为 change(设参)→http request→(image_url 落在 msg.payload.reply)，无需 NR 子流程。"
-        ),
-    ),
 
-    ApiSpec(
-        name="llm_doubao_vision",
-        title="豆包图生文（视觉理解）",
-        kind="http_api",
-        url="http://<NAS_IP>:1880/llm/vision",
-        method="POST",
-        extract="payload.reply",
-        params={
-            "prompt": Param("prompt", required=True,
-                            desc="针对图片的提问/指令（如 '描述这张图'、'图里有几只猫'）"),
-            "image": Param("image", required=True,
-                           desc="图片来源：http(s) URL，或 base64 字符串（中枢自动加 data:image/jpeg;base64, 前缀）"),
-            "model": Param("model", required=False, default="doubao",
-                           desc="视觉模型名（中枢缺省 'doubao'）"),
-        },
-        description="调用豆包中枢做视觉理解（图生文），返回文字描述（msg.payload.reply）。"
-                    "网关自动拼装 {prompt, image, model} 请求体并提取 reply，agent 不接触 URL/鉴权。"
-                    "例：调用子流程: llm_doubao_vision(prompt=`描述这张图`, image=`https://...`) "
-                    "→ 提取: 回复 = payload.reply。",
-        notes=(
-            "底层走家中豆包中枢（NR d5a38c4777f84f35）的 /llm/vision 端点。"
-            "中枢编排：body.prompt（缺省 '描述这张图片'）、body.image（URL 或 base64）、body.model（缺省 'doubao'）→ "
-            "POST doubao2api 视觉接口，响应体 {reply}；网关把 reply 规整进 msg.payload.reply。"
-            "kind=http_api 由编译器内联为 change(设参)→http request→(reply 落在 msg.payload.reply)，无需 NR 子流程。"
-        ),
-    ),
-
-    ApiSpec(
-        name="llm_caiyun_weather",
-        title="彩云天气",
-        kind="link_out",
-        url="https://api.caiyunapp.com/v2.7/<CAIYUN_TOKEN>/<CAIYUN_LON>,<CAIYUN_LAT>/weather?alert=true",
-        method="GET",
-        extract="payload.result",
-        entry_link_id="af_weather_in",
-        nr_tab=True,
-        nr_out_links=[],
-        params={},  # 坐标/密钥经 <CAIYUN_TOKEN>/<CAIYUN_LON>,<CAIYUN_LAT> 占位，部署时替换
-        description="查询彩云天气（默认坐标占位，含预警 alert=true）。返回 result 对象"
-                    "（实时温度/天气/未来小时与每日预报/预警）落在 msg.payload.reply。",
-        notes=(
-            "GET 接口、无请求体。网关 AutoFlow API tab 后端做「必填校验 + HTTP 状态错误处理」，"
-            "result 经 link out 转发（用户可接 debug 观测或接下游）。黑箱可 调用子流程: llm_caiyun_weather() 触发。"
-            "⚠️ URL 内 <CAIYUN_TOKEN>/<CAIYUN_LON>,<CAIYUN_LAT> 均为占位符，部署前需替换为你的彩云 token 与坐标。"
-        ),
-    ),
-
-    ApiSpec(
-        name="anysearch_batch",
-        title="AnySearch 资讯搜索",
-        kind="link_out",
-        url="https://api.anysearch.com/mcp",
-        method="POST",
-        extract="payload.result",
-        entry_link_id="af_anysearch_in",
-        nr_tab=True,
-        nr_headers={
-            "Authorization": "Bearer <ANYSEARCH_API_KEY>",
-            "Content-Type": "application/json",
-        },
-        # JSON-RPC 信封：把 keywords(逗号分隔) 展开成多个查询（各加" 最新资讯"），封进 batch_search
-        nr_body_template=(
-            r"{'jsonrpc':'2.0','id':1,'method':'tools/call',"
-            r"'params':{'name':'batch_search',"
-            r"'arguments':{'queries':"
-            r'$split(payload.keywords, /\s*,\s*/)'
-            r".{'query': $ & ' 最新资讯', 'max_results': (payload.max_results or 5)}}}}"
-        ),
-        nr_out_links=[],
-        params={
-            "keywords": Param("keywords", required=True,
-                              desc="要搜索的关键词，逗号分隔（如 'mac mini m5, 小米智能存储, 苹果眼镜'）"),
-            "max_results": Param("max_results", required=False, default=5,
-                                 desc="每个词返回条数（默认 5，anysearch 上限 5）"),
-        },
-        description="调用 AnySearch MCP 批量搜索资讯。keywords 逗号分隔，自动展开为多个查询"
-                    "（各加'最新资讯'）。返回 result 落在 msg.payload.reply。",
-        notes=(
-            "POST JSON-RPC 到 api.anysearch.com/mcp，Bearer 鉴权（<ANYSEARCH_API_KEY> 占位，部署前替换）；"
-            "网关 tab 后端自动构造信封 + 校验必填 + HTTP 错误处理。"
-            "黑箱可 调用子流程: anysearch_batch(keywords=`mac mini m5, 苹果眼镜`)。"
-        ),
-    ),
-]
+API_SPECS = _load_api_specs()
 
 
 def get_api_spec(name: str) -> Optional[ApiSpec]:

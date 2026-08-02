@@ -1,0 +1,409 @@
+[
+  {
+    "name": "demo_notify",
+    "title": "示例通知（link_out 演示）",
+    "call": {
+      "type": "link_out",
+      "entry_link_id": "b595563939283231"
+    },
+    "params": {
+      "text": {
+        "name": "text",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "通知文本（必填）"
+      },
+      "room": {
+        "name": "room",
+        "required": false,
+        "default": "default",
+        "type": "str",
+        "enum": null,
+        "desc": "通知房间；default=书房+客厅。取值见 notes。"
+      },
+      "level": {
+        "name": "level",
+        "required": false,
+        "default": "一般",
+        "type": "str",
+        "enum": [
+          "一般",
+          "重要",
+          "警告"
+        ],
+        "desc": "音量/重要档位：一般30%/重要50%/警告80%（与 volume 二选一）"
+      },
+      "volume": {
+        "name": "volume",
+        "required": false,
+        "default": null,
+        "type": "int",
+        "enum": null,
+        "desc": "手动音量 0-100，优先级高于 level"
+      },
+      "priority": {
+        "name": "priority",
+        "required": false,
+        "default": 3,
+        "type": "int",
+        "enum": null,
+        "desc": "优先级 1 最高，强制全屋并跳过夜间/过期"
+      },
+      "mode": {
+        "name": "mode",
+        "required": false,
+        "default": "announce",
+        "type": "str",
+        "enum": [
+          "announce",
+          "command"
+        ],
+        "desc": "announce=播报文本；command=执行文本指令"
+      },
+      "message": {
+        "name": "message",
+        "required": false,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "command 模式的指令文本"
+      }
+    },
+    "description": "【示例子流程，非产品功能】仅用于演示『调用子流程 → 生成 change(设参) + link out』的 link_out 编译路径。entry_link_id 为占位 id，需用户自备真实下游入口（或改用 bark_push / anysearch 等教学导入子流程）。",
+    "notes": "【示例】参数形状与历史 tts_speak 完全一致，以便既有测试/golden fixture 经机械重命名即可继续作为 link_out 编译路径的回归基线。生产请改用 imported 子流程或教学导入。room 取值：default / 客厅 / 房间 / 卧室 / 书房 / 卫生间 / 主卧室 / 主卧室浴室 / 全屋。",
+    "param_style": "payload",
+    "positional": null,
+    "source": "managed"
+  },
+  {
+    "name": "bark_push",
+    "title": "Bark 推送(iPhone 通知)",
+    "call": {
+      "type": "subflow",
+      "subflow_id": "b0bbc86abb2172a5"
+    },
+    "params": {
+      "title": {
+        "name": "title",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "通知标题"
+      },
+      "body": {
+        "name": "body",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "通知正文"
+      },
+      "bark_level": {
+        "name": "bark_level",
+        "required": false,
+        "default": null,
+        "type": "str",
+        "enum": [
+          "active",
+          "timeSensitive",
+          "critical"
+        ],
+        "desc": "重要性：critical 可绕过 iOS 专注/摘要"
+      },
+      "bark_sound": {
+        "name": "bark_sound",
+        "required": false,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "提示音名，如 minuet"
+      },
+      "bark_url": {
+        "name": "bark_url",
+        "required": false,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "点击通知打开的 URL"
+      },
+      "bark_group": {
+        "name": "bark_group",
+        "required": false,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "分组（同组通知互相覆盖）"
+      },
+      "bark_copy": {
+        "name": "bark_copy",
+        "required": false,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "复制按钮文本"
+      },
+      "bark_isArchive": {
+        "name": "bark_isArchive",
+        "required": false,
+        "default": null,
+        "type": "bool",
+        "enum": null,
+        "desc": "是否存档（不自动清除）"
+      },
+      "bark_icon": {
+        "name": "bark_icon",
+        "required": false,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "图标 URL"
+      },
+      "bark_badge": {
+        "name": "bark_badge",
+        "required": false,
+        "default": null,
+        "type": "int",
+        "enum": null,
+        "desc": "角标数字"
+      },
+      "bark_volume": {
+        "name": "bark_volume",
+        "required": false,
+        "default": null,
+        "type": "int",
+        "enum": null,
+        "desc": "音量 0-100"
+      },
+      "bark_autoCopy": {
+        "name": "bark_autoCopy",
+        "required": false,
+        "default": null,
+        "type": "bool",
+        "enum": null,
+        "desc": "自动复制"
+      }
+    },
+    "description": "经 NAS 自建 bark-server 推送 iPhone 通知（破微信会话窗口死局，不需科学上网、不受 Tailscale 本地推送判定影响）。调用方传 title+body，可选 level/sound/url/group 等。",
+    "notes": "subflow_id=b0bbc86abb2172a5 指向 NR 上手动创建的 Bark 子流程，其 env 内置 BARK_SERVER/BARK_KEY。⚠️ 该子流程需在【目标实例】手动创建后回填 id；黑箱不靠 API 推子流程定义（侧栏不显示）。param_style=flat → 入参平铺到 msg.title / msg.body / msg.bark_* 供子流程读取。",
+    "param_style": "flat",
+    "positional": [
+      "title",
+      "body"
+    ],
+    "source": "managed"
+  },
+  {
+    "name": "history_state_at",
+    "title": "历史状态查询（某时刻的值）",
+    "call": {
+      "type": "subflow",
+      "subflow_id": "af_hist_state_at"
+    },
+    "params": {
+      "entity": {
+        "name": "entity",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "实体id（建议先用 resolve_entity 把友好名解析成 entity_id）"
+      },
+      "at": {
+        "name": "at",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "时刻，自然语言：昨晚23:12 / 昨天11:30 / 今天08:00 / 8h前 / 2026-07-19T23:12 / ISO"
+      },
+      "attribute": {
+        "name": "attribute",
+        "required": false,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "取哪个属性（如 temperature/设定温度/亮度）；缺省取 state"
+      }
+    },
+    "description": "查询实体在『某个过去时刻』的状态/属性值。例：空调昨晚23:12设定几度？门昨天11:30是什么状态？返回归一化答案对象到 msg.payload，下游用『提取: <字段> = payload.x』或『分支:』读取。",
+    "notes": "返回 msg.payload = {found:bool, entity, at_iso, value, attribute, unit?, nearest_ts?}。value 为最近邻采样值；found=false 表示窗口内无任何记录。param_style=flat → 入参平铺到 msg.entity / msg.at / msg.attribute。subflow_id=af_hist_state_at（已部署于 NR，Task #272）。",
+    "param_style": "flat",
+    "positional": [
+      "entity"
+    ],
+    "source": "managed"
+  },
+  {
+    "name": "history_occurred",
+    "title": "历史是否发生（区间内状态变化/达到某态）",
+    "call": {
+      "type": "subflow",
+      "subflow_id": "af_hist_occurred"
+    },
+    "params": {
+      "entity": {
+        "name": "entity",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "实体id"
+      },
+      "start": {
+        "name": "start",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "区间起点，自然语言：昨天11:00 / 2026-07-19T11:00 / 8h前"
+      },
+      "end": {
+        "name": "end",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "区间终点，自然语言：昨天12:00 / 今天08:00 / 现在"
+      },
+      "state": {
+        "name": "state",
+        "required": false,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "目标状态（如 on/off/开/26）；缺省=发生过任意变化即算"
+      },
+      "attribute": {
+        "name": "attribute",
+        "required": false,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "针对某属性（如 temperature）的变化；缺省看 state"
+      }
+    },
+    "description": "查询实体在『时间区间』内是否发生过某状态变化或达到某状态。例：门昨天11-12点开过没？昨晚空调有没有被调到26度以上？返回归一化答案到 msg.payload。",
+    "notes": "返回 msg.payload = {occurred:bool, entity, start_iso, end_iso, count, state?, events:[{ts,from,to}], first_ts?, last_ts?}。state 缺省：区间内有任意状态变化即 occurred=true；给定 state：出现过该状态才 true。subflow_id=af_hist_occurred（已部署于 NR，Task #272）。",
+    "param_style": "flat",
+    "positional": [
+      "entity"
+    ],
+    "source": "managed"
+  },
+  {
+    "name": "history_duration",
+    "title": "历史处于某状态的总时长",
+    "call": {
+      "type": "subflow",
+      "subflow_id": "af_hist_duration"
+    },
+    "params": {
+      "entity": {
+        "name": "entity",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "实体id"
+      },
+      "start": {
+        "name": "start",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "区间起点，自然语言"
+      },
+      "end": {
+        "name": "end",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "区间终点，自然语言"
+      },
+      "state": {
+        "name": "state",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "目标状态（如 on/播放中/开）；统计处在该状态的累计时长"
+      }
+    },
+    "description": "统计实体在『时间区间』内处于某状态的累计时长。例：昨天电视机开启时长？昨晚空调运行了几小时？返回归一化答案到 msg.payload。",
+    "notes": "返回 msg.payload = {total_seconds, total_human(如 '2小时13分'), entity, start_iso, end_iso, state, ratio(占比0-1)}。按状态段首尾时间差累计；状态在窗口边界处用边界裁剪。subflow_id=af_hist_duration（已部署于 NR，Task #272）。",
+    "param_style": "flat",
+    "positional": [
+      "entity"
+    ],
+    "source": "managed"
+  },
+  {
+    "name": "history_aggregate",
+    "title": "历史聚合统计（能量/计数/均值/最值）",
+    "call": {
+      "type": "subflow",
+      "subflow_id": "af_hist_aggregate"
+    },
+    "params": {
+      "entity": {
+        "name": "entity",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "实体id"
+      },
+      "start": {
+        "name": "start",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "区间起点，自然语言"
+      },
+      "end": {
+        "name": "end",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "区间终点，自然语言"
+      },
+      "metric": {
+        "name": "metric",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": [
+          "energy",
+          "count",
+          "mean",
+          "min",
+          "max",
+          "sum"
+        ],
+        "desc": "energy=耗电(kWh，走 statistics)；count=状态变化次数；mean/min/max/sum=数值属性统计"
+      },
+      "attribute": {
+        "name": "attribute",
+        "required": false,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "数值属性名（energy 默认 kWh；mean/min/max/sum 必填数值属性）"
+      }
+    },
+    "description": "对实体在『时间区间』做聚合统计。例：昨晚23:00-今早7:00空调耗几度电？本周睡眠时长？过去24h平均温度？返回归一化答案到 msg.payload。",
+    "notes": "返回 msg.payload = {value, unit, entity, start_iso, end_iso, metric, attribute}。⚠️ energy 必须走 statistics_during_period（history 取不到 kWh 累计）；其余走 history period + 计算。count 不要求 attribute（统计 state 变化次数）。subflow_id=af_hist_aggregate（已部署于 NR，Task #272）。",
+    "param_style": "flat",
+    "positional": [
+      "entity"
+    ],
+    "source": "managed"
+  }
+]

@@ -11,7 +11,11 @@ __pycache__/
 .pytest_cache/
 
 # 运行时数据（部署账本、待确认、备份等）
-data/
+# ★必须写成 `/data/` 锚定仓库根。曾写作 `data/`（无斜杠）→ git 递归匹配任意层级，
+#   把 src/autoflow_gateway/data/（发布版内置 spec 数据）一并排除；而且目录级排除后
+#   git 不再遍历该目录，下方 `!src/autoflow_gateway/data/**.json` 白名单会【完全失效】，
+#   导致发布包缺 api_specs.json，安装后 loader 直接 FileNotFoundError（#708 同类）。
+/data/
 *.log
 
 # 工作记忆（含 MCP 身份码等明文，切勿提交）
@@ -30,6 +34,11 @@ nssm.exe
 # ===== AutoFlow 含密钥/产物的散落文件（不进版本库）=====
 # 真实 flow 导出（含 HA JWT / Basic Auth 明文密码 / NAS IP）
 *.json
+# 发布版内置 spec 数据（占位符，无密钥，必须进版本库）
+# ★白名单生效前提：父目录未被目录级规则排除（见上方 /data/ 注释）
+!src/autoflow_gateway/data/api_specs.json
+!src/autoflow_gateway/data/subflows/*.json
+!src/autoflow_gateway/data/subflows/nr_defs/*.json
 # 历史备份目录
 backups/
 nr_backup/

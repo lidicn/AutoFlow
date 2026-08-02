@@ -95,6 +95,24 @@ def _disk_py_files():
     return sorted(found)
 
 
+def _disk_json_files():
+    """磁盘上 src/ 下所有 .json 的仓库相对路径（正斜杠）。
+
+    ★与 .py 扫描不同，这里【不套用】`nr_subflows/history/` 豁免：
+      该目录整体被忽略，但 `subflows_built.json` 是白名单放行的运行时依赖，
+      必须入库（ensure_history_subflow 要读它）。
+    """
+    found = []
+    for dirpath, _dirnames, filenames in os.walk(_SRC_ABS):
+        rel_dir = os.path.relpath(dirpath, _REPO_ROOT).replace(os.sep, "/")
+        if "__pycache__" in rel_dir:
+            continue
+        for fn in filenames:
+            if fn.endswith(".json"):
+                found.append(f"{rel_dir}/{fn}")
+    return sorted(found)
+
+
 def _tracked_paths():
     """master tree ∪ 当前 index 的已跟踪路径集合。"""
     tracked = set()
@@ -124,6 +142,38 @@ def test_all_src_modules_are_tracked():
     assert not missing, (
         "以下源码文件在磁盘上但既未进 master、也未被 git add —— "
         "从 master clone 后会缺失（#708 同类缺陷）：\n  "
+        + "\n  ".join(missing)
+    )
+
+
+@pytest.mark.skipif(not _is_git_repo(), reason="非 git 工作副本，跳过完整性校验")
+def test_runtime_data_files_are_tracked():
+    """src/ 下的 .json 是**运行时硬依赖**，未入库 = clone 后启动即崩（#708 同类）。
+
+    2026-08-02 实战踩坑：R1 把 API_SPECS 从代码剥离到
+    `data/api_specs.json`，`api_specs.py` 导入时即 open() 该文件。而 .gitignore
+    第 14 行写的是 `data/`（无斜杠前缀）→ git 递归匹配到
+    `src/autoflow_gateway/data/`，把它整个目录排除；更阴的是**目录级排除后 git
+    不再遍历该目录**，导致 `!src/autoflow_gateway/data/api_specs.json` 白名单
+    完全失效。全量测试仍然全绿（跑的是工作树，文件在磁盘上），但发布包里没有
+    这个 JSON —— 与 #708 一模一样的「工作树全绿 ≠ master 可用」。
+
+    修法是把规则锚定成 `/data/`；这条用例是防止它再次漂移的门禁。
+    """
+    tracked = _tracked_paths()
+    if not tracked:
+        pytest.skip("无法从 git 读取跟踪列表（可能是 tarball 导出）")
+
+    disk = _disk_json_files()
+    if not disk:
+        pytest.skip("src/ 下无 .json 数据文件")
+
+    missing = [p for p in disk if p not in tracked]
+    assert not missing, (
+        "以下数据文件在磁盘上但既未进 master、也未被 git add —— "
+        "从 master clone 后运行时读不到，启动即 FileNotFoundError。\n"
+        "常见根因：.gitignore 有目录级排除（如 `data/`）压过了文件级白名单，\n"
+        "用 `git check-ignore -v <路径>` 排查，命中的规则行若不以 `!` 开头即被忽略：\n  "
         + "\n  ".join(missing)
     )
 
