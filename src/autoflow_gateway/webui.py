@@ -590,39 +590,52 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     async def set_subflow_status(request: Request):
         """变更子流程状态（active / disabled / pending_review）。
 
-        网关预置（managed）子流程状态由 seed 管理，拒绝手动变更（保护系统完整性，
-        避免误禁用 bark_push 等导致 DSL 编译失败）。返回 {ok, key, status}。"""
+        #711 起：managed 子流程（含 history_* / bark_push）也允许手动启停 ——
+        「禁用」是历史子流程唯一的治理手段（它们不允许删除，见 delete 端点），
+        原先一刀切 403 导致这类条目在 WebUI 上完全不可操作。禁用后 DSL 编译器
+        会给出「子流程已停用」的明确错误，属预期行为，不是数据损坏。
+        返回 {ok, key, status}。"""
         key = request.path_params.get("key")
         b = await _body(request)
         new_status = (b.get("status") or "").strip().lower()
         if new_status not in ("active", "disabled", "pending_review"):
             return _js({"ok": False, "error": "status 须为 active/disabled/pending_review"}, 400)
         meta = await asyncio.to_thread(gw.tasks.get_subflow_meta, key)
-        # 网关预置的 subflow 实例型（如 bark_push）由 seed 管理，禁止手动变更，
-        # 避免误禁用导致 DSL 编译失败；link_out 型能力允许手动启停（可管理）。
-        if meta and meta.get("source_type") == "managed" and (meta.get("kind") or "subflow") != "link_out":
-            return _js({"ok": False, "error": "网关预置子流程（subflow 实例型）状态由系统管理，不可手动变更"}, 403)
+        if not meta:
+            return _js({"ok": False, "error": f"子流程不存在: {key}"}, 404)
         r = await asyncio.to_thread(gw.tasks.set_subflow_status, key, new_status)
         if not r["ok"]:
             return _js({"ok": False, "error": r.get("error")}, 400)
         return _js({"ok": True, "key": key, "status": new_status})
 
     async def delete_subflow_endpoint(request: Request):
-        """注销一条子流程：从 subflow_registry 移除；kind=subflow 且有 NR 实例时一并
-        定向删除 NR 子流程（全量过滤 + allow_partial，不波及别处 flow）。
+        """注销一条子流程。#711 起按「谁建的谁负责」区分 NR 侧处置：
 
-        保护：网关预置（managed）子流程不可经此删除（避免破坏系统能力，应改用「停用」）。
-        返回 {ok, key, nr_removed} 或错误。"""
+        - `history_*`（DSL 内置原语）：**禁止删除**，只能「禁用」。删了编译器就报
+          「未注册子流程」，属自伤；且它们会被 ensure_history_subflow 再装回来。
+        - managed（网关自建，如 bark_push）：删注册表 **并** 定向删掉 NR 子流程实例
+          —— 东西是网关造的，网关负责收尾，不留孤儿。
+        - imported（用户自己在 NR 里建的、被网关自省导入）：**只删注册表条目**，
+          NR 上的子流程原样保留。网关只是「取消登记」，无权删用户的东西
+          （原实现会连用户的 NR 子流程一起删，是越权，已修）。
+
+        返回 {ok, key, nr_removed, nr_kept}。"""
+        from .subflows import HISTORY_REGISTRY_KEYS
         key = request.path_params.get("key")
         meta = await asyncio.to_thread(gw.tasks.get_subflow_meta, key)
         if not meta:
             return _js({"ok": False, "error": f"子流程不存在: {key}"}, 404)
-        # 网关预置由 seed 管理，禁止手动删除（与 set_subflow_status 同策略）
-        if meta.get("source_type") == "managed":
-            return _js({"ok": False, "error": "网关预置子流程不可删除，请改用「停用」"}, 403)
-        # kind=subflow 且有 NR 实例 → 先删 NR 子流程；若失败则不碰注册表（避免孤儿）
+        if key in HISTORY_REGISTRY_KEYS:
+            return _js({"ok": False,
+                        "error": "历史查询子流程是 DSL 内置能力，不可删除；"
+                                 "如需停用请使用「禁用」"}, 403)
+        gateway_built = meta.get("source_type") == "managed"
+        has_nr_inst = ((meta.get("kind") or "subflow") == "subflow"
+                       and bool(meta.get("nr_subflow_id")))
         nr_removed = False
-        if (meta.get("kind") or "subflow") == "subflow" and meta.get("nr_subflow_id"):
+        nr_kept = False
+        if has_nr_inst and gateway_built:
+            # 网关自建 → 一并删 NR 实例；失败则不碰注册表（避免注册表干净、NR 留孤儿）
             try:
                 res = await asyncio.to_thread(
                     gw.nr.delete_flow, meta["nr_subflow_id"], True)
@@ -630,10 +643,40 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             except Exception as e:
                 return _js({"ok": False,
                             "error": f"NR 子流程实例删除失败（注册表未动）：{e}"}, 502)
+        elif has_nr_inst:
+            nr_kept = True  # imported：保留用户在 NR 上的子流程
         r = await asyncio.to_thread(gw.tasks.delete_subflow, key)
         if not r["ok"]:
             return _js({"ok": False, "error": r.get("error")}, 400)
-        return _js({"ok": True, "key": key, "nr_removed": nr_removed})
+        return _js({"ok": True, "key": key,
+                    "nr_removed": nr_removed, "nr_kept": nr_kept})
+
+    async def ensure_subflow_endpoint(request: Request):
+        """手动安装/修复网关自有子流程到 NR（#711 的「安装到 NR」按钮）。
+
+        目前覆盖 4 个 history_* —— 它们是 DSL 内置原语，但 NR 侧实例只在部署含
+        af_hist_* 的 flow 时才会被 ensure 自动装。这里提供一个「不部署也能提前装」
+        的入口，也用于用户在 NR 里手删后一键修复。allow_prod=True（人手动触发）。
+        幂等：已存在即 no-op。返回 {ok, key, created, exists, rebuilt}。"""
+        from .subflows import HISTORY_REGISTRY_KEYS, ensure_history_subflow
+        key = request.path_params.get("key")
+        meta = await asyncio.to_thread(gw.tasks.get_subflow_meta, key)
+        if not meta:
+            return _js({"ok": False, "error": f"子流程不存在: {key}"}, 404)
+        if key not in HISTORY_REGISTRY_KEYS:
+            return _js({"ok": False,
+                        "error": "仅历史查询子流程（history_*）支持一键安装到 NR；"
+                                 "用户导入的子流程请在 Node-RED 中自行维护"}, 400)
+        client = getattr(gw.nr, "client", None)
+        if client is None:
+            return _js({"ok": False, "error": "NR 未连接，无法安装"}, 503)
+        try:
+            res = await asyncio.to_thread(ensure_history_subflow, client, True)
+        except Exception as e:
+            return _js({"ok": False, "error": f"安装失败：{e}"}, 502)
+        return _js({"ok": True, "key": key,
+                    "created": res.get("created"), "exists": res.get("exists"),
+                    "rebuilt": res.get("rebuilt"), "detail": res})
 
     # ── 版本同步已剥离为独立 CLI（C3 / B8）──
     # 后端逻辑保留在 autoflow_gateway/sync.py，由命令行脚本调用；
@@ -700,6 +743,45 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         rid = request.path_params["id"]
         ok = device_guard.delete(rid)
         return _js({"ok": ok}, 200 if ok else 404)
+
+    # ── 设备目录 / 实体搜索（安全闸用，与连接配置解耦，不随测试连接触发）──
+    async def catalog_view(request: Request):
+        """GET /api/catalog → 设备目录摘要 {total, freshness, last_import_at}。"""
+        cat = gw.state.get_device_catalog()
+        ents = cat.get("entities", {}) or {}
+        fresh = cat.get("freshness", "") or ""
+        return _js({
+            "ok": True,
+            "total": len(ents),
+            "freshness": fresh,
+            "last_import_at": fresh,  # catalog 唯一时间戳即最近导入时刻
+        })
+
+    async def catalog_import(request: Request):
+        """POST /api/catalog/import → 全量刷新设备目录（仅用户显式点击）。不触发部署。"""
+        try:
+            res = await gw.refresh_catalog(full=True)
+        except Exception as e:
+            return _js({"ok": False, "error": f"导入失败: {e}"}, status=500)
+        return _js({
+            "ok": True,
+            "total": res.get("entity_total", 0),
+            "imported_at": res.get("freshness", ""),
+            "mode": res.get("mode", "full"),
+            "added": res.get("added", 0),
+            "changed": res.get("changed", 0),
+            "gone_marked": res.get("gone_marked", 0),
+        })
+
+    async def entities_view(request: Request):
+        """GET /api/entities?keyword=&limit=20 → 中文/英文模糊搜 entity_id/friendly_name/area。"""
+        kw = (request.query_params.get("keyword", "") or "").strip()
+        try:
+            limit = int(request.query_params.get("limit", "20"))
+        except (TypeError, ValueError):
+            limit = 20
+        res = await gw.list_entities(keyword=kw, limit=limit)
+        return _js({"ok": True, **res})
 
     async def audit_list(request: Request):
         try:
@@ -787,6 +869,10 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/device-guard", device_guard_list, methods=["GET"]),
         Route("/api/device-guard", device_guard_upsert, methods=["POST"]),
         Route("/api/device-guard/{id}", device_guard_delete, methods=["DELETE"]),
+        # 设备目录（安全闸用，连接配置解耦）
+        Route("/api/catalog", catalog_view, methods=["GET"]),
+        Route("/api/catalog/import", catalog_import, methods=["POST"]),
+        Route("/api/entities", entities_view, methods=["GET"]),
         Route("/api/audit", audit_list, methods=["GET"]),
         Route("/api/first-run", first_run_state, methods=["GET"]),
         Route("/api/first-run", first_run_accept, methods=["POST"]),
@@ -826,6 +912,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/subflows", list_subflows, methods=["GET"]),
         Route("/api/subflows/import", import_subflow, methods=["POST"]),
         Route("/api/subflows/{key}/status", set_subflow_status, methods=["PATCH"]),
+        Route("/api/subflows/{key}/ensure", ensure_subflow_endpoint, methods=["POST"]),
         Route("/api/subflows/{key}", delete_subflow_endpoint, methods=["DELETE"]),
 
         # 静态

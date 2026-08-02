@@ -116,24 +116,99 @@ class TestSubflowWebUI(unittest.TestCase):
         names = {p["name"] for p in m["input_schema"]}
         self.assertEqual(names, {"device", "room"})
 
-    def test_set_status_managed_linkout_allowed_subflow_forbidden(self):
-        # seed 已在 Gateway.__init__ 完成（9 条 managed）
+    # ── #711：启停 / 删除策略 ──
+    # 旧策略：managed 一律禁止启停与删除（403）→ 历史子流程在 WebUI 上完全不可操作。
+    # 新策略：
+    #   启停：全部允许（「禁用」是历史子流程唯一的治理手段）
+    #   删除：history_* 禁止（DSL 内置原语）；managed 自建 → 连 NR 实例一起删；
+    #         imported → 只取消登记，NR 上的子流程保留（网关无权删用户的东西）
+    def test_set_status_allowed_for_managed_and_history(self):
         lst = self.client.get("/api/subflows").json()["subflows"]
         linkout = next(s for s in lst if s["kind"] == "link_out")
-        subflow = next(s for s in lst
-                       if s["kind"] == "subflow" and s["source_type"] == "managed")
-        # managed subflow 实例型：系统管理，拒绝手动变更 → 403
-        r1 = self.client.patch(
-            f"/api/subflows/{subflow['key']}/status", json={"status": "disabled"})
-        self.assertEqual(r1.status_code, 403)
-        # managed link_out 型能力：允许手动启停（可管理）→ 200
+        # 历史子流程（managed subflow 实例型）现在允许禁用/启用
+        for key in ("history_duration", "bark_push"):
+            r = self.client.patch(f"/api/subflows/{key}/status",
+                                  json={"status": "disabled"})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(r.json()["status"], "disabled")
+            r = self.client.patch(f"/api/subflows/{key}/status",
+                                  json={"status": "active"})
+            self.assertEqual(r.status_code, 200, r.text)
+        # link_out 型能力仍可启停
         r2 = self.client.patch(
             f"/api/subflows/{linkout['key']}/status", json={"status": "disabled"})
         self.assertEqual(r2.status_code, 200, r2.text)
-        # 重新启用 → 200
         r3 = self.client.patch(
             f"/api/subflows/{linkout['key']}/status", json={"status": "active"})
         self.assertEqual(r3.status_code, 200, r3.text)
+        # 不存在的 key → 404；非法状态 → 400
+        self.assertEqual(self.client.patch("/api/subflows/nope/status",
+                                           json={"status": "active"}).status_code, 404)
+        self.assertEqual(self.client.patch("/api/subflows/bark_push/status",
+                                           json={"status": "zzz"}).status_code, 400)
+
+    def test_delete_history_forbidden(self):
+        for key in ("history_state_at", "history_occurred",
+                    "history_duration", "history_aggregate"):
+            r = self.client.delete(f"/api/subflows/{key}")
+            self.assertEqual(r.status_code, 403, r.text)
+            self.assertIn("不可删除", r.json()["error"])
+        # 仍在注册表里
+        keys = {s["key"] for s in self.client.get("/api/subflows").json()["subflows"]}
+        self.assertIn("history_duration", keys)
+
+    def test_delete_imported_keeps_nr_instance(self):
+        """用户导入的子流程：只取消登记，绝不删 NR 上的实例。"""
+        calls = []
+        self.gw.nr.delete_flow = lambda fid, force=False: (
+            calls.append(fid) or {"deleted": True})
+        self.client.post("/api/subflows/import", json={
+            "nr_subflow_id": "sf_dummy_99", "key": "my_dummy", "owner": "tester"})
+        r = self.client.delete("/api/subflows/my_dummy")
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertTrue(body["ok"])
+        self.assertFalse(body["nr_removed"])
+        self.assertTrue(body["nr_kept"])
+        self.assertEqual(calls, [])            # ★ 没有碰用户的 NR 子流程
+        keys = {s["key"] for s in self.client.get("/api/subflows").json()["subflows"]}
+        self.assertNotIn("my_dummy", keys)     # 注册表条目已移除
+
+    def test_delete_managed_removes_nr_instance(self):
+        """网关自建的子流程（bark_push）：谁建的谁收尾，NR 实例一并删除。"""
+        calls = []
+        self.gw.nr.delete_flow = lambda fid, force=False: (
+            calls.append(fid) or {"deleted": True})
+        meta = self.gw.tasks.get_subflow_meta("bark_push")
+        r = self.client.delete("/api/subflows/bark_push")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json()["nr_removed"])
+        self.assertFalse(r.json()["nr_kept"])
+        self.assertEqual(calls, [meta["nr_subflow_id"]])
+
+    def test_ensure_endpoint(self):
+        """「安装到 NR」按钮：仅 history_*；其余 400；不存在 404。"""
+        seen = {}
+        import autoflow_gateway.subflows as sf_mod
+        orig = sf_mod.ensure_history_subflow
+        sf_mod.ensure_history_subflow = lambda nr, allow_prod=False: (
+            seen.update(allow_prod=allow_prod) or {"exists": True, "created": False})
+        try:
+            # NRLayer.client 是只读 property（懒建 NRClient，不发网络请求），
+            # ensure 已被 stub 掉，故不需要真实连通的 NR。
+            self.assertIsNotNone(getattr(self.gw.nr, "client", None))
+            r = self.client.post("/api/subflows/history_duration/ensure", json={})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertTrue(r.json()["exists"])
+            self.assertIs(seen["allow_prod"], True)   # 人手动触发 → 放行 prod
+            # 非历史子流程 → 400
+            self.assertEqual(
+                self.client.post("/api/subflows/bark_push/ensure", json={}).status_code, 400)
+            # 不存在 → 404
+            self.assertEqual(
+                self.client.post("/api/subflows/nope/ensure", json={}).status_code, 404)
+        finally:
+            sf_mod.ensure_history_subflow = orig
 
     def test_import_rejects_missing_fields(self):
         # 缺 nr_subflow_id

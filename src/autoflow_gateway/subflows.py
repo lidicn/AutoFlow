@@ -465,6 +465,14 @@ _MANAGED_SUBFLOW_KEYS = (
     "history_duration", "history_aggregate",
 )
 
+# 历史查询子流程在【注册表】里的 key（区别于 HISTORY_SUBFLOW_IDS —— 那是 NR 侧的
+# af_hist_* 子流程 id）。这 4 条是 DSL 语法内置的原语（`调用子流程: history_xxx(...)`），
+# 删掉注册表条目会让编译器直接报「未注册子流程」，故 WebUI 只允许「禁用」不允许「删除」。
+HISTORY_REGISTRY_KEYS = frozenset({
+    "history_state_at", "history_occurred",
+    "history_duration", "history_aggregate",
+})
+
 
 def _env_requirements_for_managed(key: str) -> list:
     """预置子流程的 env 配置变量需求。

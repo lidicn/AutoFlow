@@ -155,6 +155,99 @@ class TestHistorySubflow(unittest.TestCase):
             self.assertEqual(hists[0].get("server"), "e93e1ad9c034e866",
                              f"{sid} 硬编码 server 占位不符预期：{hists[0].get('server')}")
 
+class TestEnsureBeforeNodeGate(unittest.TestCase):
+    """#711：ensure 必须在节点闸门【之前】跑，且要拿到正确的 allow_prod。
+
+    历史 bug：ensure_history_subflow 只挂在 deploy_raw 且写死 allow_prod=False。
+    生产 docker-compose 设 AUTOFLLOW_ENV=prod → 所有 NR 写都要 allow_prod=True →
+    4 个 af_hist_* 永远装不上 → _gate_node_types 把所有历史类 flow 判「节点类型未注册」
+    全拦（MCP propose_dsl history_duration 实测 gate_passed=false）。
+    """
+
+    def setUp(self):
+        import autoflow_gateway.subflows as sf_mod
+        self.sf_mod = sf_mod
+        self._orig = sf_mod.ensure_history_subflow
+        self.calls = []
+        sf_mod.ensure_history_subflow = lambda nr, allow_prod=False: (
+            self.calls.append({"nr": nr, "allow_prod": allow_prod})
+            or {"exists": True, "created": False, "rebuilt": []})
+
+    def tearDown(self):
+        self.sf_mod.ensure_history_subflow = self._orig
+
+    @staticmethod
+    def _stub_self(client="fake-client"):
+        import types
+        return types.SimpleNamespace(nr=types.SimpleNamespace(client=client))
+
+    def _helper(self):
+        from autoflow_gateway.gateway import Gateway
+        return Gateway._ensure_history_subflow_for
+
+    def test_skips_when_flow_has_no_history_nodes(self):
+        res = self._helper()(self._stub_self(),
+                             {"nodes": [{"type": "debug"}]}, True)
+        self.assertEqual(res, {"skipped": "not_used"})
+        self.assertEqual(self.calls, [])
+
+    def test_calls_ensure_with_allow_prod(self):
+        sid = sorted(HISTORY_SUBFLOW_IDS)[0]
+        flow = {"nodes": [{"type": f"subflow:{sid}"}]}
+        res = self._helper()(self._stub_self(), flow, True)
+        self.assertTrue(res.get("exists"))
+        self.assertEqual(len(self.calls), 1)
+        self.assertIs(self.calls[0]["allow_prod"], True)   # ★ prod 也要能装
+        self.assertEqual(self.calls[0]["nr"], "fake-client")
+
+    def test_never_raises_on_ensure_failure(self):
+        """ensure 失败不得抛：后续节点闸门会给出准确的『未注册』错误，语义一致。"""
+        def _boom(nr, allow_prod=False):
+            raise RuntimeError("NR down")
+        self.sf_mod.ensure_history_subflow = _boom
+        sid = sorted(HISTORY_SUBFLOW_IDS)[0]
+        res = self._helper()(self._stub_self(),
+                             {"nodes": [{"type": f"subflow:{sid}"}]}, True)
+        self.assertEqual(res.get("skipped"), "error")
+
+    def test_no_nr_client_is_noop(self):
+        sid = sorted(HISTORY_SUBFLOW_IDS)[0]
+        res = self._helper()(self._stub_self(client=None),
+                             {"nodes": [{"type": f"subflow:{sid}"}]}, True)
+        self.assertEqual(res, {"skipped": "no_nr_client"})
+        self.assertEqual(self.calls, [])
+
+    def test_ensure_precedes_gate_in_all_deploy_paths(self):
+        """顺序不变式的源码级守卫。
+
+        _gate_node_types 实时拉 /flows 判断子流程是否存在 —— 只有『先 ensure 后过闸』
+        才放行。任何一条部署路径把两者写反或漏写 ensure，历史能力就静默失效，
+        且症状是「编译成功但部署被拒」，极难定位。故在此钉死顺序。
+        """
+        from pathlib import Path
+        import re
+        src = (Path(__file__).resolve().parents[1]
+               / "src" / "autoflow_gateway" / "gateway.py").read_text(encoding="utf-8")
+        lines = src.splitlines()
+        # 找出每个方法的起止行，只在同一方法内比较顺序
+        starts = [(i, m.group(1)) for i, l in enumerate(lines)
+                  if (m := re.match(r"    def (\w+)\(", l))]
+        spans = {}
+        for idx, (i, name) in enumerate(starts):
+            end = starts[idx + 1][0] if idx + 1 < len(starts) else len(lines)
+            spans[name] = (i, end)
+        for meth in ("deploy_proposal", "modify_flow", "run_staging_gate",
+                     "deploy_raw", "propose_raw"):
+            self.assertIn(meth, spans, f"方法 {meth} 不存在（重命名后请同步本测试）")
+            lo, hi = spans[meth]
+            body = lines[lo:hi]
+            ens = [i for i, l in enumerate(body) if "_ensure_history_subflow_for(" in l]
+            gate = [i for i, l in enumerate(body) if "self._gate_node_types(" in l]
+            self.assertTrue(ens, f"{meth} 缺少 _ensure_history_subflow_for 调用（#711）")
+            if gate:
+                self.assertLess(min(ens), min(gate),
+                                f"{meth}：ensure 必须在 _gate_node_types 之前")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

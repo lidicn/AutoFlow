@@ -134,6 +134,14 @@ if not _gw_logger.handlers:
     _gw_logger.setLevel(logging.INFO)
     _gw_logger.propagate = False
 
+# 历史查询子流程（af_hist_*）自动安装总开关（#711）。
+# 生产部署 AUTOFLLOW_ENV=prod 时所有 NR 写操作都要 allow_prod=True，而 ensure 原先
+# 写死 False → 4 个 managed 历史子流程在 prod 上永远装不上 → 节点闸门把所有历史类
+# flow 判为「未注册」全拦。装的是网关自有子流程定义（增量 append、幂等、不碰用户
+# flow），故默认放行；设 AUTOFLLOW_HIST_AUTOINSTALL=0 可关掉 agent 路径的自动安装。
+_HIST_AUTOINSTALL = os.environ.get("AUTOFLLOW_HIST_AUTOINSTALL", "1") != "0"
+
+
 def _new_trace_id() -> str:
     return uuid.uuid4().hex[:12]
 
@@ -3119,6 +3127,20 @@ class Gateway:
             except DefenseError as e:
                 return {"ok": False, "error": f"defense: {e}"}
 
+        # ★ 历史查询子流程幂等确保 —— 必须在节点闸门【之前】
+        # #711：ensure_history_subflow 此前只挂在 deploy_raw 且写死 allow_prod=False，
+        # prod 实例上永远不装 → 任何含 subflow:af_hist_* 的 flow 都会被下面的
+        # _gate_node_types 判为「节点类型未注册」直接拒绝，历史查询能力在生产环境
+        # 100% 不可用（MCP propose_dsl history_duration 实测复现 gate_passed=false）。
+        # 这里补齐：人部署 allow_prod=True → prod 也能装，装完再过闸放行。
+        # 失败不抛：装不上时下面的闸门会给出准确的「未注册」错误，语义一致。
+        # 必须无条件执行 —— 节点闸门（下一行）无条件运行，若这里因 dry_run 跳过，
+        # 则 dry_run 校验阶段闸门会把「其实能自动装」的 af_hist_* 误报成未注册，
+        # 卡住白盒历史类 flow 的部署校验。装的是网关自有 managed 子流程，幂等、不碰
+        # 用户 flow，dry_run 里写一次无害（与 run_staging_gate / propose_raw 一致）。
+        self._ensure_history_subflow_for(flow, allow_prod, _tid,
+                                         "deploy_proposal")
+
         # 节点注册表闸门（P0 防御）：未知节点类型直接报错，不让坏 flow 上线
         self._gate_node_types(flow)
 
@@ -4050,24 +4072,15 @@ class Gateway:
         errors = [v for v in validation if v["level"] == "error"]
         warnings = [v for v in validation if v["level"] == "warning"]
 
-        if not dry_run:
-            from .subflows import (
-                ensure_history_subflow, flow_uses_history_subflow,
-            )
-
-            # Step 2.6b：历史查询子流程幂等确保（仿 bark 的 A3 模式）。
-            # 4 个 af_hist_* 子流程的 ensure 与 bark 同策略：活体已存在 → no-op（零风险）；
-            # 仅在缺失时从 subflows_built.json 重建（server 替换成默认 HA server，可移植）。
-            # 仅作用于 staging 实例，allow_prod=False 兜底，prod 环境不写。
-            if flow_uses_history_subflow(flow.get("nodes", [])):
-                try:
-                    _hist_res = ensure_history_subflow(self.nr.client, allow_prod=False)
-                    _slog(_tid, "deploy_raw.history_ensure",
-                          created=_hist_res.get("created"), exists=_hist_res.get("exists"),
-                          rebuilt=_hist_res.get("rebuilt"))
-                except Exception as _he:
-                    # 历史子流程缺只影响历史查询类能力，不阻塞主流程；活体已存在不会触发生成
-                    _slog(_tid, "deploy_raw.history_ensure_err", error=str(_he)[:200])
+        # Step 2.6b：历史查询子流程幂等确保（仿 bark 的 A3 模式）。
+        # 4 个 af_hist_* 子流程的 ensure 与 bark 同策略：活体已存在 → no-op（零风险）；
+        # 仅在缺失时从 subflows_built.json 重建（server 替换成默认 HA server，可移植）。
+        # #711：原先写死 allow_prod=False，AUTOFLLOW_ENV=prod 下永不安装 →
+        # 后续节点闸门把历史类 flow 全判「未注册」。改用 _HIST_AUTOINSTALL。
+        # 必须无条件执行 —— 节点闸门（4284 行）无条件运行，若因 dry_run 跳过则
+        # dry_run 预览阶段闸门会误报 af_hist_* 未注册，卡住白盒历史类 flow 部署校验。
+        # 装的是网关自有 managed 子流程，幂等、不碰用户 flow，dry_run 预览里写一次无害。
+        self._ensure_history_subflow_for(flow, _HIST_AUTOINSTALL, _tid, "deploy_raw")
 
         # Step 2.7: 【D4/G2】link-out 目标校验（部署前捕获指向不存在 link-in 的悬空 link out，
         # 否则运行时报 'Error delivering message to node:undefined' 这类难定位故障）。
@@ -4637,6 +4650,10 @@ class Gateway:
             return {"ok": False, "stage": "ha_server_inject",
                     "error": self._ha_server_unresolved_msg(unresolved)}
 
+        # Step 3.9: 历史查询子流程幂等确保（#711）—— 在闸门前，避免把「其实能自动装」
+        # 的 af_hist_* 误报成 node_gate 错误，污染提案的 node_gate_ok 信号。
+        self._ensure_history_subflow_for(flow, _HIST_AUTOINSTALL, _tid, "propose_raw")
+
         # Step 4: 节点注册表闸门（P0 防御）—— 未知节点类型记 error 不拦提案（fail-open）
         _node_gate_ok = True
         try:
@@ -5027,6 +5044,15 @@ class Gateway:
                     "verdict": "拦截",
                     "reasons": [f"实体未确认(应来自 resolve_entity)：{', '.join(rogue)}"],
                 }
+
+        # 0.65) ★ 历史查询子流程幂等确保（#711）—— 必须在 0.7 闸门之前。
+        # 黑箱链路：propose_dsl → run_staging_gate → 0.7 闸门。af_hist_* 若未装，
+        # 闸门直接判「节点类型未注册」硬拦，agent 连提案都产不出来（实测复现）。
+        # 这里用 _HIST_AUTOINSTALL（默认 True）授权安装：装的是网关自有的 4 个
+        # managed 子流程定义，增量 append、幂等、不碰任何用户 flow，与「禁止 agent
+        # 写 prod 用户流」的护栏语义不冲突。需要关闭时设 AUTOFLLOW_HIST_AUTOINSTALL=0。
+        self._ensure_history_subflow_for(flow, _HIST_AUTOINSTALL, None,
+                                         "run_staging_gate")
 
         # 0.7) 节点注册表闸门（P0 防御）：未知节点类型直接拦截，
         #      不让黑箱放行『编译合法但部署即坏』的 flow。
@@ -5441,6 +5467,36 @@ class Gateway:
                         "e2e-trace 删除 flow %s 重试仍失败，可能遗留孤儿 tab：%s",
                         flow_id, e,
                     )
+
+    def _ensure_history_subflow_for(self, flow: Dict[str, Any],
+                                    allow_prod: bool,
+                                    tid: Optional[str] = None,
+                                    where: str = "deploy") -> Dict[str, Any]:
+        """含 af_hist_* 引用时，幂等确保 4 个历史查询子流程已装在目标 NR。
+
+        必须在 `_gate_node_types` 之前调用 —— 闸门实时拉 /flows 判断子流程是否存在，
+        先装后过闸才能放行（#711：此前 ensure 只在 deploy_raw 且写死 allow_prod=False，
+        prod 永不安装 → 历史类 flow 全被闸门拒绝）。
+
+        幂等：活体已存在 → no-op（零风险）；缺失才从 subflows_built.json 重建。
+        不抛异常：装不上时由后续闸门给出准确的「节点类型未注册」错误，语义一致。
+        返回 ensure 结果 dict（跳过/失败时返回 {"skipped": ...}）。
+        """
+        from .subflows import ensure_history_subflow, flow_uses_history_subflow
+        if not flow_uses_history_subflow(flow.get("nodes", [])):
+            return {"skipped": "not_used"}
+        client = getattr(self.nr, "client", None)
+        if client is None:
+            return {"skipped": "no_nr_client"}
+        try:
+            res = ensure_history_subflow(client, allow_prod=allow_prod)
+            _slog(tid, f"{where}.history_ensure",
+                  created=res.get("created"), exists=res.get("exists"),
+                  rebuilt=res.get("rebuilt"), allow_prod=allow_prod)
+            return res
+        except Exception as e:
+            _slog(tid, f"{where}.history_ensure_err", error=str(e)[:200])
+            return {"skipped": "error", "error": str(e)[:200]}
 
     def _gate_node_types(self, flow: Dict[str, Any]) -> None:
         """节点注册表闸门（P0 防御）。
@@ -6125,6 +6181,13 @@ class Gateway:
                         "changed_nodes": 0}
             target["id"] = flow_id
             mode = "node_patches"
+        # allow_prod 提前解析：历史子流程 ensure 需要它（原先在部署前才算，
+        # 导致 ensure 拿不到正确授权）。人审/人触发默认放行写 prod；
+        # 纯 agent 自动化部署受 prod 守卫保护。
+        if allow_prod is None:
+            allow_prod = (agent_id == "human")
+        # ★ 历史查询子流程幂等确保 —— 必须在节点闸门【之前】（#711，见 deploy_proposal 注释）
+        self._ensure_history_subflow_for(target, allow_prod, None, "modify_flow")
         # 节点注册表闸门（P0 防御）
         try:
             self._gate_node_types(target)
@@ -6142,10 +6205,7 @@ class Gateway:
         if _unresolved:
             return {"ok": False, "stage": "ha_server_inject", "flow_id": flow_id,
                     "error": self._ha_server_unresolved_msg(_unresolved)}
-        # 部署（force 覆盖，复用 deploy 链路）
-        if allow_prod is None:
-            # 人审/人触发默认放行写 prod；纯 agent 自动化部署受 prod 守卫保护
-            allow_prod = (agent_id == "human")
+        # 部署（force 覆盖，复用 deploy 链路）。allow_prod 已在闸门前解析。
         try:
             res = self.nr.create_or_update_flow(flow_id, target, force=True,
                                                 allow_prod=allow_prod)

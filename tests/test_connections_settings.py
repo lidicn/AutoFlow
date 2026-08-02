@@ -13,6 +13,7 @@ import json
 import tempfile
 import shutil
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(os.path.dirname(HERE), "src")
@@ -186,6 +187,13 @@ class TestConnectionsCore(EnvSandbox):
         r2 = connections.test_connections(self.cfg, ["bark"])
         self.assertTrue(r2["bark"]["ok"])      # 仅校验配置完整，不实际发推送
         self.assertFalse(r2["bark"]["sent"])
+
+    def test_ha_test_does_not_refresh_catalog(self):
+        """safe-gate-ui：测试连接仅做连通性探针，不得触发设备目录刷新。"""
+        with mock.patch.object(connections, "_maybe_refresh_catalog") as m:
+            # 不论 HA 是否配置，测试连接路径都不应调用 refresh_catalog
+            connections.test_connections(self.cfg, ["ha"])
+            m.assert_not_called()
 
 
 class TestLayerHotReload(EnvSandbox):

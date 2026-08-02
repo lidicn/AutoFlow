@@ -339,9 +339,10 @@ def _test_ha(cfg, gateway=None) -> Dict[str, Any]:
         return {"ok": False, "error": "未配置 HA 地址"}
     r = _http_probe(server + "/api/", headers={"Authorization": f"Bearer {token}"} if token else None)
     if r.get("ok"):
-        _maybe_refresh_catalog(gateway)
-        detail = ("已连接（令牌有效）；正在后台拉取全屋设备目录，稍候即可用 "
-                  "autoflow_resolve_entity / autoflow_list_entities 解析设备"
+        # safe-gate-ui: 测试连接仅做连通性探针，不触发设备目录刷新；
+        # 导入全屋设备目录由「安全闸 / 连接配置 → 导入全部设备」显式触发（与保存/测试解耦）。
+        detail = ("已连接（令牌有效）。设备目录不会自动拉取，请到「安全闸」或「连接配置」点"
+                  "「导入全部设备」以启用 autoflow_resolve_entity / autoflow_list_entities"
                   if token else "服务可达（未配令牌）")
         return {"ok": True, "status": r["status"], "detail": detail}
     if r.get("status") in (401, 403):

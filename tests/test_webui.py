@@ -204,6 +204,53 @@ class TestWebUI(TmpCfgMixin, unittest.TestCase):
         # summary 取 acceptance 结果
         self.assertIn("PASS", j["summary"])
 
+    def test_device_catalog_endpoints(self):
+        """safe-gate-ui：GET /api/catalog、GET /api/entities、POST /api/catalog/import 行为正确。"""
+        from unittest.mock import AsyncMock
+        # 桩：用离线假数据隔离真实 HA/NR 拉取，只验证端点编排
+        self.gw.state.get_device_catalog = lambda: {
+            "version": 1, "freshness": "2026-08-03T10:00:00",
+            "entities": {"light.office": {"friendly_name": "书房灯"}},
+        }
+        self.gw.list_entities = AsyncMock(return_value={
+            "entities": [{"entity_id": "light.office", "friendly_name": "书房灯",
+                          "area": "书房", "domain": "light"}],
+            "matched_count": 1, "total": 1, "keyword": "灯", "limit": 20, "available": True,
+        })
+        self.gw.refresh_catalog = AsyncMock(return_value={
+            "mode": "full", "entity_total": 1, "fetched": 1, "changed": 0,
+            "added": 1, "gone_marked": 0, "freshness": "2026-08-03T10:00:00",
+        })
+
+        # GET /api/catalog → {total, freshness, last_import_at}
+        r = self.client.get("/api/catalog")
+        self.assertEqual(r.status_code, 200)
+        d = r.json()
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["total"], 1)
+        self.assertEqual(d["last_import_at"], "2026-08-03T10:00:00")
+
+        # GET /api/entities?keyword= → 透传网关 list_entities 结果
+        r = self.client.get("/api/entities?keyword=灯&limit=20")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(r.json()["entities"]), 1)
+
+        # POST /api/catalog/import → 显式刷新且 full=True
+        r = self.client.post("/api/catalog/import")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["ok"])
+        self.assertEqual(r.json()["total"], 1)
+        self.gw.refresh_catalog.assert_awaited_once_with(full=True)
+
+    def test_catalog_import_error_surfaced(self):
+        """refresh_catalog 异常时端点返回 500 且 ok=False，不静默。"""
+        from unittest.mock import AsyncMock
+        self.gw.refresh_catalog = AsyncMock(side_effect=RuntimeError("HA 不可达"))
+        r = self.client.post("/api/catalog/import")
+        self.assertEqual(r.status_code, 500)
+        self.assertFalse(r.json()["ok"])
+        self.assertIn("导入失败", r.json()["error"])
+
 
 @unittest.skipUnless(_HAVE_WEB_DEPS,
                       f"WebUI/MCP 测试需要 starlette+mcp（缺失：{_WEB_DEP_MSG}）；"

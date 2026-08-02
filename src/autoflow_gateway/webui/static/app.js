@@ -93,14 +93,14 @@ function fmtTime(s) {
 }
 
 // ── 导航（C1/C3：工作区 + 版本同步已移除，新增设置管理界面）──
-const TABS = ["dashboard", "pending", "proposals", "deployed", "subflows", "agents", "diagnostics", "notes", "settings"];
+const TABS = ["dashboard", "safe", "proposals", "deployed", "subflows", "agents", "diagnostics", "notes", "settings"];
 function setTab(tab) {
   if (!TABS.includes(tab)) tab = "dashboard";
   $$(".navitem").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   TABS.forEach((t) => ($("#view-" + t).hidden = t !== tab));
   if (tab === "dashboard") loadDashboard();
   else if (tab === "agents") loadAgents();
-  else if (tab === "pending") loadPending();
+  else if (tab === "safe") loadSafeGate();
   else if (tab === "proposals") loadProposals();
   else if (tab === "deployed") loadDeployed();
   else if (tab === "notes") loadNotes();
@@ -156,19 +156,17 @@ async function loadDashboard() {
 // ── 工作区（总体/当前/最近完成 + 待确认合并展示）──
 async function loadWorkspace() {
   const v = $("#view-workspace");
-  v.innerHTML = `<div class="view-head"><h2>🗺️ 工作区</h2><span class="sub">总体计划 · 当前进度 · 最近完成 · 待你确认</span>
+  v.innerHTML = `<div class="view-head"><h2>🗺️ 工作区</h2><span class="sub">总体计划 · 当前进度 · 最近完成</span>
       <button class="btn sm" id="ws-refresh" style="margin-left:auto">刷新</button></div>
     <div id="ws-body"><div class="empty">加载中…</div></div>`;
   $("#ws-refresh").onclick = loadWorkspace;
   try {
-    const [pl, pe, pc, pd] = await Promise.all([
+    const [pl, pc, pd] = await Promise.all([
       api("GET", "/plan"),
-      api("GET", "/pending"),
       api("GET", "/commands"),
       api("GET", "/decisions"),
     ]);
     const plan = pl.data || { overall: "", current: "", completed: [] };
-    const items = pe.data?.pending || [];
     const cmds = pc.data?.commands || [];
     const decs = pd.data?.decisions || [];
     const completed = (plan.completed || []).slice(0, 12);
@@ -208,10 +206,6 @@ async function loadWorkspace() {
         ${completed.length ? `<div class="ws-completed">` + completed.map((c) =>
           `<div class="ws-completed-item"><span class="ws-dot">●</span><span class="ws-text">${esc(c.text)}</span><span class="meta">${fmtTime(c.ts)}</span></div>`
         ).join("") + `</div>` : `<div class="empty">还没有完成记录。</div>`}
-      </div>
-      <div class="card" style="margin-top:14px">
-        <h3>⚠️ 待你确认${items.length ? `（${items.length}）` : ""}</h3>
-        <div id="ws-pending">${items.length ? "" : `<div class="empty">没有待确认操作 🎉</div>`}</div>
       </div>`;
     $("#ws-save-overall").onclick = async () => {
       const r = await api("PUT", "/plan", { overall: $("#ws-overall").value });
@@ -240,25 +234,6 @@ async function loadWorkspace() {
     renderCmdHist(cmds);
     renderDecisions(decs);
     startWsAutoRefresh();
-    // 待确认列表复用确认闸渲染
-    const pl2 = $("#ws-pending");
-    if (items.length) {
-      pl2.innerHTML = items.map((o) => `
-        <div class="item">
-          <div class="row">
-            <div><span class="title">${esc(o.operation)}</span> ${badge("risk-" + o.risk_level, o.risk_level)}</div>
-            <div class="meta">${esc(o.agent_id)} ｜ ${fmtTime(o.created_at)}</div>
-          </div>
-          <div class="desc">${esc(o.summary)}</div>
-          ${renderImpact(o)}
-          <div class="actions">
-            <button class="btn sm ok" data-ap="${esc(o.id)}">批准</button>
-            <button class="btn sm danger" data-rj="${esc(o.id)}">拒绝</button>
-          </div>
-        </div>`).join("");
-      $$("#ws-pending [data-ap]").forEach((b) => (b.onclick = () => approveOp(b.dataset.ap)));
-      $$("#ws-pending [data-rj]").forEach((b) => (b.onclick = () => rejectOp(b.dataset.rj)));
-    }
   } catch (e) {
     $("#ws-body").innerHTML = errBox(e.message || "加载失败", loadWorkspace);
   }
@@ -450,66 +425,7 @@ async function saveAgent(id) {
   loadAgents();
 }
 
-// ── 确认闸 ──
-// 渲染单条待确认操作的「影响面」：爆炸半径 + 变更 diff（实体/服务/子流程）
-function renderImpact(o) {
-  const d = o.payload?.diff || {};
-  const entN = (d.entities || []).length;
-  const svc = (d.services || []);
-  const subs = (d.subflow_entries || []);
-  const kind = d.is_update
-    ? `<span class="badge upd">更新</span>`
-    : `<span class="badge create">新建</span>`;
-  const svcHtml = svc.map((s) => `<span class="badge svc">${esc(s)}</span>`).join("");
-  const subHtml = subs.map((s) => `<span class="badge sub">→${esc(s)}</span>`).join("");
-  const entHtml = (d.entities || []).map((e) => `<code>${esc(e)}</code>`).join(" ");
-  return `<div class="impact">
-    <span class="k">爆炸半径</span>
-    <span class="v">flow×${o.blast_radius ?? 1} · 实体×${entN} · 节点×${d.node_count || 0}</span>
-    ${kind}
-    <div class="diff">${svcHtml}${subHtml}</div>
-    ${entHtml ? `<div class="ents">${entHtml}</div>` : ""}
-  </div>`;
-}
 
-async function loadPending() {
-  const v = $("#view-pending");
-  v.innerHTML = `<div class="view-head"><h2>确认闸</h2><span class="sub">所有写操作需人工批准</span></div>
-    <div id="p-list"><div class="empty">加载中…</div></div>`;
-  try {
-    const r = await api("GET", "/pending");
-    const list = $("#p-list");
-    const items = r.data?.pending || [];
-    if (!items.length) { list.innerHTML = `<div class="empty">没有待确认操作 🎉</div>`; return; }
-    list.innerHTML = items.map((o) => `
-      <div class="item">
-        <div class="row">
-          <div><span class="title">${esc(o.operation)}</span> ${badge("risk-" + o.risk_level, o.risk_level)}</div>
-          <div class="meta">${esc(o.agent_id)} ｜ ${fmtTime(o.created_at)}</div>
-        </div>
-        <div class="desc">${esc(o.summary)}</div>
-        ${renderImpact(o)}
-        <div class="actions">
-          <button class="btn sm ok" data-ap="${esc(o.id)}">批准</button>
-          <button class="btn sm danger" data-rj="${esc(o.id)}">拒绝</button>
-        </div>
-      </div>`).join("");
-    $$("[data-ap]").forEach((b) => (b.onclick = () => approveOp(b.dataset.ap)));
-    $$("[data-rj]").forEach((b) => (b.onclick = () => rejectOp(b.dataset.rj)));
-  } catch (e) { $("#p-list").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
-}
-async function approveOp(id) {
-  const r = await api("POST", `/pending/${id}/approve`);
-  const reallyOk = r.ok && r.data?.ok;
-  toast(reallyOk ? "已批准并执行" : "失败：" + (r.data?.error || r.status));
-  if (reallyOk) loadPending();
-}
-async function rejectOp(id) {
-  const reason = prompt("拒绝理由（可选）：") || "";
-  const r = await api("POST", `/pending/${id}/reject`, { reason });
-  toast(r.ok ? "已拒绝" : "失败：" + (r.data?.error || r.status));
-  if (r.ok) loadPending();
-}
 
 // ── 场景提案（部署候选） ──
 // 注：经验沉淀(P5)已推迟——DSL 是自顶向下编码经验，与自底向上提取 skill 方向相反。
@@ -1655,34 +1571,66 @@ function renderSfList(filter) {
       </div>
       <div class="desc">DSL 调用：<code>调用子流程: ${esc(s.key)}(...)</code></div>
       <div class="desc">前置参数 ${ins} 项 ｜ 需配置 env ${envs} 项 ｜ ${idLine}</div>
-      <div class="actions"><button class="btn sm" data-detail="${esc(s.key)}">查看前置参数</button>${sfStatusActions(s)}${sfDeleteAction(s)}</div>
+      <div class="actions"><button class="btn sm" data-detail="${esc(s.key)}">查看前置参数</button>${sfEnsureAction(s)}${sfStatusActions(s)}${sfDeleteAction(s)}</div>
     </div>`;
   }).join("");
   $$("[data-detail]").forEach((b) => (b.onclick = () => showSfDetail(b.dataset.detail)));
   $$("[data-sf-status]").forEach((b) => (b.onclick = () => setSfStatus(b.dataset.key, b.dataset.sfStatus)));
   $$("[data-sf-del]").forEach((b) => (b.onclick = () => deleteSubflow(b.dataset.sfDel)));
+  $$("[data-sf-ensure]").forEach((b) => (b.onclick = () => ensureSubflow(b.dataset.sfEnsure)));
 }
+// history_* 是 DSL 内置原语（编译器语法的一部分），只能禁用不能删除
+const SF_HISTORY_KEYS = ["history_state_at", "history_occurred", "history_duration", "history_aggregate"];
+const isHistorySf = (s) => SF_HISTORY_KEYS.includes(s.key);
+
 function sfDeleteAction(s) {
-  // 网关预置（managed）由 seed 管理，禁止手动注销（与「停用」策略一致）
-  if (s.source_type === "managed") return "";
+  // #711：历史子流程 → 无删除（只能禁用）；其余一律给删除按钮。
+  // 删除的 NR 侧语义按「谁建的谁负责」：managed=网关自建→连 NR 实例一起删；
+  // imported=用户自己在 NR 建的→只取消登记，NR 上原样保留。
+  if (isHistorySf(s)) return "";
   const kind = s.kind || "subflow";
-  const nrNote = kind === "subflow" ? "（将一并删除 NR 子流程实例）" : "";
-  return ` <button class="btn sm danger" data-sf-del="${esc(s.key)}" title="注销${nrNote}">注销</button>`;
+  const isManaged = s.source_type === "managed";
+  const nrNote = kind !== "subflow" ? "（无 NR 实例）"
+    : isManaged ? "（网关自建，将一并删除 NR 子流程实例）"
+                : "（仅取消登记，NR 上的子流程保留）";
+  return ` <button class="btn sm danger" data-sf-del="${esc(s.key)}" title="删除${nrNote}">删除</button>`;
 }
 async function deleteSubflow(key) {
-  if (!confirm(`确定注销子流程「${key}」？\n（从注册表移除，subflow 实例型会一并删除 NR 子流程；此操作不可撤销，已引用它的 flow 将失效。）`)) return;
+  const s = _sfList.find((x) => x.key === key) || {};
+  const kind = s.kind || "subflow";
+  const tail = kind !== "subflow"
+    ? "（该能力无 NR 子流程实例）"
+    : s.source_type === "managed"
+      ? "\n⚠️ 这是网关自建的子流程，NR 上的子流程实例会被一并删除。"
+      : "\n（只从网关注册表取消登记，Node-RED 上的子流程保持原样，不会被删除。）";
+  if (!confirm(`确定删除子流程「${key}」？${tail}\n此操作不可撤销，已引用它的 flow 将失效。`)) return;
   try {
     const r = await api("DELETE", "/subflows/" + encodeURIComponent(key));
-    if (!r.ok) return toast("注销失败：" + (r.data?.error || r.status));
-    toast("已注销：" + key + (r.data?.nr_removed ? "（NR 实例已删除）" : ""));
+    if (!r.ok) return toast("删除失败：" + (r.data?.error || r.status));
+    toast("已删除：" + key + (r.data?.nr_removed ? "（NR 实例已删除）"
+      : r.data?.nr_kept ? "（NR 子流程已保留）" : ""));
     await refreshSfList();
-  } catch (e) { toast("注销失败：" + e.message); }
+  } catch (e) { toast("删除失败：" + e.message); }
+}
+function sfEnsureAction(s) {
+  // #711：历史子流程「安装到 NR」—— 不部署也能提前装 / NR 侧被手删后一键修复
+  if (!isHistorySf(s)) return "";
+  return ` <button class="btn sm" data-sf-ensure="${esc(s.key)}" title="幂等安装 4 个 af_hist_* 子流程到 Node-RED（已存在则跳过）">安装到 NR</button>`;
+}
+async function ensureSubflow(key) {
+  try {
+    const r = await api("POST", "/subflows/" + encodeURIComponent(key) + "/ensure", {});
+    if (!r.ok) return toast("安装失败：" + (r.data?.error || r.status));
+    const d = r.data || {};
+    toast(d.exists ? "已存在，无需安装：" + key
+      : d.created ? "已安装到 NR：" + key : "安装完成：" + key);
+    await refreshSfList();
+  } catch (e) { toast("安装失败：" + e.message); }
 }
 function sfStatusActions(s) {
-  // managed 的 subflow 实例型（如 bark_push）由系统管理，前端不暴露启停按钮；
-  // managed 的 link_out 型能力允许手动启停（可管理），其余按状态展示按钮。
-  const managedSubflow = s.source_type === "managed" && (s.kind || "subflow") === "subflow";
-  if (managedSubflow) return "";
+  // #711：managed 子流程（含 history_*）此前被一刀切隐藏启停按钮，导致这类条目
+  // 在 WebUI 上完全不可操作。历史子流程不允许删除，「禁用」是它唯一的治理手段，
+  // 故一律按状态展示启停按钮。
   if (s.status === "pending_review")
     return ` <button class="btn sm ok" data-sf-status="active" data-key="${esc(s.key)}">通过审核</button><button class="btn sm" data-sf-status="disabled" data-key="${esc(s.key)}">禁用</button>`;
   if (s.status === "active")
@@ -1761,10 +1709,9 @@ async function doImportSubflow() {
 async function loadSettings() {
   const v = $("#view-settings");
   v.innerHTML = `
-    <div class="view-head"><h2>⚙️ 设置</h2><span class="sub">连接配置 · 设备保护 · 审计日志</span></div>
+    <div class="view-head"><h2>⚙️ 设置</h2><span class="sub">连接配置 · 审计日志</span></div>
     <div class="tabs sub" id="settings-tabs">
       <button class="stab active" data-s="conn">连接配置</button>
-      <button class="stab" data-s="guard">设备保护</button>
       <button class="stab" data-s="audit">审计日志</button>
     </div>
     <div id="settings-body"><div class="empty">加载中…</div></div>`;
@@ -1776,7 +1723,6 @@ async function loadSettings() {
 }
 function settingsShow(s) {
   if (s === "conn") return loadConnection();
-  if (s === "guard") return loadDeviceGuard();
   if (s === "audit") return loadAudit();
 }
 // 连接设置（#45）：HA / Node-RED / Bark 的地址与凭据。
@@ -1802,6 +1748,7 @@ async function loadConnection() {
       <div class="conn-actions">
         <button class="btn primary sm" data-save="${esc(g.id)}">保存</button>
         <button class="btn sm" data-test="${esc(g.id)}">测试连接</button>
+        ${g.id === "ha" ? `<button class="btn sm" data-import="${esc(g.id)}">导入全部设备</button>` : ""}
         ${g.id === "bark" ? `<label><input type="checkbox" id="bark-send"> 发送测试推送</label>` : ""}
       </div>
       <div class="conn-result" data-result="${esc(g.id)}"></div>
@@ -1814,6 +1761,8 @@ async function loadConnection() {
   groups.forEach((g) => {
     $(`[data-save="${g.id}"]`).onclick = () => saveConnGroup(g);
     $(`[data-test="${g.id}"]`).onclick = () => testConnGroup(g.id);
+    const imp = $(`[data-import="${g.id}"]`);
+    if (imp) imp.onclick = () => importCatalog(imp, g.id);
     (g.fields || []).forEach((f) => {
       const clr = $(`[data-clear="${f.key}"]`);
       if (clr) clr.onclick = () => clearConnField(g, f);
@@ -1898,40 +1847,101 @@ async function testConnGroup(id) {
       : `❌ ${esc(d.error || "连接失败")}`;
   } catch (e) { out.textContent = "测试失败：" + e.message; }
 }
-async function loadDeviceGuard() {
-  const body = $("#settings-body");
-  body.innerHTML = `<div class="card">
-    <h3>设备保护（Device Guard）</h3>
-    <p class="desc">列出受保护实体。Tier-0 触及需人工确认闸（拦截点由 WB1 在 D3 后裁定）；Tier-1 放行但记入审计。</p>
-    <div class="row" style="gap:8px;margin-bottom:8px;flex-wrap:wrap">
-      <select id="dg-type"><option value="entity">entity_id 精确</option><option value="domain">domain 通配</option><option value="area">HA area</option></select>
-      <input id="dg-value" placeholder="如 light.office 或 light 或 office" style="flex:1;min-width:160px">
-      <select id="dg-tier"><option value="0">Tier-0（需确认）</option><option value="1">Tier-1（放行+审计）</option></select>
-      <button class="btn primary sm" id="dg-add">添加</button>
-    </div>
-    <div id="dg-list"><div class="empty">加载中…</div></div>
-  </div>`;
-  $("#dg-add").onclick = async () => {
-    const match = { type: $("#dg-type").value, value: $("#dg-value").value.trim() };
-    const tier = parseInt($("#dg-tier").value, 10);
-    if (!match.value) return toast("请填匹配值");
-    const r = await api("POST", "/device-guard", { match, tier });
-    if (!r.ok) return toast("添加失败：" + (r.data?.error || r.status));
-    loadDeviceGuard();
-  };
+async function importCatalog(btn, gid) {
+  btn.disabled = true; const old = btn.textContent; btn.textContent = "导入中…";
   try {
+    const r = await api("POST", "/catalog/import");
+    if (r.ok) toast(`已导入 ${r.data?.total} 个实体`);
+    else toast("导入失败：" + (r.data?.error || r.status));
+  } catch (e) { toast(e.message || "导入失败"); }
+  btn.disabled = false; btn.textContent = old;
+}
+async function loadSafeGate() {
+  const v = $("#view-safe");
+  v.innerHTML = `<div class="view-head"><h2>🛡️ 安全闸</h2><span class="sub">设备保护：先导入全屋设备目录，再勾选需保护的实体</span></div>
+    <div class="card" style="margin-top:14px">
+      <h3>设备目录</h3>
+      <div id="sg-catalog"><div class="empty">加载中…</div></div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">
+        <button class="btn primary sm" id="sg-import">导入全部设备</button>
+        <span class="meta">从 Home Assistant / Node-RED 拉取全屋实体（仅显式触发，不随测试连接自动跑）</span>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h3>添加保护</h3>
+      <p class="desc">用中文/英文搜索设备（按 friendly_name / area / entity_id），点选即加入保护。Tier-0 触及需人工确认；Tier-1 放行但记审计。</p>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <input id="sg-search" placeholder="如「书房灯」「客厅」「office」" style="flex:1;min-width:200px">
+        <select id="sg-tier"><option value="0">Tier-0（需确认）</option><option value="1">Tier-1（放行+审计）</option></select>
+      </div>
+      <div id="sg-results" style="margin-top:8px"><div class="empty">输入关键词搜索设备</div></div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h3>已保护实体</h3>
+      <div id="sg-list"><div class="empty">加载中…</div></div>
+    </div>`;
+
+  const refreshCatalog = async () => {
+    const r = await api("GET", "/catalog");
+    const c = $("#sg-catalog");
+    if (!r.ok) { c.innerHTML = `<div class="empty">目录不可用：${esc(r.data?.error || r.status)}</div>`; return; }
+    const d = r.data || {};
+    c.innerHTML = `<div class="desc">共 <b>${d.total}</b> 个实体 ｜ 最近导入：${esc(d.freshness || "从未")}</div>`;
+  };
+  await refreshCatalog();
+
+  $("#sg-import").onclick = async () => {
+    const btn = $("#sg-import"); btn.disabled = true; btn.textContent = "导入中…";
+    try {
+      const r = await api("POST", "/catalog/import");
+      if (r.ok) { toast(`已导入 ${r.data?.total} 个实体`); await refreshCatalog(); await refreshList(); }
+      else toast("导入失败：" + (r.data?.error || r.status));
+    } catch (e) { toast(e.message || "导入失败"); }
+    btn.disabled = false; btn.textContent = "导入全部设备";
+  };
+
+  let searchTimer;
+  $("#sg-search").addEventListener("input", (e) => {
+    const kw = e.target.value.trim();
+    clearTimeout(searchTimer);
+    if (!kw) { $("#sg-results").innerHTML = `<div class="empty">输入关键词搜索设备</div>`; return; }
+    searchTimer = setTimeout(async () => {
+      const r = await api("GET", "/entities?keyword=" + encodeURIComponent(kw) + "&limit=20");
+      const box = $("#sg-results");
+      const list = r.data?.entities || [];
+      if (!list.length) { box.innerHTML = `<div class="empty">没有匹配「${esc(kw)}」的设备</div>`; return; }
+      box.innerHTML = `<div class="list">` + list.map((en) => `
+        <div class="item">
+          <div class="row"><div><span class="title">${esc(en.friendly_name || en.entity_id)}</span> <span class="meta">${esc(en.entity_id)}</span></div>
+          <div class="meta">${esc((en.area ? en.area + " · " : "") + (en.domain || ""))}</div></div>
+          <div class="actions"><button class="btn sm primary" data-add="${esc(en.entity_id)}">保护</button></div>
+        </div>`).join("") + `</div>`;
+      $$("#sg-results [data-add]").forEach((b) => (b.onclick = () => addProtection(b.dataset.add)));
+    }, 250);
+  });
+
+  const tier = () => parseInt($("#sg-tier").value, 10);
+  const addProtection = async (entityId) => {
+    const r = await api("POST", "/device-guard", { match: { type: "entity", value: entityId }, tier: tier() });
+    if (r.ok) { toast(`已保护 ${entityId}`); await refreshList(); }
+    else toast("添加失败：" + (r.data?.error || r.status));
+  };
+
+  const refreshList = async () => {
     const r = await api("GET", "/device-guard");
+    const box = $("#sg-list");
     const rules = r.data?.rules || [];
-    if (!rules.length) { $("#dg-list").innerHTML = `<div class="empty">还没有保护规则。</div>`; return; }
-    $("#dg-list").innerHTML = rules.map((x) => `<div class="item">
+    if (!rules.length) { box.innerHTML = `<div class="empty">还没有保护规则。</div>`; return; }
+    box.innerHTML = `<div class="list">` + rules.map((x) => `<div class="item">
       <div class="row"><div><span class="title">${esc(x.match.value)}</span> <span class="meta">${esc(x.match.type)}</span></div>
       <div>${badge("tier-" + x.tier, x.tier === 0 ? "Tier-0 需确认" : "Tier-1 放行")} <button class="btn sm danger" data-del="${esc(x.id)}">删除</button></div></div>
-    </div>`).join("");
-    $$("#dg-list [data-del]").forEach((b) => (b.onclick = async () => {
+    </div>`).join("") + `</div>`;
+    $$("#sg-list [data-del]").forEach((b) => (b.onclick = async () => {
       const r = await api("DELETE", "/device-guard/" + b.dataset.del);
-      if (r.ok) loadDeviceGuard(); else toast("删除失败");
+      if (r.ok) refreshList(); else toast("删除失败");
     }));
-  } catch (e) { $("#dg-list").innerHTML = errBox(e.message, loadDeviceGuard); }
+  };
+  await refreshList();
 }
 async function loadAudit() {
   const body = $("#settings-body");
