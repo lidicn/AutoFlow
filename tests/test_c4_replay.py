@@ -220,6 +220,50 @@ def test_gate_timerange_outside_window_blocks():
         f"窗口外仍重放了开灯：{gate['replayed_services']}"
 
 
+# ── 5) 条件流（分支未命中）→ 后置条件不可证伪 → N/A 跳过（修复「显示正常但部署不了」）──
+DSL_COND_PC_OFF = """场景: 书房电脑开才开挂灯
+触发: inject(payload={"pc":"off"})
+分支 pc = "on":
+    动作: light.turn_on(light.study_main, brightness=80)
+预期:
+  light.study_main = on
+"""
+
+
+def test_gate_conditional_flow_passes_when_branch_untriggered():
+    """分支(书房电脑=on)在空白世界态下未命中 → 挂灯服务未激活 →
+    该实体不在 active_service_targets → 后置条件{挂灯=on}不可证伪 →
+    判 N/A 跳过，闸门放行（不再误杀「书房电脑开→开挂灯」这类条件流）。"""
+    store = _vhass_with(*SEED_LIGHT)
+    gate = GW.run_staging_gate(DSL_COND_PC_OFF,
+                               [{"entity_id": "light.study_main", "state": "on"}],
+                               vhass_store=store, branch_aware=True)
+    assert gate["passed"] is True, gate
+    na = [a for a in gate["assertions"] if a.get("na")]
+    assert na, f"条件流的后置条件应被标记 N/A 跳过：{gate['assertions']}"
+
+
+# ── 6) 安全不降级：无条件流断言失败仍须拦截 ──
+DSL_UNCOND_WRONG = """场景: 无条件开灯但预期写错
+触发: inject
+动作: light.turn_on(light.study_main, brightness=80)
+预期:
+  light.study_main = off
+"""
+
+
+def test_gate_unconditional_failure_still_blocked():
+    """无条件服务激活 → light.study_main 在 active_service_targets →
+    断言仍严格校验 → 预期 off 但重放为 on → 仍拦截（证明 N/A 跳过不降级安全）。"""
+    store = _vhass_with(*SEED_LIGHT)
+    gate = GW.run_staging_gate(DSL_UNCOND_WRONG,
+                               [{"entity_id": "light.study_main", "state": "off"}],
+                               vhass_store=store, branch_aware=True)
+    assert gate["passed"] is False, gate
+    assert not any(a.get("na") for a in gate["assertions"]), \
+        f"无条件流不应出现 N/A：{gate['assertions']}"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

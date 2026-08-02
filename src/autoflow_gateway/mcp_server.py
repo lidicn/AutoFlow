@@ -116,6 +116,19 @@ def autoflow_list_entities(domain: str = "", area: str = "", keyword: str = "",
     r = _gw().list_entities(domain or None, area or None, keyword or None, limit, offset)
     return _js(r)
 
+# ───────────── 读：强制刷新 HA 实体目录（缓存填充，解除建 flow 死锁）─────────────
+@mcp.tool()
+def autoflow_refresh_catalog(full: bool = False, domain: str = "", area: str = "") -> str:
+    """【一次性拉取 HA 实体目录】强制从 HA 重新快照全屋设备进本地缓存（device_catalog）。
+
+    - 仅一次 HA get_states() + 注册表抓取，结果落本地缓存；之后 autoflow_resolve_entity /
+      autoflow_list_entities 只读缓存、毫秒返回，agent 不再被网络拉取卡住。
+    - 何时需要：首次连上 HA 后、设备大幅增减后、或 resolve/list 返回『device_catalog 为空』时。
+    - 日常写 DSL 不需要重复调本工具（缓存已够用）。
+    - 返回 {ok, added, changed, total, ...}；total 为当前目录设备总数。"""
+    r = _gw().refresh_catalog(full=full, domain=domain or None, area=area or None)
+    return _js(r)
+
 # ───────────── 读：Automations 注册表·跨会话找回 ─────────────
 @mcp.tool()
 def autoflow_list_automations(keyword: str = "", only: str = "all",
@@ -765,7 +778,8 @@ def autoflow_get_skill(name: str) -> str:
 
 # 用户工具挂到三个端点：/mcp（用户面，任何身份）、/mcp-white（原生手写面）、/mcp-admin（管理面）。
 # 原生手写/管理员在各自端点都拿到完整用户能力；原生手写部署刀/运维刀分别只在对应端点追加。
-_USER_TOOLS = (autoflow_resolve_entity, autoflow_list_entities, autoflow_list_automations,
+_USER_TOOLS = (autoflow_resolve_entity, autoflow_list_entities, autoflow_refresh_catalog,
+               autoflow_list_automations,
                autoflow_dsl_help,
                autoflow_list_templates,
                autoflow_render_template, autoflow_propose_dsl, autoflow_list_pending,

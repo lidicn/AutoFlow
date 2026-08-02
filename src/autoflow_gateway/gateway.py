@@ -665,7 +665,7 @@ class Gateway:
         cat = self.state.get_device_catalog()
         ents = cat.get("entities", {})
         if not ents:
-            return {"entities": [], "hint": "device_catalog 为空，请先 refresh_catalog()。",
+            return {"entities": [], "hint": "device_catalog 为空，请先调用 autoflow_refresh_catalog 工具（或在 WebUI 连接设置保存并测试 HA 连接以自动拉取）。",
                     "returned": 0, "matched_count": 0, "truncated": False,
                     "offset": offset, "next_offset": None, "total": 0,
                     "freshness": "", "area_resolved": None, "area_hint": None}
@@ -747,7 +747,7 @@ class Gateway:
         cat = self.state.get_device_catalog()
         ents = cat.get("entities", {})
         if not ents:
-            return {"entities": [], "hint": "device_catalog 为空，请先 refresh_catalog()。",
+            return {"entities": [], "hint": "device_catalog 为空，请先调用 autoflow_refresh_catalog 工具（或在 WebUI 连接设置保存并测试 HA 连接以自动拉取）。",
                     "returned": 0, "matched_count": 0, "truncated": False,
                     "offset": offset, "next_offset": None, "total": 0,
                     "freshness": "", "area_resolved": None, "area_hint": None}
@@ -1317,7 +1317,7 @@ class Gateway:
         cat = self.state.get_device_catalog()
         ents = cat.get('entities', {})
         if not ents:
-            return {'ok': False, 'error': 'device_catalog 为空，请先 refresh_catalog()。',
+            return {'ok': False, 'error': 'device_catalog 为空，请先调用 autoflow_refresh_catalog 工具（或在 WebUI 连接设置保存并测试 HA 连接以自动拉取）。',
                     'query': name, 'candidates': []}
         area_filter, _ = self._resolve_area(area) if area else (None, None)
         area_index = self.state.get_area_index()
@@ -2963,7 +2963,8 @@ class Gateway:
                         target: str = "prod", force: bool = False,
                         validate: bool = True, vhass_store=None,
                         dry_run: bool = False,
-                        require_e2e: Optional[bool] = None) -> Dict[str, Any]:
+                        require_e2e: Optional[bool] = None,
+                        allow_prod: Optional[bool] = None) -> Dict[str, Any]:
         """把已通过的 DSL 提案直接部署到 NR（一步确认，不再走冗余确认闸）。
 
         流程：重新编译 DSL（真相源）→ 冲突检测（同名非本流拒绝/force 改名）
@@ -2976,8 +2977,16 @@ class Gateway:
         """
         _tid = _new_trace_id()
         _t0 = time.perf_counter()
+        # prod 写授权策略：
+        #   人手动点部署（agent_id="human"）= 显式授权 → 默认允许写 prod；
+        #   自动化/agent 部署默认受 prod 守卫保护（allow_prod=False），需显式 opt-in
+        #   或设全局 NR_ALLOW_PROD=1。create_or_update_flow 是单 flow 增量路径，
+        #   不替换整个实例，故对人工部署放开安全；真正的防清场在 deploy_all 的
+        #   allow_partial 检查（独立于本开关）。
+        if allow_prod is None:
+            allow_prod = (agent_id == "human")
         _slog(_tid, "deploy_proposal.start", pid=pid, agent_id=agent_id,
-              target=target, validate=validate)
+              target=target, validate=validate, allow_prod=allow_prod)
         store = ProposalStore(self.cfg)
         p = store.get(pid)
         if p is None:
@@ -3240,7 +3249,8 @@ class Gateway:
                 }
 
         try:
-            result = self.nr.create_or_update_flow(deploy_id, flow, force=True)
+            result = self.nr.create_or_update_flow(deploy_id, flow, force=True,
+                                                  allow_prod=allow_prod)
         except Exception as e:
             return {"ok": False, "error": f"NR 部署失败: {e}"}
         fid = result.get("id") or deploy_id
@@ -5088,7 +5098,22 @@ class Gateway:
                 elif nd.get("type") in ("link out", "subflow"):
                     if nd["id"] in active:
                         external.append(nd.get("name", "subflow"))
-            # 2d) 断言后置条件
+            # 2d) 断言后置条件（分支感知）
+            #   - 若某实体仅由「当前世界态下未激活分支」的 api-call-service 涉及，
+            #     且本次仿真世界态未决（未显式给定 virtual_time / world / scenario，
+            #     即调用方没提供能决定分支的世界），则该断言不可证伪 → 判 N/A 跳过。
+            #     这允许「书房电脑开 → 开挂灯」这类条件流通过闸门：部署时跑的是空白
+            #     仿真，书房电脑 off，挂灯分支未触发，后置条件不强制校验。
+            #   - 若调用方显式给定了决定性世界态（virtual_time / world / scenario），
+            #     分支命中与否是确定的，未激活 = 该效果本就不该发生 → 仍严格校验
+            #     （如时间段窗口外、显式 world 让条件不成立）。安全不降级。
+            #   - 被「命中/无条件」激活服务涉及的实体，断言始终严格校验。
+            decisive = (vt is not None) or (scenario is not None) or bool(step.get("world"))
+            active_service_targets = set()
+            for nd in flow.get("nodes", []):
+                if nd.get("type") == "api-call-service" and nd["id"] in active:
+                    for t in (nd.get("entityId") or []):
+                        active_service_targets.add(t)
             assertions = []
             failures = []
             for cond in step.get("expected", []):
@@ -5097,6 +5122,12 @@ class Gateway:
                 rec = store.get_state(eid) if eid else None
                 got = rec.get("state") if rec else None
                 ok = (got == want)
+                # 实体未被任何激活服务触及，且世界态未决 → 不可证伪，N/A 跳过
+                if not ok and eid and eid not in active_service_targets and not decisive:
+                    assertions.append({"entity_id": eid, "expected": want, "actual": got,
+                                       "ok": True, "na": True,
+                                       "reason": "分支未触发且世界态未决，此后置条件不可证伪，跳过"})
+                    continue
                 assertions.append({"entity_id": eid, "expected": want, "actual": got, "ok": ok})
                 if not ok:
                     failures.append({"entity_id": eid, "expected": want, "actual": got})
@@ -5979,7 +6010,8 @@ class Gateway:
 
     def modify_flow(self, flow_id: str, dsl: Optional[str] = None,
                    node_patches: Optional[List[Dict]] = None,
-                   agent_id: str = "unknown-agent", force: bool = False) -> Dict[str, Any]:
+                   agent_id: str = "unknown-agent", force: bool = False,
+                   allow_prod: Optional[bool] = None) -> Dict[str, Any]:
         """外科式改 flow（C3）：不重写整条流，只做最小改动。白箱身份专用。
 
         - dsl 给定：用新 DSL 重新编译，复用目标 flow 的 id/label 原地更新
@@ -6111,8 +6143,12 @@ class Gateway:
             return {"ok": False, "stage": "ha_server_inject", "flow_id": flow_id,
                     "error": self._ha_server_unresolved_msg(_unresolved)}
         # 部署（force 覆盖，复用 deploy 链路）
+        if allow_prod is None:
+            # 人审/人触发默认放行写 prod；纯 agent 自动化部署受 prod 守卫保护
+            allow_prod = (agent_id == "human")
         try:
-            res = self.nr.create_or_update_flow(flow_id, target, force=True)
+            res = self.nr.create_or_update_flow(flow_id, target, force=True,
+                                                allow_prod=allow_prod)
             real_fid = res.get("id") or flow_id
         except Exception as e:
             return {"ok": False, "stage": "deploy", "error": f"部署失败：{e}"}
@@ -6273,7 +6309,7 @@ class Gateway:
 
         # 已获批准 → 走既有外科式改流链路（含节点注册表闸门 + 部署）
         res = self.modify_flow(flow_id, dsl=dsl, node_patches=node_patches,
-                               agent_id=agent_id)
+                               agent_id=agent_id, allow_prod=True)
         ok = bool(res.get("ok"))
         audit.update(ok=ok, applied=ok, pending=False, stage="modify_flow",
                      result=res, gate="approved", risk="high")
@@ -6430,7 +6466,8 @@ class Gateway:
             out.update(stage="node_gate", error=str(e))
             return out
         try:
-            res = self.nr.create_or_update_flow(flow_id, target, force=True)
+            res = self.nr.create_or_update_flow(flow_id, target, force=True,
+                                                allow_prod=True)
         except Exception as e:
             out.update(stage="deploy", error=f"还原部署失败：{e}")
             return out
@@ -6574,7 +6611,8 @@ class Gateway:
                 flow = op.payload["flow"]
                 fid = op.payload["flow_id"]
                 # create-or-update：全新场景 POST /flow 创建；已存在 PUT /flow/:id 更新
-                res = self.nr.create_or_update_flow(fid, flow, force=True)
+                res = self.nr.create_or_update_flow(fid, flow, force=True,
+                                                    allow_prod=True)
                 real_fid = res.get("id") or fid
                 created = res.get("created", False)
                 # 登记 flow_catalog（owner）

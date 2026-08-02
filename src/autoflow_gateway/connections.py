@@ -19,6 +19,8 @@ AutoFlow Gateway — 连接设置（Home Assistant / Node-RED / Bark 推送）
 """
 import os
 import json
+import logging
+import threading
 import tempfile
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -310,14 +312,38 @@ def _http_probe(url: str, timeout: float = 5.0, headers: Optional[Dict[str, str]
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
-def _test_ha(cfg) -> Dict[str, Any]:
+def _maybe_refresh_catalog(gateway) -> None:
+    """HA 连接成功后后台拉取一次设备目录（非阻塞），稍后 resolve/list 只读缓存。"""
+    def _pull():
+        try:
+            from .gateway import Gateway
+            gw = gateway or Gateway()
+            gw.refresh_catalog()
+            try:
+                total = len(gw.state.get_device_catalog().get("entities", {}))
+                logging.getLogger(__name__).info("设备目录已刷新：共 %d 个设备", total)
+            except Exception:
+                pass
+        except Exception as e:
+            logging.getLogger(__name__).warning("设备目录后台刷新失败：%s", e)
+    try:
+        threading.Thread(target=_pull, daemon=True).start()
+    except Exception:
+        pass
+
+
+def _test_ha(cfg, gateway=None) -> Dict[str, Any]:
     server = (os.environ.get("HASS_SERVER") or getattr(cfg, "hass_server", "") or "").rstrip("/")
     token = os.environ.get("HASS_TOKEN") or getattr(cfg, "hass_token", "") or ""
     if not server or "<" in server:
         return {"ok": False, "error": "未配置 HA 地址"}
     r = _http_probe(server + "/api/", headers={"Authorization": f"Bearer {token}"} if token else None)
     if r.get("ok"):
-        return {"ok": True, "status": r["status"], "detail": "已连接（令牌有效）" if token else "服务可达（未配令牌）"}
+        _maybe_refresh_catalog(gateway)
+        detail = ("已连接（令牌有效）；正在后台拉取全屋设备目录，稍候即可用 "
+                  "autoflow_resolve_entity / autoflow_list_entities 解析设备"
+                  if token else "服务可达（未配令牌）")
+        return {"ok": True, "status": r["status"], "detail": detail}
     if r.get("status") in (401, 403):
         return {"ok": False, "status": r["status"],
                 "error": "服务可达，但令牌无效或缺失" if token else "服务可达，但需要长期访问令牌"}
@@ -363,7 +389,7 @@ def test_connections(cfg, targets: Optional[List[str]] = None, gateway=None,
     out: Dict[str, Any] = {}
     for t in targets:
         if t == "ha":
-            out["ha"] = _test_ha(cfg)
+            out["ha"] = _test_ha(cfg, gateway)
         elif t == "nr":
             out["nr"] = _test_nr(cfg, gateway)
         elif t == "bark":

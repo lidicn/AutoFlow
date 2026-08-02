@@ -77,13 +77,16 @@ class NRLayer:
         """单 flow PUT 更新（1880 实例可用路径）。不暴露 deploy_all。"""
         return self.client.update_flow(flow_id, flow_data, force=force)
 
-    def create_or_update_flow(self, flow_id: str, flow_data: Dict, force: bool = False) -> Dict:
+    def create_or_update_flow(self, flow_id: str, flow_data: Dict, force: bool = False,
+                              allow_prod: bool = False) -> Dict:
         """创建或更新 flow（部署新场景时先用此入口）。
 
         不存在则 POST /flow 创建；已存在则 PUT /flow/:id 更新。
         返回 {'id', 'created', 'raw'} —— 调用方应以返回的真实 id 登记 flow_catalog。
+        allow_prod：透传 prod 写授权（人手动部署默认 True，agent 部署默认受守卫保护）。
         """
-        return self.client.create_or_update_flow(flow_id, flow_data, force=force)
+        return self.client.create_or_update_flow(flow_id, flow_data, force=force,
+                                                 allow_prod=allow_prod)
 
     def add_nodes(self, flow_id: str, new_nodes: List[Dict]) -> Dict:
         return self.client.add_nodes(flow_id, new_nodes)

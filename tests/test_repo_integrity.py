@@ -23,11 +23,34 @@ import subprocess
 
 import pytest
 
-# 仓库根 = 本文件上溯三级（tests/ -> autoflow_gateway/ -> 仓库根）
-_REPO_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..")
+# ★2026-08-02 修复：原实现把仓库根写死为「本文件上溯两级」、src 写死为
+# `autoflow_gateway/src/autoflow_gateway`（仅适配 <root>/autoflow_gateway/src 那种嵌套布局）。
+# 在 <root>/src 扁平布局下，_REPO_ROOT 会算到盘符根（如 E:\），`.git` 找不到 →
+# 两条用例被 skipif 静默跳过 → **这道 #708 防线形同虚设**（与 FEEDBACK #13 同源的虚假绿灯）。
+# 改为运行时探测：向上找 .git 定位仓库根，再在根下探测实际 src 路径。
+def _find_repo_root(start: str) -> str:
+    cur = os.path.abspath(start)
+    while True:
+        if os.path.isdir(os.path.join(cur, ".git")):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:                      # 到盘符根仍未找到
+            return os.path.abspath(os.path.join(start, "..", ".."))
+        cur = parent
+
+
+_REPO_ROOT = _find_repo_root(os.path.dirname(__file__))
+
+# 两种已知布局，按序探测（相对仓库根，git 命令也用这个相对路径做 pathspec）
+_SRC_REL_CANDIDATES = (
+    "src/autoflow_gateway",                      # 扁平布局：<root>/src/autoflow_gateway
+    "autoflow_gateway/src/autoflow_gateway",     # 嵌套布局：<root>/autoflow_gateway/src/...
 )
-_SRC_REL = "autoflow_gateway/src/autoflow_gateway"
+_SRC_REL = next(
+    (rel for rel in _SRC_REL_CANDIDATES
+     if os.path.isdir(os.path.join(_REPO_ROOT, rel.replace("/", os.sep)))),
+    _SRC_REL_CANDIDATES[0],
+)
 _SRC_ABS = os.path.join(_REPO_ROOT, _SRC_REL.replace("/", os.sep))
 
 # 已知豁免：`nr_subflows/history/` 是构建产物与一次性脚本目录，
@@ -38,8 +61,11 @@ _EXEMPT_DIR_PARTS = ("nr_subflows", "history")
 def _git(*args: str):
     """跑 git 子命令；失败返回 None（用于优雅降级而非误报）。"""
     try:
+        # 用 cwd 进仓库而非 `git -C <abs>`：在 Git Bash + 共享盘(UNC) 场景下
+        # `-C`/`--git-dir` 的绝对路径解析会失败，cwd 形式通用。
         out = subprocess.run(
-            ["git", "-C", _REPO_ROOT, *args],
+            ["git", *args],
+            cwd=_REPO_ROOT,
             capture_output=True, text=True, timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
@@ -72,7 +98,10 @@ def _disk_py_files():
 def _tracked_paths():
     """master tree ∪ 当前 index 的已跟踪路径集合。"""
     tracked = set()
-    tree = _git("ls-tree", "-r", "--name-only", "master", "--", _SRC_REL)
+    # 主线分支名不固定（master/main/特性分支），master 取不到时回退 HEAD，
+    # 避免因分支名不匹配而静默降级成「只看 index」。
+    tree = (_git("ls-tree", "-r", "--name-only", "master", "--", _SRC_REL)
+            or _git("ls-tree", "-r", "--name-only", "HEAD", "--", _SRC_REL))
     if tree:
         tracked.update(x.strip() for x in tree.splitlines() if x.strip())
     idx = _git("ls-files", "--", _SRC_REL)

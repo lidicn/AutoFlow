@@ -4,6 +4,14 @@
 让「部署前自检 / 真机回读」类测试无需真 Node-RED / HA 即可跑（CB 接管 WB2 失联期自测）。
 """
 import sys
+from pathlib import Path
+
+# ★ 必须排在任何 autoflow_gateway 导入之前：把【本仓库】src 顶到 sys.path 首位。
+# 否则 site-packages 里的 editable 安装（_editable_impl_autoflow_gateway.pth，
+# 指向另一处旧仓库副本）会劫持包解析 —— conftest 先于 test module 被导入，
+# 此刻包已从旧副本载入并缓存进 sys.modules，各 test 文件里的
+# sys.path.insert 再插也无效，结果是"测试跑的根本不是当前仓库的代码"。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import pytest
 from autoflow_gateway.lib.nr_client import NodeRedClient

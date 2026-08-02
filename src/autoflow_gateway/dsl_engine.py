@@ -245,11 +245,18 @@ class TimeRange:
     """时间段条件门：编译为 time-range-switch 节点（2 输出：窗口内 out0 继续主链，窗口外 out1 空=停止）。
     DSL: 时间段: 07:00-23:00  → 在时间段内继续主链(body)，不在则停止。
     可加星期前缀/后缀限定星期：时间段: 工作日 20:00-23:00 / 时间段: 20:00-23:00 周末。
-    body 为「主链/通过分支」（缩进写在门体下）。"""
+    body 为「主链/通过分支」（缩进写在门体下），else_body 为「窗口外分支」（否则体）。
+
+    ★FEEDBACK #9 修复：解析层（_parse 顶层块栈）对所有门型步骤都会把 `否则:` 的
+    步骤 append 到 `gate.else_body`，但本 dataclass 此前**没有该字段** →
+    `时间段:` 后跟 `否则:` 直接 AttributeError 编译期崩溃（且抛的是 Python 内部
+    异常，用户看不懂）。time-range-switch 本身就有 out1=窗口外，语义天然对应
+    「否则」，故补齐字段并在 emit 层接到 out1（而非禁用该语法）。"""
     start: str
     end: str
     weekday: Optional[str] = None   # 映射 time-range-switch 的 only 属性：weekdays/weekends/all/monday..sunday
-    body: list = field(default_factory=list)        # 通过分支（主链）
+    body: list = field(default_factory=list)        # 通过分支（主链，窗口内 out0）
+    else_body: list = field(default_factory=list)   # 窗口外分支（否则体，out1）
 
 
 @dataclass
@@ -1547,22 +1554,33 @@ def compile(scene: Scene, target: str = "staging") -> dict:
     for cond in scene.conditions:
         parsed = _parse_state_condition(cond)
         if parsed:
-            # $state('entity') = 'value' 或 自然写法 entity=value / entity!=value
-            # 均编译为 api-current-state 门控节点（halt_if 做等值判定），
-            # pass 输出0 继续主链；fail 输出1 不连=条件不符则终止。
+            # 状态断言：编译为「读取 api-current-state（不门控）+ 后续 switch 按 payload 路由」
+            # 读节点把实体态写入 msg.payload(outputProperties)，switch 据此判定
+            # payload==expected → 继续主链(body)，否则 → 空(条件不符终止)。
+            # 注意：NR 原生 api-current-state 的 halt_if 是"匹配即 halt 走 output1"，
+            # 与"条件满足才执行"语义相反，故此处不门控、改由 switch 路由（FEEDBACK #8）。
             entity, expected, compare, vtype = parsed
             resolved = _resolve_entity(entity)
             op_label = "≠" if compare == "is_not" else "="
-            sid = em.add("api-current-state", name=f"条件: {entity}{op_label}{expected}",
+            rid = em.add("api-current-state", name=f"条件: {entity}{op_label}{expected}",
                          server=HA_SERVER_ID, version=7,
                          entityId=resolved,
                          state_type=vtype, blockInputOverrides=False,
-                         outputProperties=[],
-                         halt_if=expected, halt_if_type=vtype, halt_if_compare=compare,
-                         outputs=2)
+                         outputProperties=[{"property": "payload", "propertyType": "msg",
+                                            "value": "", "valueType": "entityState"}],
+                         state_location="data", override_payload=False,
+                         halt_if="", halt_if_type=vtype, halt_if_compare=compare,
+                         outputs=1)
+            _sw_t = "ne" if compare == "is_not" else "eq"
+            sw = em.add("switch", name=f"分支: {entity}{op_label}{expected}",
+                        property="payload", propertyType="msg",
+                        rules=[{"t": _sw_t, "v": expected, "vt": vtype},
+                               {"t": "else"}],
+                        checkall="true", repair=False, outputs=2)
+            em.connect(rid, sw)
             for s in all_src_ids:
-                em.connect(s, sid)
-            all_src_ids = [sid]
+                em.connect(s, rid)
+            all_src_ids = [sw]
         else:
             # 非状态断言（其他复杂 JSONata 表达式）仍走 jsonata switch 兜底；
             # 经 _sanitize_jsonata 归一全角符号（（）＝），避免 R7 静默不求值。
@@ -2021,24 +2039,31 @@ def _emit_current_state(em: _Emitter, st: CurrentState) -> str:
                  server=HA_SERVER_ID, version=7,
                  entityId=entity,
                  state_type="str", blockInputOverrides=False,
-                 outputProperties=[],
+                 outputProperties=[{"property": "payload", "propertyType": "msg",
+                                    "value": "", "valueType": "entityState"}],
+                 state_location="data", override_payload=False,
                  # state_type=str, comparator=is → 精确匹配 state 值
                  state_value=st.state,
-                 # halt_if 与查询状态同源（不再硬编码 "off"）：
-                 # 当前态==查询态时按节点语义路由到 pass/fail 输出
-                 halt_if=st.state, halt_if_type="str", halt_if_compare="is",
-                 outputs=2)
-    # pass 分支（主链 body）：从 pass 输出(0) 串接
+                 # 不门控：仅把实体态输出到 msg.payload（node 原生状态改写 msg.data 避免冲突），
+                 # 分支路由交由后续 switch 节点按 payload 判定（与 _emit_condition / 取值节点一致）
+                 halt_if="", halt_if_type="str", halt_if_compare="is",
+                 outputs=1)
+    # 分支路由（替代原 halt_if 门控）：state==st.state → body（out0），否则 → else_body（out1）
+    sw = em.add("switch", name=f"分支: {st.entity}={st.state}",
+                property="payload", propertyType="msg",
+                rules=[{"t": "eq", "v": st.state, "vt": "str"}, {"t": "else"}],
+                checkall="true", repair=False, outputs=2)
+    em.connect(nid, sw)
     main_last = None
     if st.body:
-        _, tail = _emit_body(em, st.body, [nid], x=560)
+        _, tail = _emit_body(em, st.body, [sw], x=560)
         if tail:
             main_last = tail
-    # fail 分支（否则体）：从 fail 输出(1) 串接 —— 必须连到体首节点(head)，否则首节点孤儿
+    # fail 分支（否则体）：从 switch 的 out1 串接 —— 必须连到体首节点(head)，否则首节点孤儿
     if st.else_body:
         else_head, _ = _emit_body(em, st.else_body, [], x=560)
         if else_head:
-            em.connect_out(nid, 1, else_head)
+            em.connect_out(sw, 1, else_head)
     # 关键修复：作为「门」被嵌入其它 body 时，父节点必须把连线接到本门【入口】(nid)，
     # 而非门体尾节点；否则本门自身会被留成孤儿（见 嵌套门孤儿接线 bug）。
     # 门体内 body/else_body 已在上方用 connect/connect_out 各自接到本门输出口，无需返回尾节点。
@@ -2117,10 +2142,16 @@ def _emit_time_range(em: _Emitter, st: TimeRange) -> str:
                   outputs=2)
     # 2 输出节点需显式双 wires 数组（em.add 默认只给 [[]]）
     nd = em._find(nid)
-    nd["wires"] = [[], []]   # out0=窗口内(接主链)，out1=窗口外(空=停止)
+    nd["wires"] = [[], []]   # out0=窗口内(接主链)，out1=窗口外(否则体，无否则则空=停止)
     # 通过分支（主链 body）：从 out0 串接（_emit_body 默认接父节点输出0）
     if st.body:
         _emit_body(em, st.body, [nid], x=560)
+    # 窗口外分支（否则体）：从 out1 串接 —— 必须连到体首节点(head)，否则首节点孤儿。
+    # ★FEEDBACK #9：此前 TimeRange 无 else_body 字段，`时间段:`+`否则:` 编译期崩溃。
+    if st.else_body:
+        else_head, _ = _emit_body(em, st.else_body, [], x=560)
+        if else_head:
+            em.connect_out(nid, 1, else_head)
     # 关键修复：作为「门」被嵌入其它 body 时须返回本门【入口】(nid)，
     # 否则父节点会把连线接到门体尾节点、本门自身留成孤儿（嵌套门孤儿接线 bug）。
     # 门体已在上方从本门 out0 串接好，无需返回尾节点。
@@ -2466,6 +2497,7 @@ def _parse_state_condition(cond: str) -> Optional[tuple]:
     其他复杂表达式（含 $ / 函数调用( / and / or / < / > 等）返回 None → 走 jsonata switch 兜底。
     """
     c = _sanitize_jsonata(cond.strip())
+    c = c.rstrip(":")  # 剥离 DSL 块尾冒号（如「条件: X == on:」的冗余冒号）
     # 1. $state('entity') = 'value'
     m = re.match(r"^\s*\$state\(\s*'([^']+)'\s*\)\s*=\s*'([^']*)'\s*$", c)
     if m:
@@ -2475,7 +2507,8 @@ def _parse_state_condition(cond: str) -> Optional[tuple]:
     # 排除明显是 JSONata 表达式的情况：含 $、函数调用(、逻辑词、比较符
     if any(ch in c for ch in "$(") or re.search(r"\b(and|or)\b", c) or "<" in c or ">" in c:
         return None
-    m2 = re.match(r"^([\w.\-:]+)\s*(!=|==|<>|=)\s*([\w.\-:]+)$", c)
+    # value 不含冒号（避免 DSL 块尾冒号 "on:" 被误吞进 value，导致 switch 判 "on:"≠"on"）
+    m2 = re.match(r"^([\w.\-:]+)\s*(!=|==|<>|=)\s*([\w.\-]+)$", c)
     if m2:
         ent, op, val = m2.group(1), m2.group(2), m2.group(3)
         compare = "is_not" if op in ("!=", "<>") else "is"

@@ -34,7 +34,12 @@ nssm.exe
 backups/
 nr_backup/
 # autoflow_gateway 根下调试 / 临时脚本
+# ★注意：`_*.py` 不带斜杠 → git 会【递归匹配任意目录】，曾误伤
+#   src/autoflow_gateway/__init__.py（下划线开头）导致包入口从未进版本库，
+#   clone 出来 `from autoflow_gateway import Gateway` 直接坏（#708 同类）。
+#   下面的 `!__init__.py` 是必需豁免，勿删。
 _*.py
+!__init__.py
 _bark_watch.py
 _build_night_home.py
 # 运行/验证产物目录

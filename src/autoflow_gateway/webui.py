@@ -205,11 +205,11 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         except Exception:
             agents_n = 0
         try:
-            pending_n = len(gw.list_pending())
+            pending_n = len(await asyncio.to_thread(gw.list_pending))
         except Exception:
             pending_n = 0
         try:
-            deployed_n = len(gw.list_deployed())
+            deployed_n = len(await asyncio.to_thread(gw.list_deployed))
         except Exception:
             deployed_n = 0
         try:
@@ -306,7 +306,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
 
     async def approve(request: Request):
         op_id = request.path_params["id"]
-        result = gw.approve(op_id, "human")
+        result = await asyncio.to_thread(gw.approve, op_id, "human")
         code = 200 if result.get("ok") else 502  # 502 = 上游(NR)执行失败
         return _js(result, status=code)
 
@@ -427,10 +427,12 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         validate = b.get("validate", True)  # 部署前 staging 闸门（vhass 重放断言），默认开
         # require_e2e：显式传 true/false 覆盖提案落档意图；缺省 None → 继承提案 content.require_e2e。
         require_e2e = b.get("require_e2e", None)
+        # allow_prod：人手动部署默认 True（显式授权写 prod）；如需强制守卫可传 false。
+        allow_prod = b.get("allow_prod", True)
         try:
-            res = gw.deploy_proposal(pid, agent_id="human", target=target,
-                                     force=force, validate=validate,
-                                     require_e2e=require_e2e)
+            res = await asyncio.to_thread(gw.deploy_proposal, pid, agent_id="human",
+                                          target=target, force=force, validate=validate,
+                                          require_e2e=require_e2e, allow_prod=allow_prod)
         except Exception as e:
             return _js({"ok": False, "error": str(e)}, 400)
         if not res.get("ok"):
@@ -440,14 +442,14 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
 
     # ── 已部署（flow_catalog + 注册表↔NR 分叉对账）──
     async def list_deployed(request: Request):
-        return _js({"deployed": gw.list_deployed(stale_check=True)})
+        return _js({"deployed": await asyncio.to_thread(gw.list_deployed, stale_check=True)})
 
     async def undeploy_flow(request: Request):
         fid = request.path_params["id"]
         b = await _body(request)
         force = bool(b.get("force", False))
         try:
-            res = gw.undeploy(fid, force=force)
+            res = await asyncio.to_thread(gw.undeploy, fid, force=force)
         except Exception as e:
             return _js({"ok": False, "error": str(e)}, 400)
         if not res.get("ok"):
@@ -754,7 +756,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     async def trigger_flow_endpoint(request: Request):
         flow_id = request.path_params.get("flow_id")
         try:
-            flow = gw.nr.get_flow(flow_id)
+            flow = await asyncio.to_thread(gw.nr.get_flow, flow_id)
         except Exception as e:
             return _js({"ok": False, "error": f"获取 flow 失败: {e}"}, 500)
         injects = [n for n in (flow.get("nodes") or []) if n.get("type") == "inject"]
@@ -764,7 +766,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         triggered, errors = [], []
         for n in injects:
             try:
-                code = gw.nr.trigger_inject(n["id"])
+                code = await asyncio.to_thread(gw.nr.trigger_inject, n["id"])
                 triggered.append({"id": n["id"], "name": n.get("name", ""), "status": code})
             except Exception as e:
                 errors.append({"id": n["id"], "error": str(e)})

@@ -946,11 +946,11 @@ class NodeRedClient:
                 # 行为：POST /flow 时 NR 会重新生成 flow id（不采纳我们传的 id），
                 # 且 POST 不持久化节点；PUT /flow/:id 能落盘却要求 flow 已存在。
                 # 故三步：① POST 建壳拿真实 id R ② 把节点 z 改写为 R ③ PUT /flow/R 补节点。
-                created = self.create_flow(flow_data, force=force)
+                created = self.create_flow(flow_data, force=force, allow_prod=allow_prod)
                 real_id = created.get("id") or flow_id
                 for n in flow_data.get("nodes", []):
                     n["z"] = real_id
-                self.update_flow(real_id, flow_data, force=force)
+                self.update_flow(real_id, flow_data, force=force, allow_prod=allow_prod)
                 return {"id": real_id, "created": True, "raw": created.get("raw")}
             # 已存在 → 走更新路径
             result = self._json("PUT", f"/flow/{flow_id}", json=flow_data)

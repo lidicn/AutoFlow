@@ -6,16 +6,16 @@
 
 工具数契约（含 B1/B2 新增的 2 个决策取回工具 + 只读/诊断回看工具 autoflow_get_flow / autoflow_debug_read /
 autoflow_get_nr_flow / autoflow_trigger_inject）：
-  · 用户工具 24（含 autoflow_request_decision / autoflow_get_decision /
+  · 用户工具 25（含 autoflow_request_decision / autoflow_get_decision /
     autoflow_list_decisions 决策闭环三件套，autoflow_get_flow / autoflow_debug_read /
     autoflow_get_nr_flow / autoflow_trigger_inject 诊断回看；其中 autoflow_debug_read /
     autoflow_get_nr_flow / autoflow_trigger_inject 仅注册于 /mcp，不进 admin）
-  · 单用户端点 /mcp = 24 用户 + 13 刀 = 37（刀含 WB1-F/#694 的 autoflow_apply /
+  · 单用户端点 /mcp = 25 用户 + 13 刀 = 38（刀含 WB1-F/#694 的 autoflow_apply /
     autoflow_apply_rollback、CB7/#692 的 autoflow_apply_state_from_debug 胶水，及 #701 的
     autoflow_get_trace apply 轨迹读取刀）
-  · /mcp-admin = 21 用户 + 13 刀 + 7 运维 = 41（autoflow_debug_read / autoflow_get_nr_flow /
+  · /mcp-admin = 22 用户 + 13 刀 + 7 运维 = 42（autoflow_debug_read / autoflow_get_nr_flow /
     autoflow_trigger_inject 仅注册于 /mcp，不进 admin；golden/acceptance 评测杠杆已迁 archive，见 C4）
-  · black 经 tools/list 过滤后见 24 用户工具（13 把刀已隐藏）
+  · black 经 tools/list 过滤后见 25 用户工具（13 把刀已隐藏）
 """
 import os
 import sys
@@ -44,12 +44,12 @@ class TestSingleEntryMerge(unittest.TestCase):
 
     def test_user_endpoint_carries_all_tools(self):
         names = {t.name for t in ms.mcp._tool_manager.list_tools()}
-        self.assertEqual(len(names), 37, "单用户端点 /mcp 应为 37 工具（24 用户 + 13 刀）")
+        self.assertEqual(len(names), 38, "单用户端点 /mcp 应为 38 工具（25 用户 + 13 刀）")
         self.assertTrue(_KNIVES.issubset(names), "14 把部署/自检刀必须在 /mcp 上注册")
 
     def test_admin_endpoint_unchanged(self):
         names = {t.name for t in ms.mcp_admin._tool_manager.list_tools()}
-        self.assertEqual(len(names), 41, "/mcp-admin 应为 41 工具（21 用户 + 13 刀 + 7 运维）")
+        self.assertEqual(len(names), 42, "/mcp-admin 应为 42 工具（22 用户 + 13 刀 + 7 运维）")
         self.assertTrue(_KNIVES.issubset(names))
 
     def test_filter_strips_knives_for_black(self):
@@ -58,7 +58,7 @@ class TestSingleEntryMerge(unittest.TestCase):
         out = json.loads(ms._filter_tools_list(json.dumps(fake).encode()))
         visible = {t["name"] for t in out["result"]["tools"]}
         self.assertEqual(visible, set(all_names) - _KNIVES)
-        self.assertEqual(len(visible), 24, "black 经 tools/list 过滤后应仅见 24 用户工具")
+        self.assertEqual(len(visible), 25, "black 经 tools/list 过滤后应仅见 25 用户工具")
 
     def test_filter_passthrough_non_tools_list(self):
         self.assertEqual(ms._filter_tools_list(b""), b"", "空响应原样透传")

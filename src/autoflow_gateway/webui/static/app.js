@@ -99,6 +99,7 @@ function setTab(tab) {
   $$(".navitem").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   TABS.forEach((t) => ($("#view-" + t).hidden = t !== tab));
   if (tab === "dashboard") loadDashboard();
+  else if (tab === "agents") loadAgents();
   else if (tab === "pending") loadPending();
   else if (tab === "proposals") loadProposals();
   else if (tab === "deployed") loadDeployed();

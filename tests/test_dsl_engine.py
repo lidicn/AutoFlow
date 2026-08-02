@@ -356,6 +356,16 @@ DSL_GATE_ELSE = """
 动作: light.turn_on(light.living_main)
 """
 
+# FEEDBACK #9 回归：时间段门后跟 否则 块（此前 TimeRange 无 else_body 字段 → 编译期 AttributeError）
+DSL_TIME_RANGE_ELSE = """
+场景: 时段内开灯时段外关灯
+触发: inject
+时间段: 07:00-23:00
+  动作: light.turn_on(light.living_main)
+否则:
+  动作: light.turn_off(light.living_main)
+"""
+
 
 def test_parse_current_state():
     s = parse(DSL_QUERY_STATE)
@@ -373,18 +383,27 @@ def test_parse_current_state_alias():
 
 
 def test_compile_current_state_node():
-    """查询 编译为 api-current-state，2 输出 + 精确匹配 halt_if。"""
+    """查询 编译为 api-current-state：不门控(outputs=1, halt_if="")、把 state 输出到
+    msg.payload(outputProperties)，分支路由交由后续 switch 节点承担（FEEDBACK #8）。"""
     flow = compile_dsl(DSL_QUERY_STATE)
     cs = _by_type(flow, "api-current-state")
     assert len(cs) == 1
     n = cs[0]
-    assert n["outputs"] == 2
+    assert n["outputs"] == 1, "查询门不再门控，单输出"
     assert n["entityId"] == "light.living_main"
     assert n["state_value"] == "off"
-    assert n["halt_if"] == "off"           # 状态不符则 halt（fail 走输出1）
+    assert n["halt_if"] == "", "状态不符不再 halt，交由后续 switch 路由"
     assert n["halt_if_compare"] == "is"
     assert n["version"] == 7
     assert n["server"] == E.HA_SERVER_ID
+    # FEEDBACK #8：实体态必须输出到 msg.payload，且 node 原生状态改写 msg.data 避免冲突
+    assert n.get("outputProperties"), "outputProperties 不得为空"
+    assert {"property": "payload", "propertyType": "msg",
+            "value": "", "valueType": "entityState"} in n["outputProperties"]
+    assert n.get("state_location") == "data"
+    assert n.get("override_payload") is False
+    # 下游必须有 switch 节点按 payload 分支（替代原 halt 门控）
+    assert any(nd["type"] == "switch" for nd in flow["nodes"]), "应有 switch 分支节点"
     # 铁律：绝不生成 Function
     assert "function" not in _types(flow)
 
@@ -410,6 +429,37 @@ def test_compile_time_range_node():
     assert "function" not in _types(flow)
 
 
+def test_parse_time_range_else_body():
+    """FEEDBACK #9：时间段 后的 否则 块应落进 TimeRange.else_body（此前该字段不存在）。"""
+    s = parse(DSL_TIME_RANGE_ELSE)
+    tr = [b for b in s.body if hasattr(b, "start") and hasattr(b, "end")]
+    assert len(tr) == 1, s.body
+    assert hasattr(tr[0], "else_body"), "TimeRange 必须有 else_body 字段"
+    assert len(tr[0].body) == 1, "窗口内分支 1 个动作"
+    assert len(tr[0].else_body) == 1, "窗口外分支 1 个动作"
+
+
+def test_compile_time_range_else_wires():
+    """FEEDBACK #9：时间段+否则 必须能编译（不再 AttributeError），
+    且 out0=窗口内接主链、out1=窗口外接否则体首节点，两边都不是孤儿。"""
+    flow = compile_dsl(DSL_TIME_RANGE_ELSE)          # 此前这行直接抛 AttributeError
+    tr = _by_type(flow, "time-range-switch")
+    assert len(tr) == 1
+    n = tr[0]
+    assert n["outputs"] == 2
+    by_id = {x["id"]: x for x in flow["nodes"]}
+    assert n["wires"][0], "out0(窗口内) 应连主链"
+    assert n["wires"][1], "out1(窗口外) 应连否则体首节点"
+    on_target = by_id[n["wires"][0][0]]
+    off_target = by_id[n["wires"][1][0]]
+    assert on_target["type"] == "api-call-service"
+    assert off_target["type"] == "api-call-service"
+    assert on_target["id"] != off_target["id"], "两分支须是不同节点"
+    # 语义方向：out0=turn_on，out1=turn_off
+    assert "turn_on" in json.dumps(on_target, ensure_ascii=False)
+    assert "turn_off" in json.dumps(off_target, ensure_ascii=False)
+
+
 def test_parse_gate_else_body():
     """查询 后的 否则 块应塞进该门节点的 else_body（非主链）。"""
     s = parse(DSL_GATE_ELSE)
@@ -421,13 +471,22 @@ def test_parse_gate_else_body():
 
 
 def test_compile_gate_else_wires():
-    """fail 输出(输出1)应连到 否则 体内的首个节点。"""
+    """查询门改为「不门控 + switch 路由」后：api-current-state output0 → switch，
+    switch 的 out1(否则) 应连到 否则 体内的首个节点（替代原 halt 门控的 output1）。"""
     flow = compile_dsl(DSL_GATE_ELSE)
     cs = _by_type(flow, "api-current-state")
-    assert cs and cs[0]["outputs"] == 2
+    assert cs, "应生成 api-current-state 节点"
+    n = cs[0]
+    assert n["outputs"] == 1, "查询门不再门控，单输出"
     by_id = {n["id"]: n for n in flow["nodes"]}
-    fail_target = cs[0]["wires"][1][0]
-    assert fail_target in by_id, "fail 输出应指向真实节点"
+    # output0 应连到 switch 节点（分支路由）
+    out0_target = n["wires"][0][0]
+    assert by_id[out0_target]["type"] == "switch", "api-current-state output0 应接 switch"
+    sw = by_id[out0_target]
+    # switch 的 out1(否则) 应连到 否则 体首节点
+    assert sw["wires"][1], "switch out1(否则) 应有连线"
+    fail_target = sw["wires"][1][0]
+    assert fail_target in by_id, "switch out1 应指向真实节点"
     # 否则 体的首节点是 change（为 demo_notify 设 payload），再 link out
     assert by_id[fail_target]["type"] in ("change", "link out", "api-call-service")
 
@@ -740,6 +799,59 @@ def test_raw_node_indented_body():
     assert hasattr(sw, "branches") and sw.branches
     raws = [b for b in sw.branches[0].body if isinstance(b, RawNode)]
     assert len(raws) == 1 and raws[0].node_type == "change"
+
+
+def test_condition_gate_emits_state_to_payload():
+    """FEEDBACK #8 回归：条件门(_emit_condition)生成的 api-current-state 必须把实体态
+    输出到 msg.payload(outputProperties)，且不得用 halt_if 门控——否则当 state==on 时
+    节点 halt 走空分支，下游 switch 永远拿不到 on，整条条件流静默断链。"""
+    dsl = (
+        "场景: 条件门输出属性\n"
+        "触发: inject\n"
+        "条件: switch.study_pc == on\n"
+        "    动作: light.turn_on(灯)\n"
+    )
+    flow = compile(parse(dsl))
+    acs = [n for n in flow["nodes"] if n["type"] == "api-current-state"]
+    assert acs, "条件门应生成 api-current-state 节点"
+    node = acs[0]
+    assert node.get("outputProperties"), "outputProperties 不得为空"
+    assert {"property": "payload", "propertyType": "msg",
+            "value": "", "valueType": "entityState"} in node["outputProperties"], \
+        f"outputProperties 须含 entityState→payload: {node['outputProperties']}"
+    assert node.get("halt_if") == "", "条件门不得用 halt_if 门控"
+    assert node.get("state_location") == "data", "须改写 msg.data 避开 payload 冲突"
+    assert node.get("override_payload") is False
+    # 下游须有 switch 按 payload 路由（而非依赖 halt 分支）
+    assert any(n["type"] == "switch" for n in flow["nodes"]), \
+        "条件门下游应有 switch 节点按 payload 分支"
+
+
+def test_query_state_gate_emits_state_to_payload():
+    """FEEDBACK #8 回归：查询门(_emit_current_state, 查询: 语法)生成的 api-current-state
+    同样必须输出 state 到 msg.payload 且不用 halt_if 门控；分支路由由后续 switch 承担。"""
+    dsl = (
+        "场景: 查询状态门\n"
+        "触发: inject\n"
+        "查询: light.living_room on\n"
+        "    动作: light.turn_on(灯)\n"
+        "否则:\n"
+        "    动作: light.turn_off(灯)\n"
+    )
+    flow = compile(parse(dsl))
+    acs = [n for n in flow["nodes"] if n["type"] == "api-current-state"]
+    assert acs, "查询门应生成 api-current-state 节点"
+    node = acs[0]
+    assert node.get("outputProperties"), "outputProperties 不得为空"
+    assert {"property": "payload", "propertyType": "msg",
+            "value": "", "valueType": "entityState"} in node["outputProperties"], \
+        f"outputProperties 须含 entityState→payload: {node['outputProperties']}"
+    assert node.get("halt_if") == "", "查询门不得用 halt_if 门控"
+    assert node.get("state_location") == "data"
+    assert node.get("override_payload") is False
+    # 分支路由由后续 switch 节点承担（state==on → body, 否则 → else_body）
+    switches = [n for n in flow["nodes"] if n["type"] == "switch"]
+    assert switches, "查询门下游应有 switch 节点按 payload 分支"
 
 
 if __name__ == "__main__":
