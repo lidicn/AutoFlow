@@ -39,6 +39,9 @@ nssm.exe
 !src/autoflow_gateway/data/api_specs.json
 !src/autoflow_gateway/data/subflows/*.json
 !src/autoflow_gateway/data/subflows/nr_defs/*.json
+# 教学示例 JSON（README 直接引用，纯占位符无密钥，必须随发布版分发）
+!examples/scene_home_arrive.json
+!examples/subflows/*.json
 # 历史备份目录
 backups/
 nr_backup/
@@ -65,10 +68,10 @@ _archive_restarts/
 # A4 归档区：根目录临时脚本与一次性 flow 导出移入此处（不进版本库）
 scratch/
 
-# 深层历史调试目录（含 build_subflows.py 等 dev 脚本，已移出发布版）整体忽略，
-# 但保留运行时依赖 subflows_built.json（ensure_history_subflow 需读取）
-src/autoflow_gateway/nr_subflows/history/*
-!src/autoflow_gateway/nr_subflows/history/subflows_built.json
+# 深层历史调试目录（build_subflows.py 等 dev 脚本，不随发布版分发）。
+# R2 起唯一的运行时依赖 subflows_built.json 已迁至 data/subflows/nr_defs/，
+# 此处不再有需白名单放行的文件（少一处「被排除目录内捞文件」的脆弱模式）。
+src/autoflow_gateway/nr_subflows/
 # Windows 服务脚本（install_service.ps1 / uninstall_service.ps1 等）不发布
 *.ps1
 # 根目录 backups（区别于 backups）

@@ -43,7 +43,7 @@ class FakeNR:
         self._deleted_oob = set()        # 被用户手动删掉的 flow id（带外）
         self.delete_always_fail = False  # 模拟 NR 删除调用本身失败（半残/权限）
 
-    def create_or_update_flow(self, fid, flow, force=False):
+    def create_or_update_flow(self, fid, flow, force=False, allow_prod=False):
         created = fid not in self._flows
         self._flows[fid] = {"id": fid, "type": "tab",
                             "label": flow.get("label", ""), "nodes": flow.get("nodes", [])}

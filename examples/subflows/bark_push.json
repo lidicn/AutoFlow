@@ -1,0 +1,32 @@
+{
+  "_meta": {
+    "key": "bark_push",
+    "capability": "经自建/官方 Bark 服务推送 iPhone 通知（破微信会话窗口死局，不需科学上网，不受 Tailscale 本地推送判定影响）。",
+    "kind": "subflow（有返回值，可被 DSL 链式调用/分支）",
+    "how_to_use": [
+      "1) 在 Node-RED 中新建一个子流程：入参读 msg.title / msg.body / 可选 msg.bark_*；子流程内部读取环境变量 BARK_SERVER、BARK_KEY，调用 Bark HTTP API 推送。",
+      "2) 复制该子流程的 id，填入下方 nr_subflow_id 占位符。",
+      "3) 把本文件 POST 到网关 /api/subflows/import（网关会自省 NR 子流程、自动抽取 input_schema 与 env_requirements，本文件里的这两个字段仅作搭建参考）。",
+      "4) 之后 DSL 即可写：调用子流程: bark_push(title=`告警`, body=`空调异常`)"
+    ],
+    "contract_note": "网关 import 接口强制 source_type=imported，并以 NR 自省结果为准；此处 input_schema / env_requirements 仅供参考，POST 时会被忽略。真实密钥不进本文件——请写在网关 .env 或 NR 子流程的 env 节点。"
+  },
+  "key": "bark_push",
+  "nr_subflow_id": "<NR_BARK_SUBFLOW_ID>",
+  "title": "Bark 推送(iPhone 通知)",
+  "input_schema": [
+    {"name": "title", "required": true, "type": "str", "desc": "通知标题"},
+    {"name": "body", "required": true, "type": "str", "desc": "通知正文"},
+    {"name": "bark_level", "required": false, "type": "str", "enum": ["active", "timeSensitive", "critical"], "desc": "重要性；critical 可绕过 iOS 专注/摘要"},
+    {"name": "bark_sound", "required": false, "type": "str", "desc": "提示音名，如 minuet"},
+    {"name": "bark_url", "required": false, "type": "str", "desc": "点击通知打开的 URL"},
+    {"name": "bark_group", "required": false, "type": "str", "desc": "分组（同组通知互相覆盖）"},
+    {"name": "bark_copy", "required": false, "type": "str", "desc": "复制按钮文本"},
+    {"name": "bark_isArchive", "required": false, "type": "bool", "desc": "是否存档（不自动清除）"},
+    {"name": "bark_icon", "required": false, "type": "str", "desc": "图标 URL"},
+    {"name": "bark_badge", "required": false, "type": "int", "desc": "角标数字"},
+    {"name": "bark_volume", "required": false, "type": "int", "desc": "音量 0-100"},
+    {"name": "bark_autoCopy", "required": false, "type": "bool", "desc": "自动复制"}
+  ],
+  "env_requirements": ["BARK_SERVER", "BARK_KEY"]
+}

@@ -35,7 +35,7 @@ class FakeNR:
         self.updates.append((fid, flow))
         return {"ok": True}
 
-    def create_or_update_flow(self, fid, flow, force=False):
+    def create_or_update_flow(self, fid, flow, force=False, allow_prod=False):
         # 测试用 FakeNR：get_flow 永远返回存在 → 走更新分支
         self.updates.append((fid, flow))
         return {"id": fid, "created": False, "raw": {"ok": True}}

@@ -2,7 +2,8 @@
 
 锁死两类已修 bug，防止编译器静默回退：
   A1  条件自然写法（entity=value / entity!=value / 数值）必须编译为 api-current-state
-      门控节点，绝不能生成含裸实体名 / $state() 的坏 JSONata switch（会静默不触发）。
+      read-state 节点（不门控，state_location="data"）+ 下游 switch 按 payload 路由；
+      绝不能生成含裸实体名 / $state() 的坏 JSONata switch（会静默不触发）。
   A4  delay 节点必须带齐 NR 标准默认字段（rate/nbRateUnits/rateUnits/randomFirst/
       randomLast/randomUnits/drop/allowrate），否则 NR 编辑器打红三角。
 
@@ -94,7 +95,9 @@ def main():
         if name in ("natural_eq", "negation", "numeric", "and_chain"):
             acs = _acs_nodes(flow)
             sws = _switches(flow)
-            ok = (len(acs) >= 1) and (len(sws) == 0) and (not bad_jsonata) and (len(r13) == 0)
+            # 新设计(#634/FEEDBACK #8): 条件 → read-state api-current-state(不门控) + 下游路由 switch。
+            # 关键不变量: 绝不出现 $state() 坏 jsonata switch(R13=0, 无 "$state(")。
+            ok = (len(acs) >= 1) and (len(sws) >= 1) and (not bad_jsonata) and (len(r13) == 0)
             if ok:
                 print(f"✅ {name}: 条件→api-current-state ({len(acs)}个) 无坏JSONata R13=0")
             else:
@@ -104,13 +107,17 @@ def main():
                 for n in acs:
                     print(f"     ACS {n['name']!r} halt_if={n.get('halt_if')!r} "
                           f"type={n.get('halt_if_type')} compare={n.get('halt_if_compare')}")
-            # 额外断言具体语义
+            # 额外断言具体语义（新设计: read-state 而非门控）
             if name == "natural_eq" and acs:
                 n = acs[0]
-                if not (n.get("halt_if") == "off" and n.get("halt_if_compare") == "is"):
+                # 条件 → read-state 节点(不门控，由下游 switch 路由)
+                if not (n.get("outputs") == 1 and n.get("halt_if") == ""
+                        and n.get("state_location") == "data"
+                        and n.get("halt_if_compare") == "is"):
                     failed = True
-                    print(f"❌ natural_eq: 期望 halt_if=off compare=is，实得 "
-                          f"{n.get('halt_if')!r}/{n.get('halt_if_compare')!r}")
+                    print(f"❌ natural_eq: 期望 read-state(无门控) 节点 compare=is，实得 "
+                          f"outputs={n.get('outputs')} halt_if={n.get('halt_if')!r} "
+                          f"state_location={n.get('state_location')!r} compare={n.get('halt_if_compare')!r}")
             if name == "negation" and acs:
                 n = acs[0]
                 if n.get("halt_if_compare") != "is_not":
@@ -124,7 +131,7 @@ def main():
             if name == "and_chain":
                 if len(acs) != 2:
                     failed = True
-                    print(f"❌ and_chain: 期望 2 个串联门控，实得 {len(acs)}")
+                    print(f"❌ and_chain: 期望 2 个 read-state 条件节点，实得 {len(acs)}")
 
         elif name == "delay_fields":
             delays = [n for n in flow["nodes"] if n["type"] == "delay"]

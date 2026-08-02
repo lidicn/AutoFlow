@@ -27,7 +27,7 @@ class FakeNRClient:
     def list_flows(self):
         return list(self._flows)
 
-    def create_or_update_flow(self, flow_json, *, force=False):
+    def create_or_update_flow(self, flow_json, *, force=False, allow_prod=False):
         self.deployed.append(flow_json)
         return {"ok": True}
 

@@ -26,6 +26,21 @@ def _by_type(flow, t):
     return [n for n in flow["nodes"] if n["type"] == t]
 
 
+def _expected_defaults(node):
+    """返回某节点「实际应具的默认字段集」。
+
+    NODE_DEFAULT_FIELDS 给 api-current-state 注入 state_location="payload"/override_payload=True
+    （门体透传语义）；但 read-state 节点(取值 / WB23 #634 修复, outputs=1)由发射点显式中和为
+    state_location="data"/override_payload=False，避免节点原生输出(时间戳)与 outputProperties
+    (写 payload)冲突。此处据此返回该节点真正应有的默认值，使「默认字段齐全」断言对两类节点都正确。
+    """
+    defaults = dict(NODE_DEFAULT_FIELDS.get(node["type"], {}))
+    if node["type"] == "api-current-state" and node.get("outputs") == 1:
+        defaults["state_location"] = "data"
+        defaults["override_payload"] = False
+    return defaults
+
+
 class TestNodeDefaultFields(unittest.TestCase):
 
     def test_default_fields_present_on_server_state_changed(self):
@@ -78,10 +93,10 @@ class TestNodeDefaultFields(unittest.TestCase):
         covered = set()
         for dsl, tgt in dsls:
             flow = compile_dsl(dsl, target=tgt)
-            for ntype, defaults in NODE_DEFAULT_FIELDS.items():
+            for ntype in NODE_DEFAULT_FIELDS:
                 for n in _by_type(flow, ntype):
                     covered.add(ntype)
-                    for k, v in defaults.items():
+                    for k, v in _expected_defaults(n).items():
                         self.assertIn(k, n, f"[{ntype}] 缺默认字段 {k}: {n}")
                         self.assertEqual(n[k], v, f"[{ntype}] 默认字段 {k} 值不符")
         self.assertGreaterEqual(covered, {"server-state-changed", "api-current-state"},

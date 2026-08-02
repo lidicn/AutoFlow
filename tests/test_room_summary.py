@@ -21,7 +21,7 @@ from autoflow_gateway.nr_layer import NRLayer
 class FakeNR:
     def update_flow(self, fid, flow, force=False):
         return {"ok": True}
-    def create_or_update_flow(self, fid, flow, force=False):
+    def create_or_update_flow(self, fid, flow, force=False, allow_prod=False):
         return {"id": fid, "created": False, "raw": {"ok": True}}
     def list_flows(self):
         return []

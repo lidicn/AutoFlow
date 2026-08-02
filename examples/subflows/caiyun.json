@@ -1,0 +1,18 @@
+{
+  "_meta": {
+    "key": "llm_caiyun_weather",
+    "capability": "查询彩云天气（含预警 alert=true），返回实时温度/天气/小时与每日预报/预警。",
+    "kind": "link_out（单向 fire-and-forget，GET 请求、无请求体）",
+    "how_to_use": [
+      "本能力在仓库中已作为内置 link_out 能力发布（api_specs.llm_caiyun_weather，URL 中 <CAIYUN_TOKEN>/<CAIYUN_LON>,<CAIYUN_LAT> 为占位符），多数用户直接在 URL 模板里替换为自己的彩云 token 与坐标即可 调用子流程: llm_caiyun_weather()。",
+      "如需完全自建：在 Node-RED 中建一个 link_out 节点，GET https://api.caiyunapp.com/v2.7/<CAIYUN_TOKEN>/<CAIYUN_LON>,<CAIYUN_LAT>/weather?alert=true；再把该子流程/节点 id 填入下方 nr_subflow_id，POST 到 /api/subflows/import 注册（此处演示以 subflow 形态导入）。",
+      "注意：import 接口以 NR 自省结果为准抽取 schema/env，本文件 input_schema / env_requirements 仅作搭建参考。"
+    ],
+    "contract_note": "source_type 由网关强制为 imported。URL 内的 <CAIYUN_TOKEN>/<CAIYUN_LON>,<CAIYUN_LAT> 为占位符，真实值请写在网关 .env 或 NR 节点的 URL 模板里，不进本文件。"
+  },
+  "key": "llm_caiyun_weather",
+  "nr_subflow_id": "<NR_CAIYUN_SUBFLOW_ID>",
+  "title": "彩云天气",
+  "input_schema": [],
+  "env_requirements": ["CAIYUN_TOKEN", "CAIYUN_LON", "CAIYUN_LAT"]
+}

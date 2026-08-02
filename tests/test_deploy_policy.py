@@ -37,7 +37,7 @@ from autoflow_gateway.proposals import ProposalStore
 class FakeNR:
     def __init__(self):
         self._flows = {}
-    def create_or_update_flow(self, fid, flow, force=False):
+    def create_or_update_flow(self, fid, flow, force=False, allow_prod=False):
         created = fid not in self._flows
         self._flows[fid] = {"id": fid, "type": "tab",
                             "label": flow.get("label", ""), "nodes": flow.get("nodes", [])}

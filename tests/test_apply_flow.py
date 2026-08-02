@@ -45,9 +45,11 @@ def stub(gw, tmp_path, monkeypatch):
 
     monkeypatch.setattr(gw.nr, "get_flow", lambda fid: _base_flow())
 
-    def _modify(flow_id, dsl=None, node_patches=None, agent_id="x", force=False):
+    def _modify(flow_id, dsl=None, node_patches=None, agent_id="x", force=False,
+                allow_prod=False):
         calls["modify"].append({"flow_id": flow_id, "dsl": dsl,
-                                "node_patches": node_patches, "agent_id": agent_id})
+                                "node_patches": node_patches, "agent_id": agent_id,
+                                "allow_prod": allow_prod})
         return {"ok": True, "flow_id": flow_id, "label": "书房迎宾",
                 "changed_nodes": 1, "node_count": 2, "mode": "node_patches"}
     monkeypatch.setattr(gw, "modify_flow", _modify)
@@ -73,8 +75,9 @@ def stub(gw, tmp_path, monkeypatch):
         return str(p)
     monkeypatch.setattr(gwmod, "snapshot_flow", _snap)
 
-    def _deploy(flow_id, flow, force=False):
-        calls["deploy"].append({"flow_id": flow_id, "flow": flow, "force": force})
+    def _deploy(flow_id, flow, force=False, allow_prod=False):
+        calls["deploy"].append({"flow_id": flow_id, "flow": flow,
+                                 "force": force, "allow_prod": allow_prod})
         return {"id": flow_id}
     monkeypatch.setattr(gw.nr, "create_or_update_flow", _deploy)
     monkeypatch.setattr(gw, "_gate_node_types", lambda f: None)

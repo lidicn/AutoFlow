@@ -40,7 +40,7 @@ class FakeNR:
         self._subflows = {}  # subflow_id -> {id,type:"subflow",name,...,nodes:[...]}
         self.create_subflow_calls = []
 
-    def create_or_update_flow(self, fid, flow, force=False):
+    def create_or_update_flow(self, fid, flow, force=False, allow_prod=False):
         created = fid not in self._flows
         self._flows[fid] = {
             "id": fid, "type": "tab",

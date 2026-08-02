@@ -41,7 +41,7 @@ class FakeNR:
     def get_flow(self, fid): return self._rec("get_flow", fid)
     def find_flow_by_name(self, name): return self._rec("find_flow_by_name", name)
     def update_flow(self, fid, flow, force=False): return self._rec("update_flow", fid, force=force)
-    def create_or_update_flow(self, fid, flow, force=False):
+    def create_or_update_flow(self, fid, flow, force=False, allow_prod=False):
         return self._rec("create_or_update_flow", fid, force=force)
     def add_nodes(self, fid, new_nodes): return self._rec("add_nodes", fid)
     def modify_node_field(self, fid, nid, fields): return self._rec("modify_node_field", fid, nid)

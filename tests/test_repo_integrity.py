@@ -53,9 +53,11 @@ _SRC_REL = next(
 )
 _SRC_ABS = os.path.join(_REPO_ROOT, _SRC_REL.replace("/", os.sep))
 
-# 已知豁免：`nr_subflows/history/` 是构建产物与一次性脚本目录，
-# 按设计被 .gitignore 忽略（改动后须 `git add -f` 指定四文件，见 MEMORY.md）。
-_EXEMPT_DIR_PARTS = ("nr_subflows", "history")
+# 已知豁免：`nr_subflows/` 是 dev 构建脚本目录（build_subflows.py 等），
+# 按设计整体被 .gitignore 忽略、不随发布版分发。
+# R2 起该目录内已【无】任何运行时依赖——唯一的 subflows_built.json 已迁至
+# data/subflows/nr_defs/，因此 .py 与 .json 两个扫描都套用此豁免。
+_EXEMPT_DIR_PARTS = ("nr_subflows",)
 
 
 def _git(*args: str):
@@ -96,16 +98,18 @@ def _disk_py_files():
 
 
 def _disk_json_files():
-    """磁盘上 src/ 下所有 .json 的仓库相对路径（正斜杠）。
+    """磁盘上 src/ 下所有 .json 的仓库相对路径（正斜杠），已排除豁免目录。
 
-    ★与 .py 扫描不同，这里【不套用】`nr_subflows/history/` 豁免：
-      该目录整体被忽略，但 `subflows_built.json` 是白名单放行的运行时依赖，
-      必须入库（ensure_history_subflow 要读它）。
+    这些 JSON 是【启动即读】的运行时硬依赖（api_specs.json / subflows.json /
+    nr_defs/subflows_built.json），漏入库 → clone 或 pip 装完直接 FileNotFoundError，
+    而工作树里跑测试照样全绿（#708 同类假绿灯）。
     """
     found = []
     for dirpath, _dirnames, filenames in os.walk(_SRC_ABS):
         rel_dir = os.path.relpath(dirpath, _REPO_ROOT).replace(os.sep, "/")
         if "__pycache__" in rel_dir:
+            continue
+        if all(p in rel_dir.split("/") for p in _EXEMPT_DIR_PARTS):
             continue
         for fn in filenames:
             if fn.endswith(".json"):

@@ -51,7 +51,7 @@ class _FakeNR:
         # 该链路需要此方法（cfg.nr_ha_server_id 为空时的兜底来源）。
         return "ha_srv_fake"
 
-    def create_or_update_flow(self, fid, flow, force=False):
+    def create_or_update_flow(self, fid, flow, force=False, allow_prod=False):
         self.deploy_calls += 1
         self._flow = flow
         return {"id": fid, "created": False}

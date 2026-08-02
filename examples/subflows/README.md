@@ -2,7 +2,7 @@
 
 本目录提供三个「真实能力」的教学导入模板：**bark_push**（iPhone 通知）、**anysearch_batch**（资讯搜索）、**llm_caiyun_weather**（彩云天气）。
 
-它们演示如何把你**自己的** Node-RED 子流程接入 AutoFlow，供 DSL 编译器以 `调用子流程:` 一行触发。仓库本身已把这三者在 `api_specs.py` / `subflows.py` 中以**占位符密钥**的形式作为内置能力发布（多数用户无需自建即可用，只要替换各自的密钥/坐标占位符），这里的 JSON 是给「想完全自建 / 自托管 / 学习原理」的人看的搭建参考。
+它们演示如何把你**自己的** Node-RED 子流程接入 AutoFlow，供 DSL 编译器以 `调用子流程:` 一行触发。仓库本身已把这三者的占位符密钥数据放在 `data/api_specs.json` / `data/subflows/subflows.json`，由 `api_specs.py` / `subflows.py` 在运行时载入作为内置能力（多数用户无需自建即可用，只要在各环境 `.env` 填各自的密钥/坐标），这里的 JSON 是给「想完全自建 / 自托管 / 学习原理」的人看的搭建参考。
 
 > 仓库的**默认示例子流程**是 `demo_notify`（一个不连真实下游的 link_out 占位，仅用于演示编译路径与回归测试），不包含任何外部密钥。
 

@@ -155,7 +155,7 @@ class _FakeNR:
         return ""
     def get_flow(self, fid):
         return self.live_flow
-    def create_or_update_flow(self, fid, flow_data, force=False):
+    def create_or_update_flow(self, fid, flow_data, force=False, allow_prod=False):
         self.last_id = fid
         self.last_flow = flow_data
         return {"id": fid, "created": True}

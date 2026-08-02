@@ -1,7 +1,7 @@
 """M2 回归测试：A2 多门控/时间段串联 + 取值→分支健壮性；A3 JSONata 防御。
 
 锁死两类已修/加固点：
-  A2  多 条件(AND 串联) / 多 时间段 必须各自生成正确的门控节点并串行接线；
+  A2  多 条件(AND 串联) / 多 时间段 必须各自生成正确的 read-state 节点 + 路由 switch 并串行接线；
       取值→分支 必须正确接线（无 R13 孤儿）。
   A3  编译器层 JSONata 防御：
       - 全角符号（（）＝，；）在 jsonata 发射点被归一为半角；
@@ -90,19 +90,24 @@ def main():
     sws = _nodes(flow, "switch")
     r13 = [i for i in lint_flow(flow) if i.get("rule") == "R13"]
     bad = bool(re.search(r"\$state\s*\(", json.dumps(flow, ensure_ascii=False)))
-    if len(acs) != 3 or len(sws) != 0 or r13 or bad:
+    # 新设计(#634): 每条件 → read-state api-current-state(不门控) + 下游路由 switch；
+    # 串行: trigger→acs0→sw0→acs1→sw1→acs2→sw2
+    if len(acs) != 3 or len(sws) != 3 or r13 or bad:
         failed = True
         print(f"❌ A2 multi-condition: acs={len(acs)} switch={len(sws)} R13={len(r13)} 坏jsonata={bad}")
     else:
-        # 验证串行 AND 接线：acs[0]→acs[1]→acs[2]
-        ok_chain = (_inbound(flow, acs[1]["id"]) == [acs[0]["id"]]
-                    and _inbound(flow, acs[2]["id"]) == [acs[1]["id"]])
+        # 验证串行 AND 接线: acs[i]→sw[i]→acs[i+1]
+        ok_chain = (_inbound(flow, sws[0]["id"]) == [acs[0]["id"]]
+                    and _inbound(flow, acs[1]["id"]) == [sws[0]["id"]]
+                    and _inbound(flow, sws[1]["id"]) == [acs[1]["id"]]
+                    and _inbound(flow, acs[2]["id"]) == [sws[1]["id"]]
+                    and _inbound(flow, sws[2]["id"]) == [acs[2]["id"]])
         if not ok_chain:
             failed = True
             print(f"❌ A2 multi-condition: AND 串联接线错误 "
                   f"acs1.in={_inbound(flow, acs[1]['id'])} acs2.in={_inbound(flow, acs[2]['id'])}")
         else:
-            print(f"✅ A2 multi-condition: 3 个 api-current-state 串行 AND，无 jsonata/R13")
+            print(f"✅ A2 multi-condition: 3 条件各→read-state+路由 switch 串行 AND，无 jsonata/R13")
 
     # ───────────────────────── A2：多时间段串联 ─────────────────────────
     tr_dsl = """场景: 双时间段

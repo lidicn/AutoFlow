@@ -35,7 +35,7 @@ class FakeNR:
     """内存版 NR：按 id 存 flow，DELETE 只删指定 id。"""
     def __init__(self):
         self._flows = {}  # id -> {"id","label","type":"tab","nodes":[...]}
-    def create_or_update_flow(self, fid, flow, force=False):
+    def create_or_update_flow(self, fid, flow, force=False, allow_prod=False):
         created = fid not in self._flows
         self._flows[fid] = {
             "id": fid, "type": "tab",

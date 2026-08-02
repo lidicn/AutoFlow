@@ -1,0 +1,21 @@
+{
+  "_meta": {
+    "key": "anysearch_batch",
+    "capability": "调用 AnySearch MCP 批量搜索资讯；keywords 逗号分隔，自动展开为多个查询（各加『最新资讯』），返回 result。",
+    "kind": "link_out（单向 fire-and-forget，无返回值，适合『搜一下然后播报』类场景）",
+    "how_to_use": [
+      "本能力在仓库中已作为内置 link_out 能力发布（api_specs.anysearch_batch，URL / 鉴权占位符），多数用户无需自建即可直接 调用子流程: anysearch_batch(keywords=`...`)。",
+      "如需完全自建/自托管：在 Node-RED 中建一个子流程或 link_out 节点，向 https://api.anysearch.com/mcp 发 JSON-RPC（tools/call → batch_search），Header 带 Authorization: Bearer <ANYSEARCH_API_KEY>；再把该子流程 id 填入下方 nr_subflow_id，POST 到 /api/subflows/import 注册为 imported 子流程（此处演示以 subflow 形态导入）。",
+      "注意：import 接口以 NR 自省结果为准抽取 schema/env，本文件 input_schema / env_requirements 仅作搭建参考。"
+    ],
+    "contract_note": "source_type 由网关强制为 imported。真实密钥 <ANYSEARCH_API_KEY> 不进本文件，请写在网关 .env 或 NR 节点的 Header/环境变量。"
+  },
+  "key": "anysearch_batch",
+  "nr_subflow_id": "<NR_ANYSEARCH_SUBFLOW_ID>",
+  "title": "AnySearch 资讯搜索",
+  "input_schema": [
+    {"name": "keywords", "required": true, "type": "str", "desc": "要搜索的关键词，逗号分隔（如 'mac mini m5, 小米智能存储'）"},
+    {"name": "max_results", "required": false, "type": "int", "default": 5, "desc": "每个词返回条数（anysearch 上限 5）"}
+  ],
+  "env_requirements": ["ANYSEARCH_API_KEY"]
+}

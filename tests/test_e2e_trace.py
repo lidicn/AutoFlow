@@ -49,7 +49,7 @@ class FakeNRLayer:
         self.deleted: List[str] = []
 
     # ── 读 / 安全写（与 NRLayer 同签名）──
-    def create_or_update_flow(self, fid, flow_data, force=False):
+    def create_or_update_flow(self, fid, flow_data, force=False, allow_prod=False):
         self.flows[fid] = flow_data
         return {"id": fid, "created": True}
 
@@ -545,7 +545,7 @@ def test_check_unknown_node_types():
 # ── 11) 回归：e2e 入口实体不得退化为 unknown.entity（entityId 静默丢失根因）──
 class CaptureNRLayer(FakeNRLayer):
     """在 create_or_update_flow 时顺便记下插桩副本，供断言实体回填。"""
-    def create_or_update_flow(self, fid, flow_data, force=False):
+    def create_or_update_flow(self, fid, flow_data, force=False, allow_prod=False):
         self.last_deployed = flow_data
         return super().create_or_update_flow(fid, flow_data, force=force)
 

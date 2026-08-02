@@ -20,10 +20,10 @@ from autoflow_gateway.subflows import (
     flow_uses_history_subflow,
 )
 
-_BUILT_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "src", "autoflow_gateway",
-    "nr_subflows", "history", "subflows_built.json",
-)
+# 直接复用模块内的真值路径，避免测试硬编码副本与实现漂移
+# （R2 数据/代码分离时该文件从 nr_subflows/history/ 迁到 data/subflows/nr_defs/，
+#  硬编码副本会静默失效——测试读不到就不是在测发布包实际加载的那份）。
+from autoflow_gateway.subflows import _HISTORY_BUILT_PATH as _BUILT_PATH  # noqa: E402
 
 
 def _load_built():

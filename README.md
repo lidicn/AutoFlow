@@ -28,6 +28,9 @@ autoflow_gateway/
     ha_layer.py           HA 读 + 受控写
     nr_layer.py           NR 安全写（无 replace-all）
     build_scene.py        意图→NR 流（幂等）
+    dsl_engine.py         DSL 编译器（意图 → NR 节点 + 静态校验）
+    api_specs.py          API 能力 spec 加载器（数据源 data/api_specs.json）
+    subflows.py           预置子流程 spec 加载器（数据源 data/subflows/subflows.json）
     gateway.py            编排核心
     cli.py                脚本/JSON 兜底接口
     mcp_server.py         MCP 服务（Streamable HTTP / SSE）+ 身份鉴权中间件
@@ -38,6 +41,8 @@ autoflow_gateway/
     webui/static/         响应式前端（手机/平板/电脑自适应）
     vhass.py              虚拟 HA（数字孪生 / staging 数据源，纯标准库）
     mock_docker_api.py    staging 非实体能力模拟（Docker/业务 API）
+    lib/                  vendored HA/NR 客户端（ha_client.py / nr_client.py）
+    data/                 运行时数据（api_specs.json / subflows/ 子流程定义 + nr_defs；data/<env>/state 共享态）
   tests/                  单元测试（含 test_identity / test_webui）
   examples/               示例意图
   pyproject.toml / Dockerfile / docker-compose.yml / .env.example
