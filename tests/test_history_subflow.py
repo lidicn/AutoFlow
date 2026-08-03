@@ -214,13 +214,14 @@ class TestHistorySubflow(unittest.TestCase):
                              f"内部节点 id 未带子流程前缀：{i}")
 
     def test_feed_node_payload_objectify_and_entity_rewrite(self):
-        """#107 回归（修正版）：_feedNode 必须把非对象 payload（数字/字符串/数组）重置为
-        对象再注入 entityId/startDate/endDate；否则给原始值赋属性被 JS 静默忽略。
-        关键约束：api-get-history 节点（home-assistant-websocket 0.80.3）的 entityIdType
-        schema 只允许 [equals, regex]，【不支持 msg 动态路径】——故不能靠
-        entityIdType:msg，必须在 _feedNode 运行时改写节点属性 entityId/startDate/endDate。
-        子流程实例内节点 id 被改写（af_hist_x__n_hist），getNode 必须用【推导完整 id】，
-        短 id "n_hist" 取不到 → entityId 恒空 → ValidationError。"""
+        """#107/#107-2 回归（终版）：_feedNode 必须把非对象 payload（数字/字符串/数组）
+        重置为对象再注入 entityId/startDate/endDate；否则给原始值赋属性被 JS 静默忽略。
+        正确机制（官方文档确认）：api-get-history 节点 entityIdType schema 仅允许
+        [equals, regex]、不支持 msg 动态路径，但 entityId/startDate/endDate 均可经
+        msg.payload 传入并【覆盖配置】（"Will override the configuration if passed in"）。
+        故 _feedNode 只需把字面量 ISO 与 entityId 写进 msg.payload 即可，节点原生读取覆盖空配置。
+        禁止再用 RED.nodes.getNode 运行时改写节点属性——子流程实例内 RED.nodes 为 undefined，
+        会抛 TypeError: Cannot read properties of undefined (reading 'getNode')（实测复现）。"""
         built = _load_built()
         for arr in built:
             sid = arr[0]["id"]
@@ -233,14 +234,19 @@ class TestHistorySubflow(unittest.TestCase):
                           f"{sid} _feedNode 未做 payload 对象化（#107 根因）")
             self.assertIn("Array.isArray(msg.payload)", parse_func,
                           f"{sid} _feedNode 未防数组 payload")
-            # 2) 运行时改写节点属性：用推导完整 id 取 n_hist 并注入 entityId
-            self.assertIn('node.id.replace(/__n_parse$/, "__n_hist")', parse_func,
-                          f"{sid} _feedNode 未用推导完整 id 取 n_hist（子流程 id 改写坑）")
+            # 2) 注入 entityId（节点从 msg.payload 覆盖配置读取）
+            self.assertIn("msg.payload.entityId = msg.entity", parse_func,
+                          f"{sid} _feedNode 未注入 msg.payload.entityId")
+            # 3) 严禁 RED.nodes.getNode——子流程实例内 RED.nodes 为 undefined（#107-2 踩坑）
+            self.assertNotIn("RED.nodes.getNode", parse_func,
+                             f"{sid} _feedNode 仍引用 RED.nodes.getNode（子流程上下文为 undefined，必崩）")
+            self.assertNotIn("var hist", parse_func,
+                             f"{sid} _feedNode 仍残留 getNode 占位（hist 分支）")
             hists = [n for n in arr if n.get("type") == "api-get-history"]
             self.assertEqual(hists[0].get("entityIdType"), "equals",
                              f"{sid} entityIdType 必须为 equals（该节点版本 schema 仅允许 equals/regex）")
             self.assertEqual(hists[0].get("entityId"), "",
-                             f"{sid} entityId 应为空占位（运行时由 _feedNode 改写）")
+                             f"{sid} entityId 应为空占位（运行时由 _feedNode 经 msg.payload 注入）")
 
 class TestEnsureBeforeNodeGate(unittest.TestCase):
     """#711：ensure 必须在节点闸门【之前】跑，且要拿到正确的 allow_prod。
