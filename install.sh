@@ -3,15 +3,15 @@
 # AutoFlow 一键安装脚本（Docker）
 # ============================================================
 # 用法（默认从 GitHub 拉取源码并在本机构建镜像）：
-#   curl -fsSL https://raw.githubusercontent.com/lidicn/AutoFlow/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/lidicn/AutoFlow/main/install.sh | bash
 #
 # 环境变量 / 参数：
 #   REPO=lidicn/AutoFlow   仓库（fork 时改这里）
 #   BRANCH=main                    分支
 #   INSTALL_DIR=/opt/autoflow      安装目录（macOS 默认 ~/autoflow）
-#   sh install.sh --install-docker 本机没装 Docker 时顺带安装（仅 Linux）
-#   sh install.sh --update         拉最新代码并重建镜像（保留 data/ 与 .env）
-#   sh install.sh -d <dir>         指定安装目录
+#   bash install.sh --install-docker 本机没装 Docker 时顺带安装（仅 Linux）
+#   bash install.sh --update         拉最新代码并重建镜像（保留 data/ 与 .env）
+#   bash install.sh -d <dir>         指定安装目录
 # ============================================================
 set -euo pipefail
 
@@ -137,5 +137,5 @@ echo "  配置文件：    $INSTALL_DIR/.env"
 echo
 echo "  日志：  docker compose -f $INSTALL_DIR/docker-compose.yml logs -f"
 echo "  停止：  docker compose -f $INSTALL_DIR/docker-compose.yml down"
-echo "  更新：  sh install.sh --update"
+echo "  更新：  bash install.sh --update"
 echo "────────────────────────────────────────────────"

@@ -151,15 +151,15 @@ AutoFlow 的价值随「你想让家里变聪明的野心」增长。自动化�
 ### 第 1 步：一条命令装好
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lidicn/AutoFlow/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/lidicn/AutoFlow/main/install.sh | bash
 ```
 
 脚本会自动：检查 Docker → 下载代码 → 构建镜像 → 启动 → 等待服务就绪。
 
 - 装到哪儿：Linux/NAS 默认 `/opt/autoflow`，macOS 默认 `~/autoflow`
-- 想换目录：`sh install.sh -d /volume1/docker/autoflow`
-- 机器上没 Docker（仅 Linux）：`sh install.sh --install-docker`
-- 以后更新：`sh install.sh --update`（**保留**你的数据和配置）
+- 想换目录：`bash install.sh -d /volume1/docker/autoflow`
+- 机器上没 Docker（仅 Linux）：`bash install.sh --install-docker`
+- 以后更新：`bash install.sh --update`（**保留**你的数据和配置）
 
 ### 第 2 步：拿到控制台钥匙
 
