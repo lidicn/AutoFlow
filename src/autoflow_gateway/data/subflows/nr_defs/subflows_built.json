@@ -12,7 +12,7 @@
           "y": 40,
           "wires": [
             {
-              "id": "n_parse"
+              "id": "af_hist_state_at__n_parse"
             }
           ]
         }
@@ -23,7 +23,7 @@
           "y": 120,
           "wires": [
             {
-              "id": "n_calc",
+              "id": "af_hist_state_at__n_calc",
               "port": 0
             }
           ]
@@ -38,7 +38,7 @@
       "meta": {}
     },
     {
-      "id": "n_parse",
+      "id": "af_hist_state_at__n_parse",
       "type": "function",
       "z": "af_hist_state_at",
       "name": "解析时间",
@@ -46,13 +46,13 @@
       "outputs": 1,
       "wires": [
         [
-          "n_hist",
-          "n_dbg_parse"
+          "af_hist_state_at__n_hist",
+          "af_hist_state_at__n_dbg_parse"
         ]
       ]
     },
     {
-      "id": "n_hist",
+      "id": "af_hist_state_at__n_hist",
       "type": "api-get-history",
       "z": "af_hist_state_at",
       "name": "取历史",
@@ -75,18 +75,18 @@
       "y": 200,
       "wires": [
         [
-          "n_calc",
-          "n_dbg_hist"
+          "af_hist_state_at__n_calc",
+          "af_hist_state_at__n_dbg_hist"
         ]
       ]
     },
     {
-      "id": "n_catch",
+      "id": "af_hist_state_at__n_catch",
       "type": "catch",
       "z": "af_hist_state_at",
       "name": "HA错误降级",
       "scope": [
-        "n_hist"
+        "af_hist_state_at__n_hist"
       ],
       "uncaught": false,
       "outputs": 1,
@@ -94,12 +94,12 @@
       "y": 320,
       "wires": [
         [
-          "n_err"
+          "af_hist_state_at__n_err"
         ]
       ]
     },
     {
-      "id": "n_err",
+      "id": "af_hist_state_at__n_err",
       "type": "function",
       "z": "af_hist_state_at",
       "name": "空结果",
@@ -109,12 +109,12 @@
       "y": 400,
       "wires": [
         [
-          "n_calc"
+          "af_hist_state_at__n_calc"
         ]
       ]
     },
     {
-      "id": "n_calc",
+      "id": "af_hist_state_at__n_calc",
       "type": "function",
       "z": "af_hist_state_at",
       "name": "计算答案",
@@ -122,12 +122,12 @@
       "outputs": 1,
       "wires": [
         [
-          "n_dbg_calc"
+          "af_hist_state_at__n_dbg_calc"
         ]
       ]
     },
     {
-      "id": "n_dbg_parse",
+      "id": "af_hist_state_at__n_dbg_parse",
       "type": "debug",
       "z": "af_hist_state_at",
       "name": "DBG 解析",
@@ -146,7 +146,7 @@
       ]
     },
     {
-      "id": "n_dbg_hist",
+      "id": "af_hist_state_at__n_dbg_hist",
       "type": "debug",
       "z": "af_hist_state_at",
       "name": "DBG 取数",
@@ -165,7 +165,7 @@
       ]
     },
     {
-      "id": "n_dbg_calc",
+      "id": "af_hist_state_at__n_dbg_calc",
       "type": "debug",
       "z": "af_hist_state_at",
       "name": "DBG 答案",
@@ -197,7 +197,7 @@
           "y": 40,
           "wires": [
             {
-              "id": "n_parse"
+              "id": "af_hist_occurred__n_parse"
             }
           ]
         }
@@ -208,7 +208,7 @@
           "y": 120,
           "wires": [
             {
-              "id": "n_calc",
+              "id": "af_hist_occurred__n_calc",
               "port": 0
             }
           ]
@@ -223,7 +223,7 @@
       "meta": {}
     },
     {
-      "id": "n_parse",
+      "id": "af_hist_occurred__n_parse",
       "type": "function",
       "z": "af_hist_occurred",
       "name": "解析时间",
@@ -231,13 +231,13 @@
       "outputs": 1,
       "wires": [
         [
-          "n_hist",
-          "n_dbg_parse"
+          "af_hist_occurred__n_hist",
+          "af_hist_occurred__n_dbg_parse"
         ]
       ]
     },
     {
-      "id": "n_hist",
+      "id": "af_hist_occurred__n_hist",
       "type": "api-get-history",
       "z": "af_hist_occurred",
       "name": "取历史",
@@ -260,18 +260,18 @@
       "y": 200,
       "wires": [
         [
-          "n_calc",
-          "n_dbg_hist"
+          "af_hist_occurred__n_calc",
+          "af_hist_occurred__n_dbg_hist"
         ]
       ]
     },
     {
-      "id": "n_catch",
+      "id": "af_hist_occurred__n_catch",
       "type": "catch",
       "z": "af_hist_occurred",
       "name": "HA错误降级",
       "scope": [
-        "n_hist"
+        "af_hist_occurred__n_hist"
       ],
       "uncaught": false,
       "outputs": 1,
@@ -279,12 +279,12 @@
       "y": 320,
       "wires": [
         [
-          "n_err"
+          "af_hist_occurred__n_err"
         ]
       ]
     },
     {
-      "id": "n_err",
+      "id": "af_hist_occurred__n_err",
       "type": "function",
       "z": "af_hist_occurred",
       "name": "空结果",
@@ -294,12 +294,12 @@
       "y": 400,
       "wires": [
         [
-          "n_calc"
+          "af_hist_occurred__n_calc"
         ]
       ]
     },
     {
-      "id": "n_calc",
+      "id": "af_hist_occurred__n_calc",
       "type": "function",
       "z": "af_hist_occurred",
       "name": "计算答案",
@@ -307,12 +307,12 @@
       "outputs": 1,
       "wires": [
         [
-          "n_dbg_calc"
+          "af_hist_occurred__n_dbg_calc"
         ]
       ]
     },
     {
-      "id": "n_dbg_parse",
+      "id": "af_hist_occurred__n_dbg_parse",
       "type": "debug",
       "z": "af_hist_occurred",
       "name": "DBG 解析",
@@ -331,7 +331,7 @@
       ]
     },
     {
-      "id": "n_dbg_hist",
+      "id": "af_hist_occurred__n_dbg_hist",
       "type": "debug",
       "z": "af_hist_occurred",
       "name": "DBG 取数",
@@ -350,7 +350,7 @@
       ]
     },
     {
-      "id": "n_dbg_calc",
+      "id": "af_hist_occurred__n_dbg_calc",
       "type": "debug",
       "z": "af_hist_occurred",
       "name": "DBG 答案",
@@ -382,7 +382,7 @@
           "y": 40,
           "wires": [
             {
-              "id": "n_parse"
+              "id": "af_hist_duration__n_parse"
             }
           ]
         }
@@ -393,7 +393,7 @@
           "y": 120,
           "wires": [
             {
-              "id": "n_calc",
+              "id": "af_hist_duration__n_calc",
               "port": 0
             }
           ]
@@ -408,7 +408,7 @@
       "meta": {}
     },
     {
-      "id": "n_parse",
+      "id": "af_hist_duration__n_parse",
       "type": "function",
       "z": "af_hist_duration",
       "name": "解析时间",
@@ -416,13 +416,13 @@
       "outputs": 1,
       "wires": [
         [
-          "n_hist",
-          "n_dbg_parse"
+          "af_hist_duration__n_hist",
+          "af_hist_duration__n_dbg_parse"
         ]
       ]
     },
     {
-      "id": "n_hist",
+      "id": "af_hist_duration__n_hist",
       "type": "api-get-history",
       "z": "af_hist_duration",
       "name": "取历史",
@@ -445,18 +445,18 @@
       "y": 200,
       "wires": [
         [
-          "n_calc",
-          "n_dbg_hist"
+          "af_hist_duration__n_calc",
+          "af_hist_duration__n_dbg_hist"
         ]
       ]
     },
     {
-      "id": "n_catch",
+      "id": "af_hist_duration__n_catch",
       "type": "catch",
       "z": "af_hist_duration",
       "name": "HA错误降级",
       "scope": [
-        "n_hist"
+        "af_hist_duration__n_hist"
       ],
       "uncaught": false,
       "outputs": 1,
@@ -464,12 +464,12 @@
       "y": 320,
       "wires": [
         [
-          "n_err"
+          "af_hist_duration__n_err"
         ]
       ]
     },
     {
-      "id": "n_err",
+      "id": "af_hist_duration__n_err",
       "type": "function",
       "z": "af_hist_duration",
       "name": "空结果",
@@ -479,12 +479,12 @@
       "y": 400,
       "wires": [
         [
-          "n_calc"
+          "af_hist_duration__n_calc"
         ]
       ]
     },
     {
-      "id": "n_calc",
+      "id": "af_hist_duration__n_calc",
       "type": "function",
       "z": "af_hist_duration",
       "name": "计算答案",
@@ -492,12 +492,12 @@
       "outputs": 1,
       "wires": [
         [
-          "n_dbg_calc"
+          "af_hist_duration__n_dbg_calc"
         ]
       ]
     },
     {
-      "id": "n_dbg_parse",
+      "id": "af_hist_duration__n_dbg_parse",
       "type": "debug",
       "z": "af_hist_duration",
       "name": "DBG 解析",
@@ -516,7 +516,7 @@
       ]
     },
     {
-      "id": "n_dbg_hist",
+      "id": "af_hist_duration__n_dbg_hist",
       "type": "debug",
       "z": "af_hist_duration",
       "name": "DBG 取数",
@@ -535,7 +535,7 @@
       ]
     },
     {
-      "id": "n_dbg_calc",
+      "id": "af_hist_duration__n_dbg_calc",
       "type": "debug",
       "z": "af_hist_duration",
       "name": "DBG 答案",
@@ -567,7 +567,7 @@
           "y": 40,
           "wires": [
             {
-              "id": "n_parse"
+              "id": "af_hist_aggregate__n_parse"
             }
           ]
         }
@@ -578,7 +578,7 @@
           "y": 120,
           "wires": [
             {
-              "id": "n_calc",
+              "id": "af_hist_aggregate__n_calc",
               "port": 0
             }
           ]
@@ -593,7 +593,7 @@
       "meta": {}
     },
     {
-      "id": "n_parse",
+      "id": "af_hist_aggregate__n_parse",
       "type": "function",
       "z": "af_hist_aggregate",
       "name": "解析时间",
@@ -601,13 +601,13 @@
       "outputs": 1,
       "wires": [
         [
-          "n_hist",
-          "n_dbg_parse"
+          "af_hist_aggregate__n_hist",
+          "af_hist_aggregate__n_dbg_parse"
         ]
       ]
     },
     {
-      "id": "n_hist",
+      "id": "af_hist_aggregate__n_hist",
       "type": "api-get-history",
       "z": "af_hist_aggregate",
       "name": "取历史",
@@ -630,18 +630,18 @@
       "y": 200,
       "wires": [
         [
-          "n_calc",
-          "n_dbg_hist"
+          "af_hist_aggregate__n_calc",
+          "af_hist_aggregate__n_dbg_hist"
         ]
       ]
     },
     {
-      "id": "n_catch",
+      "id": "af_hist_aggregate__n_catch",
       "type": "catch",
       "z": "af_hist_aggregate",
       "name": "HA错误降级",
       "scope": [
-        "n_hist"
+        "af_hist_aggregate__n_hist"
       ],
       "uncaught": false,
       "outputs": 1,
@@ -649,12 +649,12 @@
       "y": 320,
       "wires": [
         [
-          "n_err"
+          "af_hist_aggregate__n_err"
         ]
       ]
     },
     {
-      "id": "n_err",
+      "id": "af_hist_aggregate__n_err",
       "type": "function",
       "z": "af_hist_aggregate",
       "name": "空结果",
@@ -664,12 +664,12 @@
       "y": 400,
       "wires": [
         [
-          "n_calc"
+          "af_hist_aggregate__n_calc"
         ]
       ]
     },
     {
-      "id": "n_calc",
+      "id": "af_hist_aggregate__n_calc",
       "type": "function",
       "z": "af_hist_aggregate",
       "name": "计算答案",
@@ -677,12 +677,12 @@
       "outputs": 1,
       "wires": [
         [
-          "n_dbg_calc"
+          "af_hist_aggregate__n_dbg_calc"
         ]
       ]
     },
     {
-      "id": "n_dbg_parse",
+      "id": "af_hist_aggregate__n_dbg_parse",
       "type": "debug",
       "z": "af_hist_aggregate",
       "name": "DBG 解析",
@@ -701,7 +701,7 @@
       ]
     },
     {
-      "id": "n_dbg_hist",
+      "id": "af_hist_aggregate__n_dbg_hist",
       "type": "debug",
       "z": "af_hist_aggregate",
       "name": "DBG 取数",
@@ -720,7 +720,7 @@
       ]
     },
     {
-      "id": "n_dbg_calc",
+      "id": "af_hist_aggregate__n_dbg_calc",
       "type": "debug",
       "z": "af_hist_aggregate",
       "name": "DBG 答案",

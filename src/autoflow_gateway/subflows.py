@@ -214,6 +214,20 @@ def _count_internal_nodes(flows, subflow_ids) -> Dict[str, int]:
     return counts
 
 
+def _collect_history_internal_ids(flows, subflow_ids) -> List[str]:
+    """收集线上 4 个历史子流程的全部内部节点 id（用于碰撞检测）。双兼容扁平/嵌套。"""
+    nodes: List[Dict] = []
+    if isinstance(flows, list):
+        nodes = [n for n in flows if isinstance(n, dict)]
+    elif isinstance(flows, dict):
+        for key in ("flows", "nodes", "subflows"):
+            v = flows.get(key)
+            if isinstance(v, list):
+                nodes.extend(n for n in v if isinstance(n, dict))
+    return [n["id"] for n in nodes
+            if n.get("z") in subflow_ids and n.get("id")]
+
+
 def ensure_history_subflow(nr, allow_prod: bool = False) -> Dict[str, Any]:
     """幂等确保 4 个历史查询子流程存在于目标 NR 实例。
 
@@ -221,6 +235,9 @@ def ensure_history_subflow(nr, allow_prod: bool = False) -> Dict[str, Any]:
     - 缺失 或 退化成空壳（内部节点=0，#607 复发态）→ 从 subflows_built.json 重建。
       重建前先从线上剔除该 sid 的全部条目（def + 内部节点），避免 deploy_all 复用旧空壳
       def 不补内部节点（#607 空壳复用陷阱）；用 force+allow_partial 仅替换命中子流程。
+    - 内部节点 id 跨子流程碰撞 → 强制全部重建（历史 bug：4 子流程曾共用 n_parse/n_hist…
+      等 8 个内部 id，deploy_all 拼进同一命名空间后 NR 全局节点索引按 id 互相覆盖，
+      仅 1 个子流程能跑、其余报 sendEvent.destination.node.receive is not a function）。
     仅 staging 实例调用（allow_prod=False），prod 环境需显式 allow_prod。
     """
     try:
@@ -232,6 +249,12 @@ def ensure_history_subflow(nr, allow_prod: bool = False) -> Dict[str, Any]:
     # 原 ensure 只看 id 是否存在，空壳 id 在就 no-op，导致 recurring 退化）
     present_ok = {sid for sid in HISTORY_SUBFLOW_IDS if internal.get(sid, 0) > 0}
     missing = [sid for sid in HISTORY_SUBFLOW_IDS if sid not in present_ok]
+    # 碰撞自愈：线上 4 子流程内部 id 若出现重复（len(set) < len），说明是碰撞部署，
+    # 满壳但已坏 → 必须强制全部重建，否则 ensure 会判定「已存在」永不自愈。
+    live_hist_ids = _collect_history_internal_ids(flows, HISTORY_SUBFLOW_IDS)
+    dup_collision = bool(live_hist_ids) and len(set(live_hist_ids)) < len(live_hist_ids)
+    if dup_collision:
+        missing = list(HISTORY_SUBFLOW_IDS)
     if not missing:
         return {"created": False, "exists": True, "missing": [], "rebuilt": [],
                 "shells_rebuilt": []}

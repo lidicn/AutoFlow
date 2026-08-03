@@ -85,6 +85,38 @@ class TestHistorySubflow(unittest.TestCase):
             self.assertEqual(h["server"], "fake-server-id",
                              f"server 应被替换为默认，实得 {h.get('server')}")
 
+    def test_ensure_self_heals_id_collision(self):
+        """碰撞自愈：线上 4 子流程内部 id 跨子流程重名（满壳但已坏）→ 必须强制全部重建。
+
+        #711 衍生 bug：4 子流程曾共用 n_parse/n_hist/n_catch/n_err/n_calc/n_dbg_* 8 个同名
+        id，deploy_all 拼进同一命名空间后 NR 全局索引按 id 互相覆盖 → 仅 1 个能跑、其余
+        sendEvent.destination.node.receive is not a function。若 ensure 只看「内部节点数>0
+        就算 OK」，这种满壳坏部署永不自愈。本测试用共享内部 id 模拟该坏部署，断言 ensure
+        检测到重复并重建全部 4 个，且重建产物使用 sid__ 前缀的唯一 id。
+        """
+        # 模拟坏部署：4 子流程都在场，但内部 id 互相重名（n_parse/n_hist/n_calc）
+        broken = []
+        for sid in HISTORY_SUBFLOW_IDS:
+            broken.append({"type": "subflow", "id": sid})
+            broken.append({"z": sid, "type": "function", "id": "n_parse"})
+            broken.append({"z": sid, "type": "api-get-history", "id": "n_hist"})
+            broken.append({"z": sid, "type": "function", "id": "n_calc"})
+        nr = _FakeNR(broken)
+        res = ensure_history_subflow(nr, allow_prod=False)
+        self.assertTrue(res["created"], f"碰撞部署应触发重建，res={res}")
+        self.assertEqual(set(res["rebuilt"]), HISTORY_SUBFLOW_IDS,
+                         f"应强制重建全部 4 个，res={res}")
+        self.assertIsNotNone(nr.deployed, "碰撞时应 deploy")
+        # 重建产物使用 sid__ 前缀的唯一 id（不再出现裸 n_parse 等共享名）
+        deployed_ids = {n.get("id") for n in nr.deployed}
+        from collections import Counter
+        dup = {k: v for k, v in Counter(deployed_ids).items() if v > 1}
+        self.assertFalse(dup, f"重建后仍有重复 id：{dup}")
+        self.assertNotIn("n_parse", deployed_ids, "重建不应保留共享裸 id")
+        for sid in HISTORY_SUBFLOW_IDS:
+            self.assertIn(f"{sid}__n_parse", deployed_ids,
+                          f"重建缺前缀 id {sid}__n_parse")
+
     def test_ensure_partial_missing_rebuilds_only_missing(self):
         """仅缺 1 个 → 只重建那 1 个，其余 3 个不受影响，deploy 只含缺失的节点。"""
         missing_id = next(iter(HISTORY_SUBFLOW_IDS))
@@ -136,12 +168,14 @@ class TestHistorySubflow(unittest.TestCase):
             self.assertTrue(arr and arr[0].get("type") == "subflow", "首节点须为 subflow def")
             sid = arr[0]["id"]
             self.assertIn(sid, HISTORY_SUBFLOW_IDS, f"未知子流程 id {sid}")
-            # 9 节点：def + n_parse + n_hist(api-get-history) + n_catch + n_err + n_calc
-            #        + n_dbg_parse / n_dbg_hist / n_dbg_calc（G1 #644：build 期预置 debug 探针）
+            # 9 节点：def + 8 个内部节点（解析/取数/降级/计算/3 个 debug 探针）。
+            # 内部节点 id 已加 sid__ 前缀（#711 衍生 bug 修复：跨子流程同名 id 在 NR 全局
+            # 节点索引互相覆盖，导致仅 1 个子流程能跑、其余 receive is not a function）。
             self.assertEqual(len(arr), 9, f"{sid} 应有 9 节点，实得 {len(arr)}")
             dbg_nodes = {n.get("id") for n in arr if n.get("type") == "debug"}
-            self.assertEqual(dbg_nodes, {"n_dbg_parse", "n_dbg_hist", "n_dbg_calc"},
-                             f"{sid} G1 debug 探针缺失：{dbg_nodes}")
+            self.assertEqual(dbg_nodes,
+                             {f"{sid}__n_dbg_parse", f"{sid}__n_dbg_hist", f"{sid}__n_dbg_calc"},
+                             f"{sid} G1 debug 探针缺失/未加前缀：{dbg_nodes}")
             # def 的 in/out 是端口对象列表，各 1 个端口
             self.assertEqual(len(arr[0].get("in", [])), 1, f"{sid} def.in 应有 1 端口")
             self.assertEqual(len(arr[0].get("out", [])), 1, f"{sid} def.out 应有 1 端口")
@@ -154,6 +188,30 @@ class TestHistorySubflow(unittest.TestCase):
             self.assertTrue(hists, f"{sid} 应含 api-get-history")
             self.assertEqual(hists[0].get("server"), "e93e1ad9c034e866",
                              f"{sid} 硬编码 server 占位不符预期：{hists[0].get('server')}")
+
+    def test_built_json_internal_ids_global_unique(self):
+        """回归守卫：4 子流程内部节点 id 必须全局唯一。
+
+        #711 衍生 bug 根因：4 子流程曾共用 n_parse/n_hist/n_catch/n_err/n_calc/
+        n_dbg_parse/n_dbg_hist/n_dbg_calc 这 8 个同名 id，deploy_all 拼进同一命名空间后
+        NR 按 id 建全局索引互相覆盖 → 仅 1 个子流程能跑、其余
+        sendEvent.destination.node.receive is not a function。此测试确保以后不再复发。
+        """
+        built = _load_built()
+        all_ids: list = []
+        for arr in built:
+            for n in arr:
+                if n.get("type") == "subflow":
+                    continue
+                all_ids.append(n["id"])
+        from collections import Counter
+        dup = {k: v for k, v in Counter(all_ids).items() if v > 1}
+        self.assertFalse(dup, f"内部节点 id 跨子流程重复（碰撞根因）：{dup}")
+        # 同时确认每个 id 都带 sid__ 前缀
+        sids = {arr[0]["id"] for arr in built}
+        for i in all_ids:
+            self.assertTrue(any(i.startswith(s + "__") for s in sids),
+                             f"内部节点 id 未带子流程前缀：{i}")
 
 class TestEnsureBeforeNodeGate(unittest.TestCase):
     """#711：ensure 必须在节点闸门【之前】跑，且要拿到正确的 allow_prod。
