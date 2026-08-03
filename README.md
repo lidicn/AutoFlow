@@ -178,7 +178,16 @@ curl -fsSL https://raw.githubusercontent.com/lidicn/AutoFlow/main/install.sh | b
 docker exec autoflow_gateway cat /data/.webui_token
 ```
 
-（或者直接看文件：`cat /opt/autoflow/data/.webui_token`）
+（或者直接看宿主机上的挂载文件：`cat /opt/autoflow/data/.webui_token`；如果装到了别的目录，路径跟着改）
+
+**想一步到位**（直接打印可点击的链接，把 IP 换成你机器的）：
+
+```bash
+TOKEN=$(docker exec autoflow_gateway cat /data/.webui_token)
+echo "http://192.168.2.200:8000/?token=$TOKEN"
+```
+
+> 容器名不是默认的 `autoflow_gateway`？先 `docker ps | grep autoflow` 看实际名字，命令里替换掉即可。
 
 拿到形如 `3dX-0KNWrdMk_8aNmjk926J9IC9MZ0Xg` 的一串字符，然后用它开门：
 
