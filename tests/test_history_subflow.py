@@ -213,12 +213,14 @@ class TestHistorySubflow(unittest.TestCase):
             self.assertTrue(any(i.startswith(s + "__") for s in sids),
                              f"内部节点 id 未带子流程前缀：{i}")
 
-    def test_feed_node_payload_objectify_and_entity_msg(self):
-        """#107 回归：_feedNode 必须把非对象 payload（数字/字符串/数组）重置为对象再注入
-        entityId/startDate/endDate；否则给原始值赋属性被 JS 静默忽略 → api-get-history
-        读不到 entityId → ValidationError: entityId is not allowed to be empty（实测复现）。
-        同时 api-get-history 节点必须 entityIdType:msg + entityId:entity（原生从 msg.entity 读），
-        不依赖脆弱的运行时属性改写。"""
+    def test_feed_node_payload_objectify_and_entity_rewrite(self):
+        """#107 回归（修正版）：_feedNode 必须把非对象 payload（数字/字符串/数组）重置为
+        对象再注入 entityId/startDate/endDate；否则给原始值赋属性被 JS 静默忽略。
+        关键约束：api-get-history 节点（home-assistant-websocket 0.80.3）的 entityIdType
+        schema 只允许 [equals, regex]，【不支持 msg 动态路径】——故不能靠
+        entityIdType:msg，必须在 _feedNode 运行时改写节点属性 entityId/startDate/endDate。
+        子流程实例内节点 id 被改写（af_hist_x__n_hist），getNode 必须用【推导完整 id】，
+        短 id "n_hist" 取不到 → entityId 恒空 → ValidationError。"""
         built = _load_built()
         for arr in built:
             sid = arr[0]["id"]
@@ -226,17 +228,19 @@ class TestHistorySubflow(unittest.TestCase):
                           and "msg.payload" in (n.get("func") or "")]
             self.assertTrue(func_nodes, f"{sid} 缺少解析 function 节点")
             parse_func = func_nodes[0]["func"]
+            # 1) payload 对象化（#107 根因）
             self.assertIn("typeof msg.payload", parse_func,
                           f"{sid} _feedNode 未做 payload 对象化（#107 根因）")
             self.assertIn("Array.isArray(msg.payload)", parse_func,
                           f"{sid} _feedNode 未防数组 payload")
-            self.assertIn("msg.payload.entityId = msg.entity", parse_func,
-                          f"{sid} _feedNode 未注入 entityId")
+            # 2) 运行时改写节点属性：用推导完整 id 取 n_hist 并注入 entityId
+            self.assertIn('node.id.replace(/__n_parse$/, "__n_hist")', parse_func,
+                          f"{sid} _feedNode 未用推导完整 id 取 n_hist（子流程 id 改写坑）")
             hists = [n for n in arr if n.get("type") == "api-get-history"]
-            self.assertEqual(hists[0].get("entityIdType"), "msg",
-                             f"{sid} entityIdType 应为 msg（原生从 msg.entity 读）")
-            self.assertEqual(hists[0].get("entityId"), "entity",
-                             f"{sid} entityId 字段应为 entity（msg.entity 路径）")
+            self.assertEqual(hists[0].get("entityIdType"), "equals",
+                             f"{sid} entityIdType 必须为 equals（该节点版本 schema 仅允许 equals/regex）")
+            self.assertEqual(hists[0].get("entityId"), "",
+                             f"{sid} entityId 应为空占位（运行时由 _feedNode 改写）")
 
 class TestEnsureBeforeNodeGate(unittest.TestCase):
     """#711：ensure 必须在节点闸门【之前】跑，且要拿到正确的 allow_prod。
