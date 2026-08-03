@@ -114,7 +114,30 @@ disable: true
   动作: ...
   动作: ...
 ```
-可用子流程：`demo_notify`（智能语音播报队列：text/room/level/priority/mode…）、`bark_push`（iPhone 通知：title/body/level）、`history_*` 历史查询（entity/start/end/metric/at/state…）。
+可用子流程：`demo_notify`（智能语音播报队列：text/room/level/priority/mode…）、`bark_push`（iPhone 通知：title/body/level）、`history_*`（历史查询子流程族，参数与坑位见下方「history_* 历史查询」专节）。
+
+### history_* 历史查询子流程族（agent 必读）
+四个子流程，全部走网关内联调用（不直接碰 NR）。统一调用语法：`调用子流程: <名>(参数…)`。
+- `entity` 必须是 `autoflow_resolve_entity` 解析出的真实 entity_id；
+- `start` / `end` / `at` 用 `YYYY-MM-DDTHH:MM:SS` 本地时间。
+
+| 子流程 | 作用 | 必填参数 |
+|---|---|---|
+| `history_duration` | 实体在 `[start,end]` 内处于 `state` 的总时长（秒） | `entity, start, end, state` |
+| `history_state_at` | 实体在 `at` 时刻的状态 | `entity, at` |
+| `history_aggregate` | 对实体在 `[start,end]` 的某指标做聚合 | `entity, start, end, metric` |
+| `history_occurred` | 实体在 `[start,end]` 内是否发生过 `state` | `entity, start, end, state` |
+
+⚠️ **`history_aggregate` 的 `metric` 是枚举，只能取其一**：`energy` / `count` / `mean` / `min` / `max` / `sum`。
+**均值用 `mean`，不要写 `avg`**——写 `avg` 会直接触发 `C_SUBFLOW_ARG` 编译失败。
+
+示例（已验证可编译通过）：
+```
+场景: 书房台灯今日亮灯累计时长
+触发: inject
+调用子流程: history_duration(entity=light.philips_cn_249518489_rwread_s_2_light, start=2026-08-01T00:00:00, end=2026-08-03T12:00:00, state=on)
+```
+
 - **原生节点逃逸（Phase 4，中风险）**：若只想在 DSL 里嵌一小段手写 NR 节点（如复合 switch 条件、JSONata 变换），可用 `原生节点:` 原语，例：
   `原生节点: {"type":"switch","property":"payload.lux","propertyType":"msg","rules":[{"t":"lt","v":10}]}`
   它默认**关闭**，需在 WebUI 设置手动开启、可随时关；白名单永久禁 `function`/`exec`。能用原生节点解决的别升格整段原生手写 flow（原生手写另走 `deploy_raw`）。
