@@ -1,179 +1,403 @@
-# AutoFlow Gateway（网关核心 MVP）
+<div align="center">
 
-AutoFlow 的**中央网关**：agent 唯一接触面。独占 HA/NR 凭证，是所有动作的唯一执行点，
-集中落地安全策略。agent 永不直连 HA/NR，可随时更换（WorkBuddy / DeepSeek++ / Trac Solo）。
+# AutoFlow
 
-## 设计要点
-- **L0 驱动复用（已 vendoring）**：`ha_client.py` / `nr_client.py` 已复制到 `src/autoflow_gateway/lib/`，与包一同分发，**不依赖 skills 目录存在**（本地与容器自洽）。加载顺序：vendored lib → `HA_CLIENT_PATH`/`NR_CLIENT_PATH` 环境变量 → skills 目录。
-- **共享态（L1）**：`device_catalog` / `flow_catalog` / `entity_mapping` / `intent_log`，存于 `data/<env>/state/`。
-- **环境分级**：`staging` / `prod`（仅用于 data/ 子目录隔离；NR 默认 1880，连真实设备即 prod）。
-- **防御层**：结构上不提供 replace-all / delete-all；爆炸半径上限；受保护流；所有权隔离；高危域升级确认。
-- **确认闸**：所有写操作进待确认队列，人工批准后才落地（零信任）。
-- **双接口**：MCP（Streamable HTTP `/mcp` 主，SSE 备用）+ 脚本/JSON 兜底。
-- **MCP 身份层（已实现）**：连 MCP 必须 `Authorization: Bearer <身份码>`，匿名直接拒。
-  每个 agent 在 WebUI 生成身份码 + 独立存档；写操作强制用已认证身份，不可伪造。
-- **WebUI 控制面（已实现，响应式）**：手机/平板/电脑自适应，承载 ①确认闸(approve/reject)
-  ②agent 身份管理(生成码/重置/吊销) ③提案治理(agent 提 skill→人审→升格公用) ④用户笔记(智能家居想法)。
-  关键原则：**批准/升格只在 WebUI，MCP 不暴露**，杜绝 agent 自己批准自己。
+### 对着 AI 说一句话，你家就多一个自动化。
 
-## 目录
-```
-autoflow_gateway/
-  src/autoflow_gateway/   网关包
-    config.py             配置（env 优先）
-    state.py              共享态（原子 JSON 持久化）
-    schemas.py            SceneIntent 契约 + 校验
-    defense.py            防御层
-    confirm.py            人工确认闸
-    ha_layer.py           HA 读 + 受控写
-    nr_layer.py           NR 安全写（无 replace-all）
-    build_scene.py        意图→NR 流（幂等）
-    dsl_engine.py         DSL 编译器（意图 → NR 节点 + 静态校验）
-    api_specs.py          API 能力 spec 加载器（数据源 data/api_specs.json）
-    subflows.py           预置子流程 spec 加载器（数据源 data/subflows/subflows.json）
-    gateway.py            编排核心
-    cli.py                脚本/JSON 兜底接口
-    mcp_server.py         MCP 服务（Streamable HTTP / SSE）+ 身份鉴权中间件
-    identity.py           MCP 身份层：agent 身份码/存档/拒绝匿名
-    proposals.py          提案/经验沉淀（raw→candidate→public，升格落盘公用 skill）
-    notes.py              用户笔记（智能家居想法，长期存档）
-    webui.py              WebUI 后端（/api + 静态首页，可选 token 闸门）
-    webui/static/         响应式前端（手机/平板/电脑自适应）
-    vhass.py              虚拟 HA（数字孪生 / staging 数据源，纯标准库）
-    mock_docker_api.py    staging 非实体能力模拟（Docker/业务 API）
-    lib/                  vendored HA/NR 客户端（ha_client.py / nr_client.py）
-    data/                 运行时数据（api_specs.json / subflows/ 子流程定义 + nr_defs；data/<env>/state 共享态）
-  tests/                  单元测试（含 test_identity / test_webui）
-  examples/               示例意图
-  pyproject.toml / Dockerfile / docker-compose.yml / .env.example
-```
+不用打开 Node-RED，不用查实体 ID，不用担心 AI 半夜把你家门锁打开。
 
-## 一键安装（Docker，推荐）
+[快速安装](#三安装五分钟) · [接上你的 AI](#四让你的-ai-接上-autoflow) · [第一个自动化](#五你的第一个自动化完整走一遍) · [四种做法对比](#二四种做法横向对比)
 
-一句话拉起完整网关（MCP + WebUI 同端口 `:8000`）：
+</div>
+
+---
+
+## 一、这东西到底解决什么问题
+
+如果你在用 Home Assistant，大概率经历过这三件事。
+
+**第一件：加一个自动化，比想象中麻烦得多。**
+
+你想要「书房电脑一开机，就把显示器挂灯打开」。听起来 30 秒的事。实际上：打开 Node-RED
+→ 拖一个触发节点 → 想不起来电脑的实体叫什么 → 切到 HA 开发者工具搜 → 复制出
+`switch.d4f0eaeab731_switch` 这么个东西 → 回来粘贴 → 再拖一个判断节点 → 再去搜挂灯
+→ `light.yeelink_cn_555003624_lamp22_s_2` → 拖 call service 节点 → 连线 → 部署 →
+去书房开一次电脑测试。
+
+半小时过去了。而你脑子里那句话，只有 15 个字。
+
+**第二件：让 AI 帮你写，它会一本正经地编。**
+
+你把需求丢给 ChatGPT/Claude，它很流畅地给你一段 flow JSON，里面写着
+`light.study_desk_lamp`。看起来特别合理 —— 但你家没有这个实体。真实的 ID 是
+`light.yeelink_cn_555003624_lamp22_s_2`，AI 不可能猜出来。
+
+要命的是**它不会报错**。导入 Node-RED，部署成功，绿灯，一切正常。然后它永远不触发。
+你三天后才发现，还以为是自己哪里没配对。
+
+**第三件：真让 AI 连上 HA，你会睡不着。**
+
+要让 AI 真正能干活，你得把 HA 长期访问令牌给它。那一刻它就拥有了你家所有设备的完整控制权
+—— 灯、窗帘、门锁、水阀。它不需要恶意，只需要一次幻觉、一个手滑的批量操作。
+
+**AutoFlow 就是插在你和 AI 之间的那一层。**
+
+它拿着钥匙，AI 没有。AI 想干什么，得先跟它说；它检查完、在虚拟环境里试跑过、确认没问题，
+再送到你手机上让你点一下「同意」，才真的落到你家里。
+
+---
+
+## 二、四种做法横向对比
+
+还是那个需求：**「书房电脑一开机，就把显示器挂灯打开」**。看四种做法分别会发生什么。
+
+### 做法 A：自己在 Node-RED 里拖
+
+打开浏览器 → 翻 HA 开发者工具找两个实体 ID → 拖 4 个节点 → 连线 → 配置每个节点 →
+部署 → 跑去书房开电脑验证。
+
+**结果**：能成，但花了 30 分钟，而且你得懂 Node-RED 的节点模型。想加第 20 个自动化时，
+你已经不想加了。
+
+### 做法 B：把 HA 令牌给 AI，让它直接写
+
+你说需求，AI 生成 flow，直接调 Node-RED 接口部署。
+
+**结果**：10 秒完成，看起来很爽。但实体 ID 是编的，flow 静默失效。而且 AI 现在握着你家
+所有设备的控制权 —— 它下一次「顺手帮你优化一下」，可能就把 12 个自动化全改了。
+**你没有任何刹车。**
+
+### 做法 C：给 AI 配一份 skill 文档，它照着规范写
+
+比 B 好一些 —— AI 知道你的命名习惯、知道该用哪些节点、输出格式更规整。
+
+**结果**：格式对了，**实体 ID 照样是编的**。skill 是一份静态文档，它不知道你家此刻有哪些
+设备、哪个灯叫什么、开关现在是开还是关。它也验证不了写出来的东西能不能跑。
+安全问题一点没变：令牌还在 AI 手上。
+
+> 这是很多人当前的状态 —— 以为加了 skill 就解决了，其实只解决了「格式」，
+> 没解决「事实」和「安全」这两个真问题。
+
+### 做法 D：AutoFlow
+
+你在聊天框说：「书房电脑开机就把显示器挂灯打开」。
+
+背后发生的事：
+
+1. AI 问网关：「书房有个叫『显示器挂灯』的东西，实体 ID 是啥？」
+   网关回：`light.yeelink_cn_555003624_lamp22_s_2`，当前 `off`，可能状态 `on/off`。
+   —— **实体 ID 不再靠猜，是查出来的。**
+2. AI 写 5 行 DSL（不是 200 行 JSON）：
+
+   ```
+   场景: 书房电脑开机则开显示器挂灯
+   触发: switch.d4f0eaeab731_switch on
+   动作: light.turn_on(light.yeelink_cn_555003624_lamp22_s_2)
+   预期:
+     light.yeelink_cn_555003624_lamp22_s_2 = on
+   ```
+
+   注意最后那个 `预期:` —— AI 得**先声明「跑完之后灯应该是亮的」**。
+   这是它给自己立的军令状。
+
+3. 网关编译成真正的 Node-RED flow，**在一个虚拟的 HA 副本里把它跑一遍**，
+   然后对照那句 `预期:` 检查灯是不是真的亮了。
+   对不上就打回去让 AI 改，**你根本不会看到废品**。
+4. 通过了才进「待批准」队列，你手机上收到通知。
+5. 你点「同意」，它才落到你家 Node-RED 上。
+
+**结果**：一句话，1 分钟，产出的 flow 干净可读（不是一坨 function 节点），
+而且从头到尾 AI 都没碰过你的 HA 令牌。
+
+### 汇总
+
+| | A. 自己拖 | B. AI 直连 | C. AI + skill | **D. AutoFlow** |
+|---|---|---|---|---|
+| **你要会什么** | Node-RED 节点模型 | 会审 flow JSON | 会审 flow JSON | **会说话** |
+| **加一个自动化要多久** | 20–40 分钟 | 1 分钟 | 1 分钟 | **1 分钟** |
+| **实体 ID 从哪来** | 你手动查 | AI 猜（常错） | AI 猜（常错） | **网关实时查真实设备** |
+| **AI 编错实体会怎样** | — | 静默失效，几天后才发现 | 静默失效 | **闸门当场拦下，打回重写** |
+| **上线前验证过吗** | 你手动跑一次 | 没有 | 没有 | **虚拟环境重放 + 断言** |
+| **AI 能直接动你家设备吗** | — | **能，随时** | **能，随时** | **不能，必须你点同意** |
+| **你的 HA 令牌谁拿着** | 你 | **AI** | **AI** | **只有网关** |
+| **能撤销吗** | 手动改回去 | 靠 NR 自己的备份 | 同左 | **一键下线 + 每次部署存快照** |
+| **产出的 flow 好维护吗** | 取决于你 | 常是一坨 function | 好一些 | **编译产出，结构统一** |
+| **换个 AI 模型要重做吗** | — | 要重配令牌 | 要重写 skill | **换一个身份码就行** |
+| **AI 能自己批准自己吗** | — | **能** | **能** | **永远不能**（批准入口只在网页端） |
+
+一句话总结这张表：**A 累，B 危险，C 是把 B 包装得好看了一点，D 才真正解决了「事实」「验证」「刹车」三个问题。**
+
+### 什么情况下你不需要 AutoFlow
+
+诚实地说：
+
+- 你家总共就 3 个自动化，写完再也不动 —— 不值当为它多跑一个服务。
+- 你没有 Docker，也不想装 —— AutoFlow 目前推荐容器部署。
+- 你享受手动拖节点的过程 —— 那是另一种乐趣，AutoFlow 帮不上忙。
+
+AutoFlow 的价值随「你想让家里变聪明的野心」增长。自动化越多、越常改、越怕出事，
+它越划算。
+
+---
+
+## 三、安装（五分钟）
+
+### 前置条件
+
+- 一台常开的机器：NAS、软路由、树莓派、旧电脑都行（跟 HA 同一个局域网）
+- 上面装了 **Docker**（没有的话脚本能帮你装，见下）
+- 你已经在用 **Home Assistant** 和 **Node-RED**
+
+### 第 1 步：一条命令装好
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lidicn/AutoFlow/main/install.sh | sh
 ```
 
-脚本会自动：检查/安装 Docker → 拉取仓库构建上下文 → `docker compose up -d --build` → 等待 WebUI 就绪。
-安装目录默认 `/opt/autoflow`（macOS `~/autoflow`），数据持久化在 `<DIR>/data`，连接配置写 `<DIR>/.env`。
+脚本会自动：检查 Docker → 下载代码 → 构建镜像 → 启动 → 等待服务就绪。
 
-启动后浏览器打开 `http://<本机IP>:8000`：
+- 装到哪儿：Linux/NAS 默认 `/opt/autoflow`，macOS 默认 `~/autoflow`
+- 想换目录：`sh install.sh -d /volume1/docker/autoflow`
+- 机器上没 Docker（仅 Linux）：`sh install.sh --install-docker`
+- 以后更新：`sh install.sh --update`（**保留**你的数据和配置）
 
-1. **设置 → 连接配置**：填写 HA / Node-RED 地址与令牌（也可直接在 `.env` 里写）。
-2. **Agents 面板**：给 agent 生成身份码（MCP 强制鉴权，匿名被拒）。
+### 第 2 步：拿到控制台钥匙
 
-更新：`sh install.sh --update`（保留 `data/` 与 `.env`）。本机无 Docker 时加 `--install-docker` 可由脚本代为安装（仅 Linux）。
+**⚠️ 这一步最容易卡住，请务必看。**
 
-## 快速开始（开发机，不触真实设备）
+出于安全考虑，AutoFlow 首次启动会自动生成一个访问令牌。**不带令牌从局域网访问网页端会被
+403 拒绝** —— 很多人以为装失败了，其实只是缺钥匙。
 
-**方式 A — 可编辑安装（推荐，一次）：**
+拿钥匙：
+
 ```bash
-PY=受管python路径   # 如 /path/to/python（任意 Python 3.12+）
-cd autoflow_gateway
-$PY -m pip install -e .
-autoflow config                                  # 控制台命令，随处可用
-autoflow propose --file examples/scene_home_arrive.json
-python -m autoflow_gateway.mcp_server            # 启 MCP（Streamable HTTP :8000/mcp）
-python -m autoflow_gateway.mcp_server --transport sse
+docker exec autoflow_gateway cat /data/.webui_token
 ```
 
-**方式 B — 零摩擦启动器（无需安装）：**
-```bash
-cd autoflow_gateway
-$PY -m pip install mcp pydantic uvicorn starlette python-dotenv   # 仅首次
-python run.py cli discover --keyword 客厅        # 脚本接口
-python run.py mcp                                # 启 MCP 服务（强制身份，但无 WebUI）
-python run.py serve                              # 启 MCP(/mcp) + WebUI(/) 同端口 :8000
-```
-> 凭证：复制 `.env.example` 为 `.env` 填写，网关启动自动 `load_dotenv()`；或设环境变量 `HASS_TOKEN`/`NR_PASS`/`HASS_SERVER`/`NR_URL` 等。
+（或者直接看文件：`cat /opt/autoflow/data/.webui_token`）
 
-## 测试
-```bash
-$PY tests/test_gateway.py    # 网关核心单测（mock 后端，零设备接触）
-$PY tests/test_vhass.py      # 虚拟 HA 端点/服务变更/合成触发/种子生成
-$PY tests/test_staging.py    # staging 集成：gateway 指向 vhass 全链路验证
+拿到形如 `3dX-0KNWrdMk_8aNmjk926J9IC9MZ0Xg` 的一串字符，然后用它开门：
+
+```
+http://<你这台机器的IP>:8000/?token=<刚才那串字符>
 ```
 
-## P2 虚拟孪生 staging（已完成）
+> 建议把这个完整网址存成手机书签 —— 以后批准自动化就靠它，在被窝里点一下就行。
 
-让 agent 在**不碰真实设备**的前提下迭代 flow：用 `vhass` 镜像真实 HA 的 entity_id/区域/状态，
-NR 指向它即可安全练手；Docker/业务 API 用 `mock_docker_api` 模拟。
+### 第 3 步：告诉它你家在哪
 
-**① 从真实 catalog 生成种子 + 镜像进 staging（一次性）**
-```bash
-# 把 prod catalog（含区域）镜像进 staging catalog，并生成 vhass 种子
-autoflow seed-vhass --mirror --src data/prod/state/device_catalog.json --seed-out data/vhass_seed.json
-# 仅生成种子（不镜像）：
-autoflow seed-vhass --src data/prod/state/device_catalog.json --seed-out data/vhass_seed.json
-```
+网页端打开后，进 **⚙️ 设置 → 连接配置**，填两组信息：
 
-**② 运行虚拟 HA（staging 数据源）**
-```bash
-autoflow vhass --port 8124 --seed data/vhass_seed.json
-# 或：python -m autoflow_gateway.vhass --port 8124 --seed data/vhass_seed.json
-# 合成触发（模拟现实事件，供 P3 验证）：
-#   POST /api/trigger {"entity_id":"device_tracker.me","state":"home"}
-```
+| 填什么 | 说明 |
+|---|---|
+| **Home Assistant 地址** | 如 `http://192.168.1.10:8123`。<br>⚠️ 如果 HA 跟 AutoFlow 在**同一台机器**上，要写 `http://host.docker.internal:8123`，**不能写 localhost** |
+| **HA 长期访问令牌** | HA 里：左下角头像 → 安全 → 长期访问令牌 → 创建 |
+| **Node-RED 地址** | 如 `http://192.168.1.10:1880` |
+| **Node-RED 账号密码** | 如果你的 NR 开了登录 |
 
-**③ 运行 mock 非实体 API**
-```bash
-autoflow mock-api --port 9100 --registry data/mock_api_registry.json
-# 发现可用 API：GET /api/registry
-```
+保存后立即生效，不用重启。
 
-**④ staging 网关指向 vhass**：把 `HASS_SERVER` 设为 `http://vhass:8124`（容器内）或
-`http://127.0.0.1:8124`（本机）。此后 agent 经网关 discovery/commit 都落在虚拟环境，
-`refresh_catalog` 走 `GET /api/areas` 兜底（无需 hass-cli 即可带区域）。
-
-> **已知缺口（P3 解决）**：NR 若经 HA websocket 订阅状态变化，需 vhass 支持 HA websocket
-> 协议（当前 vhass 仅实现 REST）。P3 验证闭环的推荐做法：staging flow 触发器用 NR `inject` 节点
-> （手动/网关注入），不依赖实时事件流；或用网关 `POST /api/trigger` 注入后断言 vhass 状态。
-
-## 部署到 NAS（飞牛 OS 无 Python → 容器化）
-详见 **[DEPLOY.md](DEPLOY.md)**。要点：把 `autoflow_gateway/` 整目录拷到 `//<NAS_IP>/docker/autoflow_gateway/`，NAS 上 `docker compose up -d --build`。镜像基于 `uv` 基础镜像在容器内装包，无需宿主机有 Python。客户端已 vendoring 进镜像，`/mcp` 端点对齐 DeepSeek++ 已验证的 Streamable HTTP。compose 已包含 `vhass` 与 `mock_api` 服务，staging 网关默认指向 `http://vhass:8124`。
-
-## 下一步（后续 phase）
-- P3 验证闭环（合成触发 + 断言；staging inject 节点 + vhass 状态断言）
-- P4 准入基准（参考真值归因）
-- P6 加固（失败标签 telemetry / 熔断 / 行为级回滚）
+**这些凭证从此只存在于网关里，任何 AI 都读不到。** 这是整个设计的地基。
 
 ---
 
-## 身份层 + WebUI 控制面（已实现）
+## 四、让你的 AI 接上 AutoFlow
 
-### 1. 给 agent 发身份码（MCP 连接前提）
-任何 agent 连 `http://<host>:8000/mcp` 都必须在 `Authorization: Bearer <身份码>` 携带身份码，
-否则被 401 拒绝。匿名 agent 无法连入——这是「可归因 / 每 agent 独立存档」的强制底座。
+### 第 1 步：给 AI 发一张身份证
 
-在 WebUI（浏览器开 `http://<host>:8000/`）的 **Agents** 面板：
-- 输入用户名（如 `deepseek++`），点「创建」→ 生成明文身份码（**仅显示一次**，立即复制）。
-- 把该码填入 agent 的 MCP 配置里 `Authorization: Bearer <码>`。
-- 支持「重置码」（旧码失效）与「吊销」（agent 立即失去连接资格）。
-- 或用无头命令：`autoflow agents-create --name deepseek++ --tier staging`。
+进网页端 **🤖 Agents** 面板 → 输入一个名字（比如 `我的Claude`）→ 点「创建」。
 
-agent 经 MCP 提交场景/提案时，`agent_id` 由网关从身份码自动注入，**agent 无法伪造他人身份**。
+会弹出一串 `af_` 开头的身份码。**只显示这一次，立刻复制。**
 
-### 2. 确认闸（WebUI 审核 agent 的写操作）
-agent 的 `commit` / HA 服务调用只会进「待确认队列」。在 **Pending** 面板人工 approve/reject；
-MCP 不暴露 approve/reject，agent 不能自己批准自己。
+> 为什么要发身份证？因为每个 AI 干过什么都会独立记账 —— 谁提的方案、谁改的东西，
+> 全都可追溯。匿名连接一律拒绝。哪天某个 AI 不靠谱了，点一下「吊销」，它立刻失去所有能力。
 
-### 3. 提案治理（经验复利）
-agent 通过 MCP `autoflow_submit_proposal` 提交经验 skill / 约定修正 / 缺陷修复建议（落为 `raw`）。
-在 **Proposals** 面板审核：升格 `raw → candidate → public`。到 `public` 时内容自动落盘为
-`data/<env>/experience/public/<slug>.md` 公用 skill，反哺网关、可被多 agent 复用。
+### 第 2 步：在 AI 客户端里配 MCP
 
-### 4. 笔记（你的智能家居想法）
-**Notes** 面板是你的私人思考区：记录那些「想到了但暂不落地」的智能家居系统想法，可贴标签、
-可搜索。与提案不同，笔记不进入升格流程，仅作长期存档。
+统一填这三样：
 
-> 可选加固：设环境变量 `AF_WEBUI_TOKEN=xxx` 后，WebUI 的 `/api` 也需 `?token=xxx` 或
-> `Authorization: Bearer xxx` 才能访问（默认仅本机开放并打告警）。
+- **传输方式**：Streamable HTTP
+- **地址**：`http://<你的机器IP>:8000/mcp`
+- **请求头**：`Authorization: Bearer <刚才那串身份码>`
 
-### 关键安全边界
-| 动作 | 入口 | 谁能动 |
-|------|------|--------|
-| 连 MCP / 提交场景 / 提交提案 | MCP（带身份码） | agent |
-| 批准部署 / 升格提案 / 管理身份 | WebUI（人） | 人类 |
-| 自己批准自己 | — | **永不允许**（MCP 不暴露 approve） |
+几种常见客户端的写法：
+
+**Claude Desktop / WorkBuddy 等（JSON 配置）**
+
+```json
+{
+  "mcpServers": {
+    "autoflow": {
+      "type": "streamableHttp",
+      "url": "http://192.168.1.10:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer af_你的身份码"
+      }
+    }
+  }
+}
+```
+
+> 不同客户端字段名略有差异（`type` 有的叫 `transport`，值可能写作
+> `streamable-http`/`http`）。照着你客户端的文档填，**只要保证是
+> Streamable HTTP + 那个 URL + 那个请求头就行**。
+
+**浏览器扩展类客户端（如 DeepSeek++）**
+
+界面里填 URL 和 Bearer 字段即可。如果扩展跑在浏览器里、报跨域错误，
+在 `.env` 里把扩展的 origin 加进白名单：
+
+```
+AF_MCP_CORS_ORIGINS=chrome-extension://xxxxxxxx
+```
+
+**只支持 SSE 的老客户端**
+
+地址换成 `http://<IP>:8000/sse`。
+
+### 第 3 步：验证连上了
+
+对 AI 说一句：
+
+> 帮我看看书房都有什么设备
+
+如果它能列出你家书房的真实设备（带真实实体 ID 和当前状态），就通了。
+
+### 不用手动给 AI 装说明书
+
+网关里内置了一份完整的使用指南。AI 连上后自己调用 `autoflow_get_skill` 就能取到 ——
+你不需要复制粘贴任何 prompt。指南更新了，AI 下次自动拿到新版。
+
+---
+
+## 五、你的第一个自动化（完整走一遍）
+
+### 你说
+
+> 书房电脑一开机，就把显示器挂灯打开
+
+### AI 做（你不用管，但知道它在干嘛会更放心）
+
+1. **查设备** —— 问网关「书房的显示器挂灯是哪个实体」。
+   网关返回该区域所有沾边的实体，带域、当前状态、可能状态，让 AI 自己挑。
+
+   > 这里有个细节体现设计用心：AI **不需要提前知道**「挂灯」是 `light` 还是 `switch`。
+   > 很多设备名字看着像灯，实际是开关。网关把候选全给它，让它按用途挑，而不是逼它猜。
+
+2. **写 DSL** —— 就是本文开头那 5 行。不是 200 行 JSON。
+3. **提交编译** —— 网关做四件事：
+   - 语法检查
+   - 实体校验（ID 是否真实存在）
+   - 节点校验（用到的节点类型在你的 Node-RED 上装了没）
+   - **虚拟重放**：在一个 HA 数字孪生里真的执行一次，断言灯确实变成了 `on`
+
+   任何一环挂了都会打回给 AI，附带具体原因。**AI 自己修，修好再提。**
+
+### 你批准
+
+网页端 **🛡️ 安全闸** 面板出现一条待批准。你能看到：
+
+- 这个自动化叫什么、哪个 AI 提的
+- 完整 DSL（人话，看得懂）
+- 编译出的 flow 结构
+- 虚拟环境的验证结果
+
+点 **同意** —— 落到你家 Node-RED，立即生效。
+点 **拒绝** —— 什么都不会发生。
+
+> 配了 Bark 推送的话，待批准会直接推到手机（**⚙️ 设置**里填）。
+
+### 出问题了怎么办
+
+**🚀 已部署** 面板列出所有经 AutoFlow 部署的自动化，点一下就能**下线**。
+
+这里有个贴心的设计：它**只能下线自己部署的东西**。你手工在 Node-RED 里搭的那些 flow，
+AutoFlow 认都不认，更别说删了 —— 想误伤都做不到。
+
+每次部署还会自动存一份快照，需要追溯「上周那版是什么样」时可以翻。
+
+---
+
+## 六、网页端有什么
+
+手机、平板、电脑自适应。九个面板：
+
+| 面板 | 干什么 |
+|---|---|
+| **▣ 概览** | 现在有多少自动化在跑、有没有待办 |
+| **🛡️ 安全闸** | **最常用**。AI 提的东西在这儿批准或拒绝 |
+| **✨ 提案** | AI 沉淀的经验/建议。你可以把好的升格成公用知识，反哺所有 AI |
+| **🚀 已部署** | 所有已上线的自动化，可查看、可一键下线 |
+| **🔗 子流程** | 可复用的能力积木（推送、历史查询等），可启用/停用 |
+| **🤖 Agents** | 发身份码、重置、吊销 |
+| **🩺 诊断** | 出问题时看这里：执行链路、失败原因 |
+| **📝 笔记** | 你的想法暂存区。「哪天该弄个……」记下来，不进流程 |
+| **⚙️ 设置** | 连接配置、推送、安全选项 |
+
+**一条不可动摇的规矩**：批准和升格**只能在网页端做**，MCP 接口里根本没有这两个能力。
+AI 不可能自己批准自己 —— 这不是靠自觉，是接口层面就不给。
+
+---
+
+## 七、常见问题
+
+**Q：网页打不开 / 一直 403？**
+八成是没带令牌。回到[第 2 步](#第-2-步拿到控制台钥匙)拿钥匙，用
+`http://IP:8000/?token=xxx` 访问。
+
+**Q：连接配置填了，但连不上 HA？**
+HA 跟 AutoFlow 在同一台机器时，地址要写 `http://host.docker.internal:8123`，
+写 `localhost` 一定失败 —— 容器里的 localhost 是容器自己。
+
+**Q：AI 说它连不上 / 401？**
+身份码错了或被吊销了。去 **🤖 Agents** 面板重置一个新码，更新到 AI 客户端。
+身份码只在创建时显示一次，丢了就重置，找不回来。
+
+**Q：AI 提交的东西总被打回？**
+看打回原因（AI 通常会告诉你）。最常见两种：
+① 实体不存在 —— 你说的设备名网关找不到，换个说法或去 HA 里确认名字；
+② 节点类型未注册 —— 你的 Node-RED 缺某个插件。
+
+**Q：能让它不用每次都问我吗？**
+能，但**默认不建议**。测试环境可以设 `AF_AUTO_APPROVE=true`。
+接真实设备的环境请保持人工确认 —— 这是最后一道刹车。
+
+**Q：AI 会不会偷偷改我已有的自动化？**
+不会。网关不提供「全量替换」「批量删除」这类操作 —— 不是靠规则禁止，是**接口里压根没有**。
+另外还有爆炸半径上限、受保护流标签、所有权隔离（AI 动不了别人建的东西）。
+
+**Q：门锁、水阀这种危险设备呢？**
+属于高危域，需要额外的升级确认，不能跟开灯走同一条路。
+
+**Q：AutoFlow 挂了，我家自动化会停吗？**
+不会。自动化跑在你自己的 Node-RED 上，AutoFlow 只是「制造和管理」它们的工具。
+网关挂了只是暂时不能加新的，已有的照常运行。
+
+---
+
+## 八、安全边界一览
+
+| 这件事 | 在哪做 | 谁能做 |
+|---|---|---|
+| 查设备、写方案、提交提案 | MCP（带身份码） | AI |
+| **批准部署** | 网页端 | **只有你** |
+| **升格公用知识** | 网页端 | **只有你** |
+| **管理 AI 身份** | 网页端 | **只有你** |
+| 拿到 HA / Node-RED 令牌 | — | **只有网关**（AI 永远看不到） |
+| AI 批准自己提的东西 | — | **接口层面不存在** |
+
+---
+
+## 九、给开发者
+
+- **架构与设计**：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- **本地开发 / 容器部署**：[DEPLOY.md](DEPLOY.md)
+- **白盒验证循环**：[WHITEBOX_VERIFY_LOOP.md](WHITEBOX_VERIFY_LOOP.md)
+
+一句话概括技术形态：一个 Python 网关，独占 HA/Node-RED 凭证，对外暴露
+MCP（Streamable HTTP）+ 网页控制面。AI 侧只写语义 DSL，网关负责编译、静态校验、
+虚拟孪生重放自证、人工确认闸、部署与快照。AI 可随时更换，凭证不动。
+
+## 许可
+
+[MIT](LICENSE)
