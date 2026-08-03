@@ -156,7 +156,11 @@ curl -fsSL https://raw.githubusercontent.com/lidicn/AutoFlow/main/install.sh | b
 
 脚本会自动：检查 Docker → 下载代码 → 构建镜像 → 启动 → 等待服务就绪。
 
-- 装到哪儿：Linux/NAS 默认 `/opt/autoflow`，macOS 默认 `~/autoflow`
+> 如果报 `mkdir: cannot create directory '/opt/autoflow': Permission denied`，说明当前用户没权限写
+> `/opt`。两种改法：① 用 `| sudo bash` 安装到 `/opt/autoflow`；② 指定你有权限的目录：
+> `curl -fsSL .../install.sh | bash -s -- -d /volume1/docker/autoflow`。
+
+- 装到哪儿：Linux/NAS 默认 `/opt/autoflow`（无 root 权限时用 `-d` 改路径），macOS 默认 `~/autoflow`
 - 想换目录：`bash install.sh -d /volume1/docker/autoflow`
 - 机器上没 Docker（仅 Linux）：`bash install.sh --install-docker`
 - 以后更新：`bash install.sh --update`（**保留**你的数据和配置）
