@@ -206,18 +206,18 @@ class TestWebUI(TmpCfgMixin, unittest.TestCase):
 
     def test_device_catalog_endpoints(self):
         """safe-gate-ui：GET /api/catalog、GET /api/entities、POST /api/catalog/import 行为正确。"""
-        from unittest.mock import AsyncMock
+        from unittest.mock import Mock
         # 桩：用离线假数据隔离真实 HA/NR 拉取，只验证端点编排
         self.gw.state.get_device_catalog = lambda: {
             "version": 1, "freshness": "2026-08-03T10:00:00",
             "entities": {"light.office": {"friendly_name": "书房灯"}},
         }
-        self.gw.list_entities = AsyncMock(return_value={
+        self.gw.list_entities = Mock(return_value={
             "entities": [{"entity_id": "light.office", "friendly_name": "书房灯",
                           "area": "书房", "domain": "light"}],
             "matched_count": 1, "total": 1, "keyword": "灯", "limit": 20, "available": True,
         })
-        self.gw.refresh_catalog = AsyncMock(return_value={
+        self.gw.refresh_catalog = Mock(return_value={
             "mode": "full", "entity_total": 1, "fetched": 1, "changed": 0,
             "added": 1, "gone_marked": 0, "freshness": "2026-08-03T10:00:00",
         })
@@ -240,12 +240,12 @@ class TestWebUI(TmpCfgMixin, unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.json()["ok"])
         self.assertEqual(r.json()["total"], 1)
-        self.gw.refresh_catalog.assert_awaited_once_with(full=True)
+        self.gw.refresh_catalog.assert_called_once_with(full=True)
 
     def test_catalog_import_error_surfaced(self):
         """refresh_catalog 异常时端点返回 500 且 ok=False，不静默。"""
-        from unittest.mock import AsyncMock
-        self.gw.refresh_catalog = AsyncMock(side_effect=RuntimeError("HA 不可达"))
+        from unittest.mock import Mock
+        self.gw.refresh_catalog = Mock(side_effect=RuntimeError("HA 不可达"))
         r = self.client.post("/api/catalog/import")
         self.assertEqual(r.status_code, 500)
         self.assertFalse(r.json()["ok"])

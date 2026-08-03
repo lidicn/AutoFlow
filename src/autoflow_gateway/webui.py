@@ -760,7 +760,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     async def catalog_import(request: Request):
         """POST /api/catalog/import → 全量刷新设备目录（仅用户显式点击）。不触发部署。"""
         try:
-            res = await gw.refresh_catalog(full=True)
+            res = gw.refresh_catalog(full=True)
         except Exception as e:
             return _js({"ok": False, "error": f"导入失败: {e}"}, status=500)
         return _js({
@@ -780,7 +780,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             limit = int(request.query_params.get("limit", "20"))
         except (TypeError, ValueError):
             limit = 20
-        res = await gw.list_entities(keyword=kw, limit=limit)
+        res = gw.list_entities(keyword=kw, limit=limit)
         return _js({"ok": True, **res})
 
     async def audit_list(request: Request):
