@@ -23,6 +23,7 @@ else
   DEFAULT_DIR="/opt/autoflow"
 fi
 INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_DIR}"
+DID_SPECIFY_DIR=0
 UPDATE=0
 INSTALL_DOCKER=0
 
@@ -30,7 +31,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --update) UPDATE=1 ;;
     --install-docker) INSTALL_DOCKER=1 ;;
-    -d|--dir) INSTALL_DIR="$2"; shift ;;
+    -d|--dir) INSTALL_DIR="$2"; DID_SPECIFY_DIR=1; shift ;;
     -b|--branch) BRANCH="$2"; shift ;;
     -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     *) echo "未知参数: $1" >&2; exit 1 ;;
@@ -76,7 +77,22 @@ docker compose version >/dev/null 2>&1 || { err "缺少 docker compose 插件（
 docker info >/dev/null 2>&1 || { err "Docker 守护进程不可达。Linux: sudo systemctl start docker；macOS: 打开 Docker Desktop。"; exit 1; }
 ok "Docker 就绪"
 
-# ── 2. 目录 ──
+# ── 2. update 安全守卫 ──
+# 场景：--update 不带 -d 时，INSTALL_DIR 取默认 /opt/autoflow（或 ~/autoflow）。
+# 若该系统已有 autoflow_gateway 容器但 INSTALL_DIR 不存在，说明 AutoFlow 实际装在
+# 别的目录。此时若继续会在默认路径新建一套空 data，并因容器名冲突「劫持」同名容器，
+# 把真实数据孤立在一边（token 重置、连接丢失）。故必须拒绝并提示用 -d 指定真实目录。
+if [ "$UPDATE" = "1" ] && [ "$DID_SPECIFY_DIR" != "1" ] && [ ! -d "$INSTALL_DIR" ]; then
+  if docker ps -a --filter "name=autoflow_gateway" --format '{{.Names}}' 2>/dev/null | grep -qx autoflow_gateway; then
+    err "检测到名为 autoflow_gateway 的容器，但安装目录 $INSTALL_DIR 不存在。"
+    err "这说明 AutoFlow 装在别的目录，不能用默认路径更新。请用 -d 指定真实安装目录："
+    err "    bash install.sh --update -d /真实路径/autoflow"
+    err "（不带 -d 会在此默认路径新建空数据并劫持同名容器，导致连接与令牌丢失）"
+    exit 1
+  fi
+fi
+
+# ── 3. 目录 ──
 if [ -d "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
   if [ "$UPDATE" = "1" ]; then
     info "更新模式：保留 data/ 与 .env，拉取最新代码重建镜像"
