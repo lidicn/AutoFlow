@@ -134,14 +134,6 @@ if not _gw_logger.handlers:
     _gw_logger.setLevel(logging.INFO)
     _gw_logger.propagate = False
 
-# 历史查询子流程（af_hist_*）自动安装总开关（#711）。
-# 生产部署 AUTOFLLOW_ENV=prod 时所有 NR 写操作都要 allow_prod=True，而 ensure 原先
-# 写死 False → 4 个 managed 历史子流程在 prod 上永远装不上 → 节点闸门把所有历史类
-# flow 判为「未注册」全拦。装的是网关自有子流程定义（增量 append、幂等、不碰用户
-# flow），故默认放行；设 AUTOFLLOW_HIST_AUTOINSTALL=0 可关掉 agent 路径的自动安装。
-_HIST_AUTOINSTALL = os.environ.get("AUTOFLLOW_HIST_AUTOINSTALL", "1") != "0"
-
-
 def _new_trace_id() -> str:
     return uuid.uuid4().hex[:12]
 
@@ -673,7 +665,7 @@ class Gateway:
         cat = self.state.get_device_catalog()
         ents = cat.get("entities", {})
         if not ents:
-            return {"entities": [], "hint": "device_catalog 为空，请先调用 autoflow_refresh_catalog 工具（或在 WebUI 连接设置保存并测试 HA 连接以自动拉取）。",
+            return {"entities": [], "hint": "device_catalog 为空，请先 refresh_catalog()。",
                     "returned": 0, "matched_count": 0, "truncated": False,
                     "offset": offset, "next_offset": None, "total": 0,
                     "freshness": "", "area_resolved": None, "area_hint": None}
@@ -755,7 +747,7 @@ class Gateway:
         cat = self.state.get_device_catalog()
         ents = cat.get("entities", {})
         if not ents:
-            return {"entities": [], "hint": "device_catalog 为空，请先调用 autoflow_refresh_catalog 工具（或在 WebUI 连接设置保存并测试 HA 连接以自动拉取）。",
+            return {"entities": [], "hint": "device_catalog 为空，请先 refresh_catalog()。",
                     "returned": 0, "matched_count": 0, "truncated": False,
                     "offset": offset, "next_offset": None, "total": 0,
                     "freshness": "", "area_resolved": None, "area_hint": None}
@@ -1325,7 +1317,7 @@ class Gateway:
         cat = self.state.get_device_catalog()
         ents = cat.get('entities', {})
         if not ents:
-            return {'ok': False, 'error': 'device_catalog 为空，请先调用 autoflow_refresh_catalog 工具（或在 WebUI 连接设置保存并测试 HA 连接以自动拉取）。',
+            return {'ok': False, 'error': 'device_catalog 为空，请先 refresh_catalog()。',
                     'query': name, 'candidates': []}
         area_filter, _ = self._resolve_area(area) if area else (None, None)
         area_index = self.state.get_area_index()
@@ -1459,9 +1451,9 @@ class Gateway:
                     "场景: 书房入户播报\n"
                     "触发: <发现的传感器 entity_id> on\n"
                     "动作: light.turn_on(<发现的灯 entity_id>)\n"
-                    "调用子流程: demo_notify(text=欢迎回家, room=书房, level=一般)"
+                    "调用子流程: tts_speak(text=欢迎回家, room=书房, level=一般)"
                 ),
-                "expected_postconditions_json_example": '[{"entity_id":"<灯 entity_id>","state":"on"},{"subflow":"demo_notify"}]',
+                "expected_postconditions_json_example": '[{"entity_id":"<灯 entity_id>","state":"on"},{"subflow":"tts_speak"}]',
             },
             "help": "语法/子流程随时调 autoflow_dsl_help()。",
         }
@@ -1687,7 +1679,7 @@ class Gateway:
                 "取值(数值条件)": "取值: <entity_id> <字段名>   把实体当前 state 读进 msg.<字段名>，供下面『分支』做数值判断。数值比较要用 $number(字段名)，如 分支: $number(lux) < 10。见 examples.数值条件",
                 "构建": "构建: <JSON对象 或 JSONata表达式>   把 msg.payload 设为请求体；动态值用反引号包裹，如 `payload`",
                 "请求": "请求: <METHOD> <url> [<字面JSON body>] [K=V headers]   不带字面 body 时自动把上游『构建』的 msg.payload 作为请求体发送",
-                "调用子流程": "调用子流程: <name>(k=值, ...)   如 demo_notify(text=..., room=书房, level=一般)。见 examples.TTS播报",
+                "调用子流程": "调用子流程: <name>(k=值, ...)   如 tts_speak(text=..., room=书房, level=一般)。见 examples.TTS播报",
                 "分支": "分支: <jsonata 条件>\n  动作: ...   条件成立才走缩进块。支持【嵌套】（分支体内再写 分支: 生成多级判断）与【多路】（连续写多个 分支: 或改用 否则如果: 接更多条件分支）",
                 "否则": "否则:\n  动作: ...   紧跟『分支』或『时间段/查询』门之后；不动作可留『注释:』占位",
                 "否则如果": "否则如果: <jsonata 条件>\n  动作: ...   紧跟『分支』之后再追加一个条件分支，实现 if/elif/else 多路判断（也可用连续 分支: 表达；嵌套判断在 分支/否则 体内再写 分支: 即可）",
@@ -1707,7 +1699,7 @@ class Gateway:
                 "场景: 书房入户播报\n"
                 "触发: binary_sensor.0x00158d0001a2520d_motion on\n"
                 "动作: light.turn_on(light.philips_cn_249518489_rwread_s_2_light, brightness_pct=80)\n"
-                "调用子流程: demo_notify(text=欢迎回到书房，已为你打开台灯, room=书房, level=一般)"
+                "调用子流程: tts_speak(text=欢迎回到书房，已为你打开台灯, room=书房, level=一般)"
             ),
             "examples": {
                 "OR多触发": (
@@ -1735,11 +1727,11 @@ class Gateway:
                     "  动作: switch.turn_on(switch.lumi_cn_lumi_158d000239c546_aq1_on_p_3_1)"
                 ),
                 "TTS播报": (
-                    "# 有人移动 → 开台灯 并 语音播报（跨域：light 动作 + demo_notify 子流程）\n"
+                    "# 有人移动 → 开台灯 并 语音播报（跨域：light 动作 + tts_speak 子流程）\n"
                     "场景: 书房有人开灯并播报\n"
                     "触发: binary_sensor.0x00158d0001a2520d_motion on\n"
                     "动作: light.turn_on(light.philips_cn_249518489_rwread_s_2_light)\n"
-                    "调用子流程: demo_notify(text=书房已有人，灯已打开, room=书房, level=一般)"
+                    "调用子流程: tts_speak(text=书房已有人，灯已打开, room=书房, level=一般)"
                 ),
                 "持久等待": (
                     "# 有人移动且持续 5 分钟 → 才开吊灯（避免人一晃就亮灯；持续时长支持 分钟/小时/秒）\n"
@@ -1756,7 +1748,7 @@ class Gateway:
                     "调用子流程: history_state_at(entity=climate.书房空调, at=昨晚23:12, attribute=temperature)\n"
                     "提取: 设定温度 = payload.value\n"
                     "分支: $number(设定温度) > 26\n"
-                    "  动作: 调用子流程: demo_notify(text=昨晚空调设到了27度以上，偏高, room=书房, level=一般)\n"
+                    "  动作: 调用子流程: tts_speak(text=昨晚空调设到了27度以上，偏高, room=书房, level=一般)\n"
                     "否则:\n"
                     "  注释: 温度正常，不提醒\n"
                     "# 另一例：门昨天11-12点开过没？→ occurred=true/false 在 msg.payload\n"
@@ -1768,7 +1760,7 @@ class Gateway:
                 "autoflow_propose_dsl(\n"
                 "  dsl=<上面的 DSL 文本>,\n"
                 "  expected_postconditions_json='[{\"entity_id\":\"<灯 entity_id>\",\"state\":\"on\"},"
-                "{\"subflow\":\"demo_notify\"}]'\n"
+                "{\"subflow\":\"tts_speak\"}]'\n"
                 ")"
             ),
             "note": "写作中任何不确定，随时再调 autoflow_dsl_help() 复查语法、examples 与子流程参数。",
@@ -2761,7 +2753,7 @@ class Gateway:
             f"7. 只解析不提交 = 失败。解析→写全 DSL（触发+条件+动作齐全）→提交，一气呵成。\n"
             f"8. 【复杂场景（多分支/多动作/含查询+子流程）】：先在本轮脑内列出『触发→条件→各分支动作』清单，"
             f"再把完整 DSL 一次性写进单个代码块提交，**不要分多次调用 propose_dsl、也不要中途反复翻 help**；"
-            f"多分支用嵌套 分支/否则，TTS/大模型调用用 调用子流程: demo_notify(...)，保持每个动作一行、参数精简。\n"
+            f"多分支用嵌套 分支/否则，TTS/大模型调用用 调用子流程: tts_speak(...)，保持每个动作一行、参数精简。\n"
         )
 
     def _wait_ds_bridge_idle(self, max_wait: int = 45, settle: float = 4.0, job_id: str = None) -> Dict[str, Any]:
@@ -2969,10 +2961,10 @@ class Gateway:
     def deploy_proposal(self, pid: str, agent_id: str = "human",
                         target_flow_id: Optional[str] = None,
                         target: str = "prod", force: bool = False,
-                        validate: bool = True, vhass_store=None,
+                        validate: bool = True, allow_prod: bool = True,
+                        vhass_store=None,
                         dry_run: bool = False,
-                        require_e2e: Optional[bool] = None,
-                        allow_prod: Optional[bool] = None) -> Dict[str, Any]:
+                        require_e2e: Optional[bool] = None) -> Dict[str, Any]:
         """把已通过的 DSL 提案直接部署到 NR（一步确认，不再走冗余确认闸）。
 
         流程：重新编译 DSL（真相源）→ 冲突检测（同名非本流拒绝/force 改名）
@@ -2985,16 +2977,8 @@ class Gateway:
         """
         _tid = _new_trace_id()
         _t0 = time.perf_counter()
-        # prod 写授权策略：
-        #   人手动点部署（agent_id="human"）= 显式授权 → 默认允许写 prod；
-        #   自动化/agent 部署默认受 prod 守卫保护（allow_prod=False），需显式 opt-in
-        #   或设全局 NR_ALLOW_PROD=1。create_or_update_flow 是单 flow 增量路径，
-        #   不替换整个实例，故对人工部署放开安全；真正的防清场在 deploy_all 的
-        #   allow_partial 检查（独立于本开关）。
-        if allow_prod is None:
-            allow_prod = (agent_id == "human")
         _slog(_tid, "deploy_proposal.start", pid=pid, agent_id=agent_id,
-              target=target, validate=validate, allow_prod=allow_prod)
+              target=target, validate=validate)
         store = ProposalStore(self.cfg)
         p = store.get(pid)
         if p is None:
@@ -3126,20 +3110,6 @@ class Gateway:
                 )
             except DefenseError as e:
                 return {"ok": False, "error": f"defense: {e}"}
-
-        # ★ 历史查询子流程幂等确保 —— 必须在节点闸门【之前】
-        # #711：ensure_history_subflow 此前只挂在 deploy_raw 且写死 allow_prod=False，
-        # prod 实例上永远不装 → 任何含 subflow:af_hist_* 的 flow 都会被下面的
-        # _gate_node_types 判为「节点类型未注册」直接拒绝，历史查询能力在生产环境
-        # 100% 不可用（MCP propose_dsl history_duration 实测复现 gate_passed=false）。
-        # 这里补齐：人部署 allow_prod=True → prod 也能装，装完再过闸放行。
-        # 失败不抛：装不上时下面的闸门会给出准确的「未注册」错误，语义一致。
-        # 必须无条件执行 —— 节点闸门（下一行）无条件运行，若这里因 dry_run 跳过，
-        # 则 dry_run 校验阶段闸门会把「其实能自动装」的 af_hist_* 误报成未注册，
-        # 卡住白盒历史类 flow 的部署校验。装的是网关自有 managed 子流程，幂等、不碰
-        # 用户 flow，dry_run 里写一次无害（与 run_staging_gate / propose_raw 一致）。
-        self._ensure_history_subflow_for(flow, allow_prod, _tid,
-                                         "deploy_proposal")
 
         # 节点注册表闸门（P0 防御）：未知节点类型直接报错，不让坏 flow 上线
         self._gate_node_types(flow)
@@ -3365,7 +3335,7 @@ class Gateway:
                 "_trace_id": tid,
             }
 
-        # 第 1 步：写 NR 子流程实例（增量 append，allow_prod=False 仅写 staging 实例（默认 1880），prod 环境需显式 allow_prod）
+        # 第 1 步：写 NR 子流程实例（增量 append，allow_prod=False 仅写 1990，不碰 1880）
         try:
             self.nr.create_subflow(
                 subflow_id, name,
@@ -3850,7 +3820,7 @@ class Gateway:
                     "message": (
                         f"link out『{lo_name}』指向不存在的 link-in/子流程入口「{tgt}」："
                         f"部署后运行时将报『Error delivering message to node:undefined』。"
-                        f"请确认目标 id 正确（如 demo_notify=b595563939283231、"
+                        f"请确认目标 id 正确（如 tts_speak=b595563939283231、"
                         f"anysearch_batch=af_anysearch_in）且该子流程已在目标 NR 注册。"
                     ),
                 })
@@ -4072,15 +4042,36 @@ class Gateway:
         errors = [v for v in validation if v["level"] == "error"]
         warnings = [v for v in validation if v["level"] == "warning"]
 
-        # Step 2.6b：历史查询子流程幂等确保（仿 bark 的 A3 模式）。
-        # 4 个 af_hist_* 子流程的 ensure 与 bark 同策略：活体已存在 → no-op（零风险）；
-        # 仅在缺失时从 subflows_built.json 重建（server 替换成默认 HA server，可移植）。
-        # #711：原先写死 allow_prod=False，AUTOFLLOW_ENV=prod 下永不安装 →
-        # 后续节点闸门把历史类 flow 全判「未注册」。改用 _HIST_AUTOINSTALL。
-        # 必须无条件执行 —— 节点闸门（4284 行）无条件运行，若因 dry_run 跳过则
-        # dry_run 预览阶段闸门会误报 af_hist_* 未注册，卡住白盒历史类 flow 部署校验。
-        # 装的是网关自有 managed 子流程，幂等、不碰用户 flow，dry_run 预览里写一次无害。
-        self._ensure_history_subflow_for(flow, _HIST_AUTOINSTALL, _tid, "deploy_raw")
+        # Step 2.6: Bark 子流程幂等确保（A3）——前置，保证后续闸门/E2E/部署时子流程已存在。
+        # dry-run 不做任何副作用（仅预览）。活体 1990 已存在 b0bbc86 → ensure 走 no-op（零风险）；
+        # 仅在缺失时按声明式规格生成（env 值经 os.environ 注入，密钥绝不硬编码）。
+        # 仅作用于 staging NR(self.nr=1990)，allow_prod=False 兜底，绝不动 1880。
+        if not dry_run:
+            from .subflows import (
+                ensure_bark_subflow, flow_uses_bark_subflow,
+                ensure_history_subflow, flow_uses_history_subflow,
+            )
+            if flow_uses_bark_subflow(flow.get("nodes", [])):
+                try:
+                    _bark_res = ensure_bark_subflow(self.nr.client, allow_prod=False)
+                    _slog(_tid, "deploy_raw.bark_ensure",
+                          created=_bark_res.get("created"), exists=_bark_res.get("exists"))
+                except Exception as _be:
+                    # bark 缺只影响推送，不阻塞主流程；且活体已存在不会触发生成
+                    _slog(_tid, "deploy_raw.bark_ensure_err", error=str(_be)[:200])
+            # Step 2.6b：历史查询子流程幂等确保（仿 bark 的 A3 模式）。
+            # 4 个 af_hist_* 子流程的 ensure 与 bark 同策略：活体已存在 → no-op（零风险）；
+            # 仅在缺失时从 subflows_built.json 重建（server 替换成默认 HA server，可移植）。
+            # 仅作用于 staging NR(1990)，allow_prod=False 兜底，绝不动 1880。
+            if flow_uses_history_subflow(flow.get("nodes", [])):
+                try:
+                    _hist_res = ensure_history_subflow(self.nr.client, allow_prod=False)
+                    _slog(_tid, "deploy_raw.history_ensure",
+                          created=_hist_res.get("created"), exists=_hist_res.get("exists"),
+                          rebuilt=_hist_res.get("rebuilt"))
+                except Exception as _he:
+                    # 历史子流程缺只影响历史查询类能力，不阻塞主流程；活体已存在不会触发生成
+                    _slog(_tid, "deploy_raw.history_ensure_err", error=str(_he)[:200])
 
         # Step 2.7: 【D4/G2】link-out 目标校验（部署前捕获指向不存在 link-in 的悬空 link out，
         # 否则运行时报 'Error delivering message to node:undefined' 这类难定位故障）。
@@ -4650,10 +4641,6 @@ class Gateway:
             return {"ok": False, "stage": "ha_server_inject",
                     "error": self._ha_server_unresolved_msg(unresolved)}
 
-        # Step 3.9: 历史查询子流程幂等确保（#711）—— 在闸门前，避免把「其实能自动装」
-        # 的 af_hist_* 误报成 node_gate 错误，污染提案的 node_gate_ok 信号。
-        self._ensure_history_subflow_for(flow, _HIST_AUTOINSTALL, _tid, "propose_raw")
-
         # Step 4: 节点注册表闸门（P0 防御）—— 未知节点类型记 error 不拦提案（fail-open）
         _node_gate_ok = True
         try:
@@ -4844,13 +4831,22 @@ class Gateway:
 
         # 读活 flow（可能用户已手动改/加节点）
         live = None
+        nr_unreachable = False
         try:
             live = self.nr.get_flow(flow_id)
         except Exception:
+            nr_unreachable = True
             live = None
 
         if live is None:
-            # 活 flow 已不存在（用户可能手动删了 tab）—— 只清账本，无需碰 NR
+            if nr_unreachable:
+                # NR 不可达：无法确认 flow 是否还在 → 保留账本，报错让用户重试。
+                # 不清账本（否则会孤儿化：flow 仍在 NR、账本说 not_ours → 永久撤不掉）。
+                return {"ok": False,
+                        "error": "NR 不可达，无法确认 flow 状态，账本保留以便重试。"
+                                 "若确认已手动删除，可 force=true 强制清账本。",
+                        "code": "nr_unreachable", "flow_id": flow_id}
+            # 活 flow 确实不在（404）：清账本，无需碰 NR
             self.state.remove_flow(flow_id)
             src = meta.get("source_proposal")
             if src:
@@ -4897,7 +4893,7 @@ class Gateway:
         if u_preserved == 0:
             # tab 已空 → 删除整个 tab（clean）
             try:
-                self.nr.delete_flow(flow_id, force=True)
+                self.nr.delete_flow(flow_id, force=True, allow_prod=True)
             except Exception as e:
                 nr_ok = False
                 nr_err = f"NR 删除失败: {e}"
@@ -4907,13 +4903,18 @@ class Gateway:
             reduced = dict(live)  # 保留 label/configs 等所有原始字段
             reduced["nodes"] = ([tab_node] if tab_node else []) + user_nodes
             try:
-                self.nr.update_flow_nodes(flow_id, reduced, force=True)
+                self.nr.update_flow_nodes(flow_id, reduced, force=True, allow_prod=True)
             except Exception as e:
                 nr_ok = False
                 nr_err = f"NR 更新失败: {e}"
             action = "trimmed_tab"
 
-        # 清账本 + 提案标记（即便 NR 侧因带外删除失败，账本仍清理，避免卡死）
+        # 仅当 NR 侧操作成功（或 force 强制）才清账本；否则保留账本让用户重试，避免孤儿化。
+        if not nr_ok and not force:
+            return {"ok": False,
+                    "error": f"NR 侧撤回失败，账本保留以便重试：{nr_err}",
+                    "code": "nr_op_failed", "flow_id": flow_id,
+                    "gateway_nodes_removed": 0, "user_nodes_preserved": u_preserved}
         self.state.remove_flow(flow_id)
         src = meta.get("source_proposal")
         if src:
@@ -4921,17 +4922,16 @@ class Gateway:
                 ProposalStore(self.cfg).clear_deployed(src)
             except Exception:
                 pass
-
         if not nr_ok:
-            # NR 实测失败（多为 tab 已被用户手动删），但账本已清，视为成功撤回
+            # force 路径：NR 失败但用户强制清账本
             return {"ok": True, "action": action, "flow_id": flow_id, "label": label,
                     "gateway_nodes_removed": g_removed, "user_nodes_preserved": u_preserved,
                     "nr_warning": nr_err,
-                    "note": "账本已清理；NR 侧节点可能已被手动删除，无需处理"}
+                    "note": "force 强制清账本；NR 侧可能仍有残留，请手动确认已移除"}
         return {"ok": True, "action": action, "flow_id": flow_id, "label": label,
                 "gateway_nodes_removed": g_removed, "user_nodes_preserved": u_preserved}
 
-    # ── A5 · runtime observe-correct 闭环（只读观测 + 归因建议）────────
+    # ── A5 · runtime observe-correct 闭环（1990 MVP，只读观测 + 归因建议）────────
 
     def _flow_has_event_trigger(self, flow_id: str) -> bool:
         """判断 flow 是否含事件型触发器（server-state-changed）：这类需真实外部事件才点燃，
@@ -4952,7 +4952,7 @@ class Gateway:
 
         - HA 侧：observe_postconditions（读真实 HA 状态，与预期比对）。
         - NR 侧：若 nr 层暴露 debug 抓取能力则尽力快照，否则仅在报告中标注
-          「需 NR 授权」——本方法不阻塞，真实 tap 依赖线上 NR 凭据。
+          「需 1990 授权」——本方法不阻塞，真实 tap 依赖线上 1990 凭据。
         返回合并观测报告。
         """
         ha_obs = self.observe_postconditions(expected)
@@ -4965,7 +4965,7 @@ class Gateway:
         except Exception:
             nr_debug = None
         if nr_debug is None and flow_id is not None:
-            nr_note = ("NR debug 快照需实例授权（NR Admin API / debug 抓取）；"
+            nr_note = ("NR debug 快照需 1990 实例授权（NR Admin API / debug 抓取）；"
                        "HA 侧观测已可用。")
         return {
             "ok": ha_obs["ok"],
@@ -5045,15 +5045,6 @@ class Gateway:
                     "reasons": [f"实体未确认(应来自 resolve_entity)：{', '.join(rogue)}"],
                 }
 
-        # 0.65) ★ 历史查询子流程幂等确保（#711）—— 必须在 0.7 闸门之前。
-        # 黑箱链路：propose_dsl → run_staging_gate → 0.7 闸门。af_hist_* 若未装，
-        # 闸门直接判「节点类型未注册」硬拦，agent 连提案都产不出来（实测复现）。
-        # 这里用 _HIST_AUTOINSTALL（默认 True）授权安装：装的是网关自有的 4 个
-        # managed 子流程定义，增量 append、幂等、不碰任何用户 flow，与「禁止 agent
-        # 写 prod 用户流」的护栏语义不冲突。需要关闭时设 AUTOFLLOW_HIST_AUTOINSTALL=0。
-        self._ensure_history_subflow_for(flow, _HIST_AUTOINSTALL, None,
-                                         "run_staging_gate")
-
         # 0.7) 节点注册表闸门（P0 防御）：未知节点类型直接拦截，
         #      不让黑箱放行『编译合法但部署即坏』的 flow。
         try:
@@ -5124,22 +5115,7 @@ class Gateway:
                 elif nd.get("type") in ("link out", "subflow"):
                     if nd["id"] in active:
                         external.append(nd.get("name", "subflow"))
-            # 2d) 断言后置条件（分支感知）
-            #   - 若某实体仅由「当前世界态下未激活分支」的 api-call-service 涉及，
-            #     且本次仿真世界态未决（未显式给定 virtual_time / world / scenario，
-            #     即调用方没提供能决定分支的世界），则该断言不可证伪 → 判 N/A 跳过。
-            #     这允许「书房电脑开 → 开挂灯」这类条件流通过闸门：部署时跑的是空白
-            #     仿真，书房电脑 off，挂灯分支未触发，后置条件不强制校验。
-            #   - 若调用方显式给定了决定性世界态（virtual_time / world / scenario），
-            #     分支命中与否是确定的，未激活 = 该效果本就不该发生 → 仍严格校验
-            #     （如时间段窗口外、显式 world 让条件不成立）。安全不降级。
-            #   - 被「命中/无条件」激活服务涉及的实体，断言始终严格校验。
-            decisive = (vt is not None) or (scenario is not None) or bool(step.get("world"))
-            active_service_targets = set()
-            for nd in flow.get("nodes", []):
-                if nd.get("type") == "api-call-service" and nd["id"] in active:
-                    for t in (nd.get("entityId") or []):
-                        active_service_targets.add(t)
+            # 2d) 断言后置条件
             assertions = []
             failures = []
             for cond in step.get("expected", []):
@@ -5148,12 +5124,6 @@ class Gateway:
                 rec = store.get_state(eid) if eid else None
                 got = rec.get("state") if rec else None
                 ok = (got == want)
-                # 实体未被任何激活服务触及，且世界态未决 → 不可证伪，N/A 跳过
-                if not ok and eid and eid not in active_service_targets and not decisive:
-                    assertions.append({"entity_id": eid, "expected": want, "actual": got,
-                                       "ok": True, "na": True,
-                                       "reason": "分支未触发且世界态未决，此后置条件不可证伪，跳过"})
-                    continue
                 assertions.append({"entity_id": eid, "expected": want, "actual": got, "ok": ok})
                 if not ok:
                     failures.append({"entity_id": eid, "expected": want, "actual": got})
@@ -5206,7 +5176,7 @@ class Gateway:
         """tap 风格观测：按 expected_postconditions 读 HA 当前状态并断言。
 
         离线（vhass/FakeHA）与线上（真实 HA）通吃——都走 self.ha.get_state。
-        这是「部署后观测 D」的核心：deploy 到 NR 后，把预期后置条件
+        这是「部署后观测 D」的核心：deploy 到 staging(1990) 后，把预期后置条件
         与 HA 真实状态比对，给出结构化观测报告（无需 24h 轮询，按需触发）。
         """
         assertions: List[Dict] = []
@@ -5468,36 +5438,6 @@ class Gateway:
                         flow_id, e,
                     )
 
-    def _ensure_history_subflow_for(self, flow: Dict[str, Any],
-                                    allow_prod: bool,
-                                    tid: Optional[str] = None,
-                                    where: str = "deploy") -> Dict[str, Any]:
-        """含 af_hist_* 引用时，幂等确保 4 个历史查询子流程已装在目标 NR。
-
-        必须在 `_gate_node_types` 之前调用 —— 闸门实时拉 /flows 判断子流程是否存在，
-        先装后过闸才能放行（#711：此前 ensure 只在 deploy_raw 且写死 allow_prod=False，
-        prod 永不安装 → 历史类 flow 全被闸门拒绝）。
-
-        幂等：活体已存在 → no-op（零风险）；缺失才从 subflows_built.json 重建。
-        不抛异常：装不上时由后续闸门给出准确的「节点类型未注册」错误，语义一致。
-        返回 ensure 结果 dict（跳过/失败时返回 {"skipped": ...}）。
-        """
-        from .subflows import ensure_history_subflow, flow_uses_history_subflow
-        if not flow_uses_history_subflow(flow.get("nodes", [])):
-            return {"skipped": "not_used"}
-        client = getattr(self.nr, "client", None)
-        if client is None:
-            return {"skipped": "no_nr_client"}
-        try:
-            res = ensure_history_subflow(client, allow_prod=allow_prod)
-            _slog(tid, f"{where}.history_ensure",
-                  created=res.get("created"), exists=res.get("exists"),
-                  rebuilt=res.get("rebuilt"), allow_prod=allow_prod)
-            return res
-        except Exception as e:
-            _slog(tid, f"{where}.history_ensure_err", error=str(e)[:200])
-            return {"skipped": "error", "error": str(e)[:200]}
-
     def _gate_node_types(self, flow: Dict[str, Any]) -> None:
         """节点注册表闸门（P0 防御）。
 
@@ -5557,7 +5497,7 @@ class Gateway:
                        expected_postconditions: Optional[List[Dict]] = None,
                        target: str = "staging",
                        live: bool = False) -> Dict[str, Any]:
-        """P5 · 端到端执行追踪：把 DSL 编译产物**真实部署到 NR**并触发，
+        """P5 · 端到端执行追踪：把 DSL 编译产物**真实部署到 1990**并触发，
         用插桩（tap + catch）抓取信息流实际跑到的每个环节，与期望路径比对，
         产出**断点报告**——明确流程跑到哪个环节、在哪里断、报错是什么。
 
@@ -5565,7 +5505,7 @@ class Gateway:
           1. 编译 DSL → flow
           2. 实体存在性校验（未知实体直接拦截，避免假阳性）
           3. 插桩（每非 sink 节点后加 tap + 全局 catch）
-          4. 部署到 NR（server 占位符回填真实 HA server id）
+          4. 部署到 1990（server 占位符回填真实 HA server id）
           5. 触发 inject（或入口节点）
           6. 读回 global[trace_key] 上的真实执行轨迹
           7. 与 expected_path（缺省用计划路径）比对 → 断点报告
@@ -5622,7 +5562,7 @@ class Gateway:
         except Exception as e:
             return self._e2e_result("拦截", stage="deploy", flow_id=fid,
                                      error=f"部署失败：{e}",
-                                     reasons=[f"部署到 NR 失败：{e}"])
+                                     reasons=[f"部署到 1990 失败：{e}"])
         # 5) 触发（inject_ids 已由 3.5 的 _e2e_prepare_flow 准备好：含手动 inject
         #    与「状态触发器转出的合成 inject」；无则可转换入口时回退从入口点燃）
         triggered = []
@@ -5763,7 +5703,7 @@ class Gateway:
         """占位符需解析却解析不出时的清晰配置错误文案（fail-fast 用）。"""
         return (f"无法解析 HA server：nr_ha_server_id 为空且 NR 默认 server 缺失，"
                 f"仍有 {unresolved} 个 HA 节点携带 REPLACE_WITH_HA_SERVER 占位符。"
-                f"请检查网关配置(cfg.nr_ha_server_id)或在 NR 配置 HA 凭据。")
+                f"请检查网关配置(cfg.nr_ha_server_id)或在 NR 1990 配置 HA 凭据。")
 
     def _e2e_soft_check_entities(self, flow):
         """节点级实体存在性【软校验】：收集 HA 节点引用的 entityId，
@@ -5913,7 +5853,7 @@ class Gateway:
                           expected_postconditions=None, target="staging",
                           live=False, trigger=None) -> Dict[str, Any]:
         """C1 · 白箱 L3 运行时追踪：直接吃**原始 NR flow**（不经 DSL 编译），
-        真实部署到 NR 并触发，用插桩抓取实际执行轨迹，与期望路径比对 → 断点报告。
+        真实部署到 1990 并触发，用插桩抓取实际执行轨迹，与期望路径比对 → 断点报告。
 
         触发策略（比黑箱版更鲁棒）：
         - 有 inject 节点 → 真实触发每个 inject（trigger_inject）；
@@ -5976,7 +5916,7 @@ class Gateway:
         except Exception as e:
             return self._e2e_result("拦截", "deploy", flow_id=fid,
                                     error=f"部署失败：{e}",
-                                    reasons=[f"部署到 NR 失败：{e}"])
+                                    reasons=[f"部署到 1990 失败：{e}"])
 
         # 6) 触发
         triggered = []
@@ -6066,8 +6006,7 @@ class Gateway:
 
     def modify_flow(self, flow_id: str, dsl: Optional[str] = None,
                    node_patches: Optional[List[Dict]] = None,
-                   agent_id: str = "unknown-agent", force: bool = False,
-                   allow_prod: Optional[bool] = None) -> Dict[str, Any]:
+                   agent_id: str = "unknown-agent", force: bool = False) -> Dict[str, Any]:
         """外科式改 flow（C3）：不重写整条流，只做最小改动。白箱身份专用。
 
         - dsl 给定：用新 DSL 重新编译，复用目标 flow 的 id/label 原地更新
@@ -6181,13 +6120,6 @@ class Gateway:
                         "changed_nodes": 0}
             target["id"] = flow_id
             mode = "node_patches"
-        # allow_prod 提前解析：历史子流程 ensure 需要它（原先在部署前才算，
-        # 导致 ensure 拿不到正确授权）。人审/人触发默认放行写 prod；
-        # 纯 agent 自动化部署受 prod 守卫保护。
-        if allow_prod is None:
-            allow_prod = (agent_id == "human")
-        # ★ 历史查询子流程幂等确保 —— 必须在节点闸门【之前】（#711，见 deploy_proposal 注释）
-        self._ensure_history_subflow_for(target, allow_prod, None, "modify_flow")
         # 节点注册表闸门（P0 防御）
         try:
             self._gate_node_types(target)
@@ -6205,10 +6137,9 @@ class Gateway:
         if _unresolved:
             return {"ok": False, "stage": "ha_server_inject", "flow_id": flow_id,
                     "error": self._ha_server_unresolved_msg(_unresolved)}
-        # 部署（force 覆盖，复用 deploy 链路）。allow_prod 已在闸门前解析。
+        # 部署（force 覆盖，复用 deploy 链路）
         try:
-            res = self.nr.create_or_update_flow(flow_id, target, force=True,
-                                                allow_prod=allow_prod)
+            res = self.nr.create_or_update_flow(flow_id, target, force=True)
             real_fid = res.get("id") or flow_id
         except Exception as e:
             return {"ok": False, "stage": "deploy", "error": f"部署失败：{e}"}
@@ -6369,7 +6300,7 @@ class Gateway:
 
         # 已获批准 → 走既有外科式改流链路（含节点注册表闸门 + 部署）
         res = self.modify_flow(flow_id, dsl=dsl, node_patches=node_patches,
-                               agent_id=agent_id, allow_prod=True)
+                               agent_id=agent_id)
         ok = bool(res.get("ok"))
         audit.update(ok=ok, applied=ok, pending=False, stage="modify_flow",
                      result=res, gate="approved", risk="high")
@@ -6526,8 +6457,7 @@ class Gateway:
             out.update(stage="node_gate", error=str(e))
             return out
         try:
-            res = self.nr.create_or_update_flow(flow_id, target, force=True,
-                                                allow_prod=True)
+            res = self.nr.create_or_update_flow(flow_id, target, force=True)
         except Exception as e:
             out.update(stage="deploy", error=f"还原部署失败：{e}")
             return out
@@ -6671,8 +6601,7 @@ class Gateway:
                 flow = op.payload["flow"]
                 fid = op.payload["flow_id"]
                 # create-or-update：全新场景 POST /flow 创建；已存在 PUT /flow/:id 更新
-                res = self.nr.create_or_update_flow(fid, flow, force=True,
-                                                    allow_prod=True)
+                res = self.nr.create_or_update_flow(fid, flow, force=True)
                 real_fid = res.get("id") or fid
                 created = res.get("created", False)
                 # 登记 flow_catalog（owner）
@@ -6775,7 +6704,7 @@ class Gateway:
     # ───────────── 多选项决策闸（人类请示） ─────────────
     def _bark_push(self, title: str, body: str, group: Optional[str] = None,
                    url: Optional[str] = None, level: Optional[str] = None) -> bool:
-        """最佳努力推送 Bark（NAS 自建 bark-server，AES-128-CBC 加密，与 NR bark_push 一致）。
+        """最佳努力推送 Bark（NAS 自建 bark-server，AES-128-CBC 加密，与 NR1990 bark_push 一致）。
         纯 Python（cryptography + urllib），不依赖 node；失败静默，绝不拖垮主流程。"""
         try:
             import base64

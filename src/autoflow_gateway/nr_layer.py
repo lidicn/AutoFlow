@@ -73,9 +73,10 @@ class NRLayer:
         return self.client.find_flow_by_name(name)
 
     # ── 安全写（gateway 在调用前已完成防御+确认）──
-    def update_flow_nodes(self, flow_id: str, flow_data: Dict, force: bool = False) -> Dict:
+    def update_flow_nodes(self, flow_id: str, flow_data: Dict, force: bool = False,
+                           allow_prod: bool = False) -> Dict:
         """单 flow PUT 更新（1880 实例可用路径）。不暴露 deploy_all。"""
-        return self.client.update_flow(flow_id, flow_data, force=force)
+        return self.client.update_flow(flow_id, flow_data, force=force, allow_prod=allow_prod)
 
     def create_or_update_flow(self, flow_id: str, flow_data: Dict, force: bool = False,
                               allow_prod: bool = False) -> Dict:
@@ -111,9 +112,10 @@ class NRLayer:
     def modify_function_code(self, flow_id: str, node_id: str, code: str, name: str = None) -> Dict:
         return self.client.modify_function_code(flow_id, node_id, code, name=name)
 
-    def delete_flow(self, flow_id: str, force: bool = False) -> Dict:
+    def delete_flow(self, flow_id: str, force: bool = False,
+                     allow_prod: bool = False) -> Dict:
         """谨慎删除（gateway 已确认非受保护 + 经批准）。force 透传给底层 nr_client。"""
-        return self.client.delete_flow(flow_id, force=force)
+        return self.client.delete_flow(flow_id, force=force, allow_prod=allow_prod)
 
     def put_flow_raw(self, flow_id: str, flow_data: Dict) -> Dict:
         """直写 PUT /flow/:id（绕过 _normalize_flow/护栏）。
