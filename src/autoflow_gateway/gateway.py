@@ -4045,7 +4045,9 @@ class Gateway:
         # Step 2.6: Bark 子流程幂等确保（A3）——前置，保证后续闸门/E2E/部署时子流程已存在。
         # dry-run 不做任何副作用（仅预览）。活体 1990 已存在 b0bbc86 → ensure 走 no-op（零风险）；
         # 仅在缺失时按声明式规格生成（env 值经 os.environ 注入，密钥绝不硬编码）。
-        # 仅作用于 staging NR(self.nr=1990)，allow_prod=False 兜底，绝不动 1880。
+        # 仅作用于 1990（prod 实例，AUTOFLLOW_ENV=prod）→ allow_prod=True 显式 opt-in
+        # （#119 护栏订正：is_prod() 按 env 判定，写 prod 必须 allow_prod=True，否则 _guard_prod
+        # 抛 NRGuardError 被下方 except 吞掉，导致子流程永不重建）。绝不动 1880。
         if not dry_run:
             from .subflows import (
                 ensure_bark_subflow, flow_uses_bark_subflow,
@@ -4053,7 +4055,7 @@ class Gateway:
             )
             if flow_uses_bark_subflow(flow.get("nodes", [])):
                 try:
-                    _bark_res = ensure_bark_subflow(self.nr.client, allow_prod=False)
+                    _bark_res = ensure_bark_subflow(self.nr.client, allow_prod=True)
                     _slog(_tid, "deploy_raw.bark_ensure",
                           created=_bark_res.get("created"), exists=_bark_res.get("exists"))
                 except Exception as _be:
@@ -4062,10 +4064,10 @@ class Gateway:
             # Step 2.6b：历史查询子流程幂等确保（仿 bark 的 A3 模式）。
             # 4 个 af_hist_* 子流程的 ensure 与 bark 同策略：活体已存在 → no-op（零风险）；
             # 仅在缺失时从 subflows_built.json 重建（server 替换成默认 HA server，可移植）。
-            # 仅作用于 staging NR(1990)，allow_prod=False 兜底，绝不动 1880。
+            # 仅作用于 1990（prod 实例）→ allow_prod=True 显式 opt-in（#119 护栏订正），绝不动 1880。
             if flow_uses_history_subflow(flow.get("nodes", [])):
                 try:
-                    _hist_res = ensure_history_subflow(self.nr.client, allow_prod=False)
+                    _hist_res = ensure_history_subflow(self.nr.client, allow_prod=True)
                     _slog(_tid, "deploy_raw.history_ensure",
                           created=_hist_res.get("created"), exists=_hist_res.get("exists"),
                           rebuilt=_hist_res.get("rebuilt"))
