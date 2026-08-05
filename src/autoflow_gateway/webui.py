@@ -115,6 +115,40 @@ def _cookie_token(headers: dict) -> Optional[str]:
     return None
 
 
+def _client_host(scope: dict) -> str:
+    """取请求端 IP（用于 S-4 止血：未配置 WebUI token 时仅放行本机/回环，远程一律拒）。
+
+    策略：直连接 Peer 优先；仅当 Peer 为回环（本机/可信代理）时才采信 X-Forwarded-For
+    还原真实客户端。这样：① 远端攻击者直连（Peer 为公网 IP）无法用伪造 XFF 伪装回环；
+    ② 本机反向代理（Peer=127.0.0.1）转发的真实远程客户端会被 XFF 识别并拦截。
+    """
+    client = scope.get("client")
+    if isinstance(client, (tuple, list)) and client:
+        host = str(client[0])
+        # 仅 Peer 为回环才信任 XFF（代理在本地）；直连公网 IP 直接判定远程，防 XFF 伪造绕过
+        if host in _LOOPBACK_HOSTS:
+            headers = dict(scope.get("headers", []))
+            xff = headers.get(b"x-forwarded-for")
+            if xff:
+                return xff.decode().split(",")[0].strip()
+        return host
+    headers = dict(scope.get("headers", []))
+    xff = headers.get(b"x-forwarded-for")
+    if xff:
+        return xff.decode().split(",")[0].strip()
+    return ""
+
+
+# 含 Starlette TestClient 哨兵 "testclient"：进程内测试客户端以 ("testclient", port) 标识自身，
+# 代表本机本地请求，等同回环；该值仅测试出现，生产中 client[0] 恒为真实 IP，故不削弱安全。
+_LOOPBACK_HOSTS = ("127.0.0.1", "::1", "::ffff:127.0.0.1", "testclient")
+
+
+def _is_loopback(scope: dict) -> bool:
+    """请求是否来自本机/回环（S-4 止血判定用）。"""
+    return _client_host(scope) in _LOOPBACK_HOSTS
+
+
 def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     cfg = cfg or get_config()
     _bootstrap_webui_token(cfg)   # 首跑无令牌时自动生成，确保能从外部 IP 进 WebUI 填连接设置
@@ -968,6 +1002,13 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             return await raw(scope, receive, send)
         token = _resolve_webui_token(cfg)
         if not token:
+            # ★S-4 止血：未配置 token 时仅放行本机/回环；远程无认证访问一律拒（防 Docker 0.0.0.0 暴露）。
+            if not _is_loopback(scope):
+                await JSONResponse(
+                    {"ok": False, "error": "unauthorized: WebUI token required for non-local access"},
+                    status_code=403,
+                )(scope, receive, send)
+                return
             return await raw(scope, receive, send)
         headers = dict(scope.get("headers", []))
         provided = None

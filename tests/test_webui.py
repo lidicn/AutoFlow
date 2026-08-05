@@ -275,6 +275,61 @@ class TestWebUI(TmpCfgMixin, unittest.TestCase):
         finally:
             os.environ.pop("AF_WEBUI_TOKEN", None)
 
+    def test_webui_non_local_no_token_returns_403(self):
+        """P0-3 (S-4)：未配置 token 时，非本机/回环 IP 访问 /api 一律 403；本机放行。"""
+        import asyncio
+
+        async def _raw_call(app, path, client_ip):
+            scope = {
+                "type": "http", "method": "GET", "path": path,
+                "query_string": b"", "headers": [], "client": (client_ip, 1234),
+            }
+            captured = {}
+
+            async def _receive():
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            async def _send(message):
+                if message["type"] == "http.response.start":
+                    captured["status"] = message["status"]
+                elif message["type"] == "http.response.body":
+                    captured["body"] = message.get("body", b"")
+
+            await app(scope, _receive, _send)
+            return captured.get("status"), captured.get("body", b"")
+
+        app = build_webui_asgi(self.cfg, gateway=self.gw)
+        # 远程 IP（公网文档段 203.0.113.0/24，RFC 5737 示例地址）
+        status_remote, _ = asyncio.run(_raw_call(app, "/api/health", "203.0.113.5"))
+        self.assertEqual(status_remote, 403)
+        # 本机/回环放行
+        status_local, _ = asyncio.run(_raw_call(app, "/api/health", "127.0.0.1"))
+        self.assertEqual(status_local, 200)
+        status_local6, _ = asyncio.run(_raw_call(app, "/api/health", "::1"))
+        self.assertEqual(status_local6, 200)
+        # 反向代理场景：X-Forwarded-For 非回环也应拒
+        async def _raw_call_xff(app, path, xff):
+            scope = {
+                "type": "http", "method": "GET", "path": path,
+                "query_string": b"", "headers": [(b"x-forwarded-for", xff.encode())],
+                "client": ("127.0.0.1", 1234),
+            }
+            captured = {}
+
+            async def _receive():
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            async def _send(message):
+                if message["type"] == "http.response.start":
+                    captured["status"] = message["status"]
+                elif message["type"] == "http.response.body":
+                    captured["body"] = message.get("body", b"")
+
+            await app(scope, _receive, _send)
+            return captured.get("status")
+
+        self.assertEqual(asyncio.run(_raw_call_xff(app, "/api/health", "203.0.113.9")), 403)
+        self.assertEqual(asyncio.run(_raw_call_xff(app, "/api/health", "127.0.0.1")), 200)
 
 
 @unittest.skipUnless(_HAVE_WEB_DEPS,
