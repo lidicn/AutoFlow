@@ -828,6 +828,87 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                     "created": res.get("created"), "exists": res.get("exists"),
                     "detail": res})
 
+    # ── A3(#170)：安装「AutoFlow API」tab 到 NR（增量合并，绝不整体覆盖）──
+    import dataclasses as _dc
+
+    def _effective_spec(spec, config: dict) -> "ApiSpec":
+        """把 spec 的 url/headers/body_template 中 <ENV> 占位符替换为 api_configs 值。
+
+        返回替换后的 ApiSpec 副本（不改原 spec）；build_nr_tab_flows 据此生成真值节点。"""
+        sub = lambda m: config.get(m.group(1), m.group(0))
+        url = _ENV_PH_RE.sub(sub, spec.url or "")
+        headers = {k: _ENV_PH_RE.sub(sub, str(v)) for k, v in (spec.nr_headers or {}).items()}
+        body = _ENV_PH_RE.sub(sub, spec.nr_body_template or "")
+        return _dc.replace(spec, url=url, nr_headers=headers, nr_body_template=body)
+
+    async def install_link_api_tab_endpoint(request: Request):
+        """A3(#170)：安装「AutoFlow API」tab（id=af_api_tab）到 NR。
+
+        行为（硬约束）：
+        1. 取所有 needs_nr_flow() 且非 self_use 的 spec（豆包系列被排除，不会重新生成）；
+        2. 用 api_configs 表值替换 url/headers/body_template 的 <ENV> 占位符；
+           任一 spec 缺配置 → 400 并指明先去填参数；
+        3. build_nr_tab_flows(tab_id="af_api_tab") 生成节点；
+        4. 在目标 NR 上创建/更新 id=af_api_tab 的普通 flow（tab）；
+        5. 增量合并：仅追加 tab 内尚不存在的 entry 链（按节点 id 去重），
+           绝不删除既有节点——保护 1990 里用户自用豆包链路的硬约束；
+        6. 幂等：重复点击不重复生成同一 entry（按节点 id 去重）；allow_prod=True。
+        """
+        from .api_specs import API_SPECS, build_nr_tab_flows
+        # 1) 选 spec：needs_nr_flow 且非 self_use（排除豆包系列）
+        candidates = [s for s in API_SPECS
+                      if s.needs_nr_flow() and not getattr(s, "self_use", False)]
+        # 2) 校验配置并派生有效 spec（占位符替换）
+        effective, missing = [], []
+        for s in candidates:
+            cfg = api_configs.get_api_config(s.name)
+            lack = [f for f in _config_fields_for_spec(s) if not cfg.get(f)]
+            if lack:
+                missing.append({"name": s.name, "title": s.title, "missing": lack})
+                continue
+            effective.append(_effective_spec(s, cfg))
+        if missing:
+            return _js({
+                "ok": False,
+                "error": "以下 Link API 缺少必填配置，请先到「Link API」Tab 填写参数",
+                "missing": missing,
+            }, 400)
+        # 3) 生成节点
+        nodes = build_nr_tab_flows("af_api_tab", specs=effective)
+        # 4)+5)+6) 增量合并写 NR（绝不整体覆盖 / 按 id 去重）
+        try:
+            existing = await asyncio.to_thread(gw.nr.get_flow, "af_api_tab")
+        except Exception:
+            existing = None
+        exist_nodes = (existing or {}).get("nodes", []) if isinstance(existing, dict) else []
+        exist_ids = {n.get("id") for n in exist_nodes}
+        merged = list(exist_nodes)
+        added = 0
+        for n in nodes:
+            if n.get("id") in exist_ids:
+                continue  # 幂等：已存在的 entry 链不重复生成
+            merged.append(n)
+            exist_ids.add(n.get("id"))
+            added += 1
+        flow_data = {
+            "id": "af_api_tab",
+            "label": "AutoFlow API",
+            "nodes": merged,
+            "disabled": False,
+            "info": False,
+        }
+        try:
+            res = await asyncio.to_thread(
+                gw.nr.create_or_update_flow, "af_api_tab", flow_data, True, True)
+        except Exception as e:
+            return _js({"ok": False, "error": f"安装 tab 失败：{e}"}, 502)
+        return _js({
+            "ok": True, "tab_id": "af_api_tab",
+            "specs": [s.name for s in effective],
+            "nodes_before": len(exist_nodes), "nodes_added": added,
+            "nodes_total": len(merged), "detail": res,
+        })
+
     # ── 版本同步已剥离为独立 CLI（C3 / B8）──
     # 后端逻辑保留在 autoflow_gateway/sync.py，由命令行脚本调用；
     # WebUI 不再承载版本同步面板。
@@ -1068,6 +1149,9 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         # A2：Link API 配置读写（GET 读 / PUT 写 api_configs 表）
         Route("/api/link-apis/{name}/config", link_api_config_endpoint,
               methods=["GET", "PUT"]),
+        # A3：安装「AutoFlow API」tab 到 NR（增量合并，绝不整体覆盖）
+        Route("/api/link-apis/install-tab", install_link_api_tab_endpoint,
+              methods=["POST"]),
 
         # 静态
         Route("/", index, methods=["GET"]),
