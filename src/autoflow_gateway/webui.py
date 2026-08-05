@@ -633,7 +633,12 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         new_status = (b.get("status") or "").strip().lower()
         if new_status not in ("active", "disabled", "pending_review"):
             return _js({"ok": False, "error": "status 须为 active/disabled/pending_review"}, 400)
-        meta = await asyncio.to_thread(gw.tasks.get_subflow_meta, key)
+        # #119-fix: 与 delete/ensure 两个端点同构，get_subflow_meta 裸抛会裸 500；纳入 try 返 502。
+        # （本处修复原只存在于 NAS 活树，2026-08-05 回补进 git 仓库，防同步时被覆盖丢失。）
+        try:
+            meta = await asyncio.to_thread(gw.tasks.get_subflow_meta, key)
+        except Exception as e:
+            return _js({"ok": False, "error": f"读取子流程元数据失败：{e}"}, 502)
         if not meta:
             return _js({"ok": False, "error": f"子流程不存在: {key}"}, 404)
         r = await asyncio.to_thread(gw.tasks.set_subflow_status, key, new_status)
