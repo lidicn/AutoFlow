@@ -122,7 +122,7 @@ def test_secret_scanner_actually_detects():
     samples = {
         "HA/JWT token": "token = " + '"eyJ' + "A" * 30 + '"',
         "MCP 身份码": "code = " + '"af_' + "B" * 30 + '"',
-        "内网 IP": "NR_URL = http://192.168.2.200:1880  # example",
+        "内网 IP": "NR_URL = http://192.168.0.10:1880  # example",
         "Bearer/sk- 密钥": "Authorization: Bearer " + "C" * 30,
         "硬编码凭据赋值": 'api_key = "' + "D" * 32 + '"',
     }

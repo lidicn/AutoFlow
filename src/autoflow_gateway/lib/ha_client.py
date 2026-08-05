@@ -41,12 +41,8 @@ _REG_CACHE_TTL = 300  # 注册表缓存 5 分钟（区域极少变动）
 # ---- 连接信息：环境变量优先；缺省回退到本地 NAS（用户已授权本地使用） ----
 DEFAULT_SERVER = os.environ.get("HASS_SERVER") or "http://<NAS_IP>:8123"
 # 环境变量 HASS_TOKEN 优先于硬编码缺省（便于用户随时换新 token 而无需改源码）
-DEFAULT_TOKEN = (
-    os.environ.get("HASS_TOKEN")
-    or "<HA_JWT_HEADER>"
-    ".<HA_JWT_PAYLOAD>"
-    ".<HA_JWT_SIG>"
-)
+# ★S-3 安全修复：假 JWT 占位符默认值改为空字符串，未配置时拒绝鉴权请求（不泄漏 JWT 结构）
+DEFAULT_TOKEN = os.environ.get("HASS_TOKEN") or ""
 
 
 class HAError(RuntimeError):

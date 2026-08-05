@@ -6814,8 +6814,21 @@ class Gateway:
         while True:
             try:
                 self._tick_decisions()
-            except Exception:
-                pass
+                # 成功一拍即清零连续失败计数（consecutive_failures）
+                self._watchdog_failures = 0
+            except Exception as e:
+                # ★A-3 安全修复：原 except Exception: pass 静默吞掉所有看门狗异常，
+                # 决策催办持续失败也无人知晓。改为记日志 + 连续失败计数，≥10 标 degraded。
+                self._watchdog_failures = getattr(self, "_watchdog_failures", 0) + 1
+                _gw_logger.error(
+                    "watchdog tick failed (consecutive=%d): %s",
+                    self._watchdog_failures, e, exc_info=True,
+                )
+                if self._watchdog_failures >= 10:
+                    _gw_logger.error(
+                        "watchdog degraded: %d consecutive failures, decision reminders may be stuck",
+                        self._watchdog_failures,
+                    )
             time.sleep(60)
 
     def _tick_decisions(self) -> None:

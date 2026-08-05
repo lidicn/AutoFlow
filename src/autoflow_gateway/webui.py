@@ -14,6 +14,7 @@ import os
 import json
 import asyncio
 import secrets
+import hmac
 import tempfile
 from typing import Optional, Dict, Any
 
@@ -112,6 +113,38 @@ def _cookie_token(headers: dict) -> Optional[str]:
         if k == "af_ui_token":
             return unquote(v)
     return None
+
+
+def _client_host(scope: dict) -> str:
+    """取请求端 IP（用于 S-4 止血：未配置 WebUI token 时仅放行本机/回环，远程一律拒）。
+
+    策略：直连接 Peer 优先；仅当 Peer 为回环（本机/可信代理）时才采信 X-Forwarded-For
+    还原真实客户端。这样：① 远端攻击者直连（Peer 为公网 IP）无法用伪造 XFF 伪装回环；
+    ② 本机反向代理（Peer=127.0.0.1）转发的真实远程客户端会被 XFF 识别并拦截。
+    """
+    client = scope.get("client")
+    if isinstance(client, (tuple, list)) and client:
+        host = str(client[0])
+        # 仅 Peer 为回环才信任 XFF（代理在本地）；直连公网 IP 直接判定远程，防 XFF 伪造绕过
+        if host in _LOOPBACK_HOSTS:
+            headers = dict(scope.get("headers", []))
+            xff = headers.get(b"x-forwarded-for")
+            if xff:
+                return xff.decode().split(",")[0].strip()
+        return host
+    # ✦S-4 加固：Peer 缺失（client=None 等）时未知来源，绝不采信 X-Forwarded-For，
+    # 防止在 client 未填充的 ASGI 配置下伪造 XFF: 127.0.0.1 绕过 403。未知 Peer 一律判远端（拒）。
+    return ""
+
+
+# 含 Starlette TestClient 哨兵 "testclient"：进程内测试客户端以 ("testclient", port) 标识自身，
+# 代表本机本地请求，等同回环；该值仅测试出现，生产中 client[0] 恒为真实 IP，故不削弱安全。
+_LOOPBACK_HOSTS = ("127.0.0.1", "::1", "::ffff:127.0.0.1", "testclient")
+
+
+def _is_loopback(scope: dict) -> bool:
+    """请求是否来自本机/回环（S-4 止血判定用）。"""
+    return _client_host(scope) in _LOOPBACK_HOSTS
 
 
 def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
@@ -600,7 +633,12 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         new_status = (b.get("status") or "").strip().lower()
         if new_status not in ("active", "disabled", "pending_review"):
             return _js({"ok": False, "error": "status 须为 active/disabled/pending_review"}, 400)
-        meta = await asyncio.to_thread(gw.tasks.get_subflow_meta, key)
+        # #119-fix: 与 delete/ensure 两个端点同构，get_subflow_meta 裸抛会裸 500；纳入 try 返 502。
+        # （本处修复原只存在于 NAS 活树，2026-08-05 回补进 git 仓库，防同步时被覆盖丢失。）
+        try:
+            meta = await asyncio.to_thread(gw.tasks.get_subflow_meta, key)
+        except Exception as e:
+            return _js({"ok": False, "error": f"读取子流程元数据失败：{e}"}, 502)
         if not meta:
             return _js({"ok": False, "error": f"子流程不存在: {key}"}, 404)
         r = await asyncio.to_thread(gw.tasks.set_subflow_status, key, new_status)
@@ -967,6 +1005,13 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             return await raw(scope, receive, send)
         token = _resolve_webui_token(cfg)
         if not token:
+            # ★S-4 止血：未配置 token 时仅放行本机/回环；远程无认证访问一律拒（防 Docker 0.0.0.0 暴露）。
+            if not _is_loopback(scope):
+                await JSONResponse(
+                    {"ok": False, "error": "unauthorized: WebUI token required for non-local access"},
+                    status_code=403,
+                )(scope, receive, send)
+                return
             return await raw(scope, receive, send)
         headers = dict(scope.get("headers", []))
         provided = None
@@ -979,7 +1024,12 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             provided = (qs.get("token") or [None])[0]
         if not provided:
             provided = _cookie_token(headers)
-        if provided != token:
+        # ★S-1 安全修复：常量时间比较，避免时序攻击逐字节猜 token
+        # 转字节比较：hmac.compare_digest 对 str 要求纯 ASCII，非 ASCII token 会抛
+        # TypeError 致 500；转 utf-8 字节后对任意内容安全比较（仍拒绝，响应干净）。
+        if not hmac.compare_digest(
+            (provided or "").encode("utf-8"), (token or "").encode("utf-8")
+        ):
             await JSONResponse({"ok": False, "error": "unauthorized"}, status_code=403)(scope, receive, send)
             return
         await raw(scope, receive, send)
