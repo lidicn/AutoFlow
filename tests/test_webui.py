@@ -331,6 +331,42 @@ class TestWebUI(TmpCfgMixin, unittest.TestCase):
         self.assertEqual(asyncio.run(_raw_call_xff(app, "/api/health", "203.0.113.9")), 403)
         self.assertEqual(asyncio.run(_raw_call_xff(app, "/api/health", "127.0.0.1")), 200)
 
+    def test_webui_non_local_spoofed_xff_loopback_still_403(self):
+        """S-4 反 spoofing：公网直连 Peer 伪造 X-Forwarded-For: 127.0.0.1 仍 403。
+
+        这是 S-4 最关键保证：远端攻击者直连（Peer 为公网 IP）不得用伪造 XFF 伪装回环绕过 403。
+        """
+        import asyncio
+
+        async def _raw_call_xff(app, path, client_ip, xff):
+            scope = {
+                "type": "http", "method": "GET", "path": path,
+                "query_string": b"", "headers": [(b"x-forwarded-for", xff.encode())],
+                "client": (client_ip, 1234),
+            }
+            captured = {}
+
+            async def _receive():
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            async def _send(message):
+                if message["type"] == "http.response.start":
+                    captured["status"] = message["status"]
+                elif message["type"] == "http.response.body":
+                    captured["body"] = message.get("body", b"")
+
+            await app(scope, _receive, _send)
+            return captured.get("status")
+
+        app = build_webui_asgi(self.cfg, gateway=self.gw)
+        # 公网 Peer 伪造 XFF 回环 → 仍 403（Peer 非回环，绝不采信 XFF）
+        self.assertEqual(
+            asyncio.run(_raw_call_xff(app, "/api/health", "203.0.113.7", "127.0.0.1")), 403
+        )
+        self.assertEqual(
+            asyncio.run(_raw_call_xff(app, "/api/health", "198.51.100.9", "::1")), 403
+        )
+
 
 @unittest.skipUnless(_HAVE_WEB_DEPS,
                       f"WebUI/MCP 测试需要 starlette+mcp（缺失：{_WEB_DEP_MSG}）；"

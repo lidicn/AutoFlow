@@ -132,10 +132,8 @@ def _client_host(scope: dict) -> str:
             if xff:
                 return xff.decode().split(",")[0].strip()
         return host
-    headers = dict(scope.get("headers", []))
-    xff = headers.get(b"x-forwarded-for")
-    if xff:
-        return xff.decode().split(",")[0].strip()
+    # ✦S-4 加固：Peer 缺失（client=None 等）时未知来源，绝不采信 X-Forwarded-For，
+    # 防止在 client 未填充的 ASGI 配置下伪造 XFF: 127.0.0.1 绕过 403。未知 Peer 一律判远端（拒）。
     return ""
 
 
