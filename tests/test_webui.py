@@ -251,6 +251,31 @@ class TestWebUI(TmpCfgMixin, unittest.TestCase):
         self.assertFalse(r.json()["ok"])
         self.assertIn("导入失败", r.json()["error"])
 
+    def test_webui_token_constant_time_compare(self):
+        """P0-1 (S-1)：token 用常量时间比较。正确 token 放行、错误(含同前缀)拒绝。
+
+        验证 hmac.compare_digest 路径生效：不只「相等才过」，且错误 token 一律 403。
+        """
+        import os
+        tok = "af_test_secret_token_xyz"
+        os.environ["AF_WEBUI_TOKEN"] = tok
+        try:
+            app = build_webui_asgi(self.cfg, gateway=self.gw)
+            client = TestClient(app)
+            with client:
+                # 正确 token（query 参数）
+                self.assertEqual(client.get("/api/health", params={"token": tok}).status_code, 200)
+                # 错误 token（整串不同）
+                self.assertEqual(client.get("/api/health", params={"token": "wrong"}).status_code, 403)
+                # 同前缀不同尾缀（时序攻击关心的边界）
+                self.assertEqual(client.get("/api/health", params={"token": tok + "x"}).status_code, 403)
+                self.assertEqual(client.get("/api/health", params={"token": tok[:-1]}).status_code, 403)
+                # 空 token
+                self.assertEqual(client.get("/api/health", params={"token": ""}).status_code, 403)
+        finally:
+            os.environ.pop("AF_WEBUI_TOKEN", None)
+
+
 
 @unittest.skipUnless(_HAVE_WEB_DEPS,
                       f"WebUI/MCP 测试需要 starlette+mcp（缺失：{_WEB_DEP_MSG}）；"

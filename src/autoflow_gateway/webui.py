@@ -14,6 +14,7 @@ import os
 import json
 import asyncio
 import secrets
+import hmac
 import tempfile
 from typing import Optional, Dict, Any
 
@@ -979,7 +980,8 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             provided = (qs.get("token") or [None])[0]
         if not provided:
             provided = _cookie_token(headers)
-        if provided != token:
+        # ★S-1 安全修复：常量时间比较，避免时序攻击逐字节猜 token
+        if not hmac.compare_digest(provided or "", token or ""):
             await JSONResponse({"ok": False, "error": "unauthorized"}, status_code=403)(scope, receive, send)
             return
         await raw(scope, receive, send)
