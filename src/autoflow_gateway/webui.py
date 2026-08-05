@@ -831,6 +831,98 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     # ── A3(#170)：安装「AutoFlow API」tab 到 NR（增量合并，绝不整体覆盖）──
     import dataclasses as _dc
 
+    # risk-1(#177)：Node-RED 的 POST /flow 会自行分配 tab id，完全忽略 body 里的
+    # "id"。A3 初版每次都拿字面量 "af_api_tab" 去 get_flow 探测 → 恒 404 →
+    # existing=[] → 号称「增量合并」实际退化成全量新建：连点两次就多出一个重名
+    # 「AutoFlow API」tab，且 af_weather_in 等节点 id 跨 tab 重复（2026-08-05 子流程
+    # 重复 id 串台坑）。修法：真实 id 用「本地台账 + list_flows 兜底」解析。
+    AF_API_TAB_LABEL = "AutoFlow API"
+    AF_API_TAB_SEED_ID = "af_api_tab"   # 仅首次 POST 建壳用的种子，NR 会另发真实 id
+
+    def _af_tab_ledger_path() -> str:
+        return os.path.join(cfg.data_dir, "af_api_tab.id")
+
+    def _af_tab_ledger_read() -> Optional[str]:
+        """读本地台账里登记的真实 tab id；无台账/读失败返回 None。"""
+        try:
+            with open(_af_tab_ledger_path(), "r", encoding="utf-8") as f:
+                return f.read().strip() or None
+        except OSError:
+            return None
+
+    def _af_tab_ledger_write(tab_id: str) -> None:
+        """原子登记真实 tab id（tmp + os.replace，避免半截写坏台账）。
+
+        台账只是加速缓存：写失败不影响功能，下次靠 list_flows 重扫即可。
+        """
+        if not tab_id:
+            return
+        p = _af_tab_ledger_path()
+        try:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            tmp = p + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(tab_id.strip())
+            os.replace(tmp, p)
+        except OSError:
+            pass
+
+    def _af_tab_scan(entry_ids: set):
+        """扫 NR 全量 flows，找 label=="AutoFlow API" 的 tab。
+
+        Args:
+            entry_ids: 本次要安装的入口节点 id 集合，用于在重名 tab 中挑「真身」。
+        Returns:
+            (chosen_id | None, matched_ids)：已存在多个重名 tab 时优先选已含我们
+            入口节点的那个，避免继续往空壳里叠加。
+        """
+        try:
+            flows = gw.nr.list_flows()
+        except Exception:
+            return None, []
+        if isinstance(flows, dict):      # NR admin API v2：{flows:[...], rev:...}
+            flows = flows.get("flows", [])
+        flows = flows or []
+        matched = [f.get("id") for f in flows
+                   if isinstance(f, dict)
+                   and f.get("type") in (None, "", "tab")
+                   and (f.get("label") or "").strip() == AF_API_TAB_LABEL
+                   and f.get("id")]
+        if not matched:
+            return None, []
+        if len(matched) > 1 and entry_ids:
+            owners = {n.get("z") for n in flows
+                      if isinstance(n, dict) and n.get("id") in entry_ids}
+            for fid in matched:
+                if fid in owners:
+                    return fid, matched
+        return matched[0], matched
+
+    def _resolve_af_api_tab_id(entry_ids=None):
+        """解析「AutoFlow API」tab 的真实 id（risk-1 / #177）。
+
+        顺序：① 本地台账命中且 NR 上仍在 → 直接用；② 否则 list_flows 按 label 找，
+        找到就回写台账；③ 都没有 → None（尚未安装，走首次创建路径）。
+
+        Args:
+            entry_ids: 入口节点 id 集合（重名 tab 时用于挑真身）。
+        Returns:
+            (tab_id | None, matched_ids)。
+        """
+        entry_ids = entry_ids or set()
+        cached = _af_tab_ledger_read()
+        if cached:
+            try:
+                f = gw.nr.get_flow(cached)
+                if isinstance(f, dict) and f.get("id"):
+                    return f.get("id"), [f.get("id")]
+            except Exception:
+                pass   # 台账过期（tab 被删 / 换了 NR 实例）→ 落到重扫
+        fid, matched = _af_tab_scan(entry_ids)
+        if fid:
+            _af_tab_ledger_write(fid)
+        return fid, matched
+
     def _effective_spec(spec, config: dict) -> "ApiSpec":
         """把 spec 的 url/headers/body_template 中 <ENV> 占位符替换为 api_configs 值。
 
@@ -848,11 +940,12 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         1. 取所有 needs_nr_flow() 且非 self_use 的 spec（豆包系列被排除，不会重新生成）；
         2. 用 api_configs 表值替换 url/headers/body_template 的 <ENV> 占位符；
            任一 spec 缺配置 → 400 并指明先去填参数；
-        3. build_nr_tab_flows(tab_id="af_api_tab") 生成节点；
-        4. 在目标 NR 上创建/更新 id=af_api_tab 的普通 flow（tab）；
-        5. 增量合并：仅追加 tab 内尚不存在的 entry 链（按节点 id 去重），
-           绝不删除既有节点——保护 1990 里用户自用豆包链路的硬约束；
-        6. 幂等：重复点击不重复生成同一 entry（按节点 id 去重）；allow_prod=True。
+        3. 解析「AutoFlow API」tab 的真实 id（台账 + list_flows 兜底，#177）；
+        4. build_nr_tab_flows(真实 tab id) 生成节点，z 字段对齐真实 tab；
+        5. 增量合并：追加尚不存在的 entry 链，并就地刷新我们自己生成的节点
+           （配置改了要能生效），绝不删除既有节点——保护 1990 里用户自用链路的硬约束；
+        6. 幂等：无新增且无内容变化 → 直接跳过 NR 写入；allow_prod=True；
+           首次创建后把 NR 返回的真实 id 写进台账，下次直接命中。
         """
         from .api_specs import API_SPECS, build_nr_tab_flows
         # 1) 选 spec：needs_nr_flow 且非 self_use（排除豆包系列）
@@ -873,40 +966,74 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                 "error": "以下 Link API 缺少必填配置，请先到「Link API」Tab 填写参数",
                 "missing": missing,
             }, 400)
-        # 3) 生成节点
-        nodes = build_nr_tab_flows("af_api_tab", specs=effective)
-        # 4)+5)+6) 增量合并写 NR（绝不整体覆盖 / 按 id 去重）
-        try:
-            existing = await asyncio.to_thread(gw.nr.get_flow, "af_api_tab")
-        except Exception:
-            existing = None
+        # 3) 解析真实 tab id（#177：绝不再用字面量 af_api_tab 探测）
+        entry_ids = {(s.entry_link_id or f"{s.name}_in") for s in effective}
+        tab_id, matched = await asyncio.to_thread(_resolve_af_api_tab_id, entry_ids)
+        # 4) 读既有节点（tab_id 为 None = 尚未安装，无既有节点）
+        existing = None
+        if tab_id:
+            try:
+                existing = await asyncio.to_thread(gw.nr.get_flow, tab_id)
+            except Exception:
+                existing = None
         exist_nodes = (existing or {}).get("nodes", []) if isinstance(existing, dict) else []
+        # 5) 生成节点：z 必须对齐真实 tab id；首次创建先用种子 id，
+        #    create_or_update_flow 在 POST 拿到真实 id 后会统一改写 z。
+        target_id = tab_id or AF_API_TAB_SEED_ID
+        nodes = build_nr_tab_flows(target_id, specs=effective)
+        gen_by_id = {n.get("id"): n for n in nodes}
+        merged, added, updated = [], 0, 0
+        for old in exist_nodes:
+            gen = gen_by_id.get(old.get("id"))
+            if gen is None:
+                merged.append(old)          # 别人的节点：原样保留，绝不删改
+                continue
+            new = {**old, **gen}            # 我们的节点：就地刷新（配置改动才能生效）
+            if new != old:
+                updated += 1
+            merged.append(new)
         exist_ids = {n.get("id") for n in exist_nodes}
-        merged = list(exist_nodes)
-        added = 0
         for n in nodes:
             if n.get("id") in exist_ids:
-                continue  # 幂等：已存在的 entry 链不重复生成
+                continue                    # 幂等：已存在的 entry 链不重复生成
             merged.append(n)
             exist_ids.add(n.get("id"))
             added += 1
+        # 6) 无新增也无变化 → 完全跳过 NR 写入（最强幂等，也最不打扰 prod）
+        if tab_id and added == 0 and updated == 0:
+            return _js({
+                "ok": True, "tab_id": tab_id, "skipped": True,
+                "specs": [s.name for s in effective],
+                "nodes_before": len(exist_nodes), "nodes_added": 0,
+                "nodes_updated": 0, "nodes_total": len(merged),
+                "duplicate_tabs": matched if len(matched) > 1 else [],
+                "detail": {"reason": "tab 已是最新，未写入 NR"},
+            })
         flow_data = {
-            "id": "af_api_tab",
-            "label": "AutoFlow API",
+            "id": target_id,
+            "label": (existing or {}).get("label") or AF_API_TAB_LABEL,
             "nodes": merged,
-            "disabled": False,
-            "info": False,
+            "disabled": bool((existing or {}).get("disabled", False)),
+            "info": (existing or {}).get("info", False),
         }
         try:
             res = await asyncio.to_thread(
-                gw.nr.create_or_update_flow, "af_api_tab", flow_data, True, True)
+                gw.nr.create_or_update_flow, target_id, flow_data, True, True)
         except Exception as e:
             return _js({"ok": False, "error": f"安装 tab 失败：{e}"}, 502)
+        # 关键：以 NR 返回的真实 id 登记台账（nr_layer docstring 早有此要求）
+        real_id = (res or {}).get("id") if isinstance(res, dict) else None
+        real_id = real_id or tab_id or target_id
+        if real_id and real_id != AF_API_TAB_SEED_ID:
+            _af_tab_ledger_write(real_id)
         return _js({
-            "ok": True, "tab_id": "af_api_tab",
+            "ok": True, "tab_id": real_id,
+            "tab_created": bool(isinstance(res, dict) and res.get("created")),
             "specs": [s.name for s in effective],
             "nodes_before": len(exist_nodes), "nodes_added": added,
-            "nodes_total": len(merged), "detail": res,
+            "nodes_updated": updated, "nodes_total": len(merged),
+            "duplicate_tabs": matched if len(matched) > 1 else [],
+            "detail": res,
         })
 
     # ── 版本同步已剥离为独立 CLI（C3 / B8）──

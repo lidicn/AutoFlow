@@ -1639,7 +1639,16 @@ async function installLinkApiTab() {
       return toast("安装失败：" + (d.error || r.status));
     }
     const d = r.data || {};
-    toast(`已更新 AutoFlow API tab：新增 ${d.nodes_added || 0} 个节点，总计 ${d.nodes_total || 0} 个。包含 ${(d.specs || []).join(", ")}`);
+    // #177：tab_id 是 NR 实际分配的真实 id（不是种子 af_api_tab），据此判断有无重名 tab
+    let msg = d.skipped
+      ? `AutoFlow API tab 已是最新，无需改动（tab ${d.tab_id || "?"}）。`
+      : `已${d.tab_created ? "创建" : "更新"} AutoFlow API tab（${d.tab_id || "?"}）：`
+        + `新增 ${d.nodes_added || 0} 个、刷新 ${d.nodes_updated || 0} 个，总计 ${d.nodes_total || 0} 个节点。`
+        + `包含 ${(d.specs || []).join(", ")}`;
+    if (Array.isArray(d.duplicate_tabs) && d.duplicate_tabs.length > 1) {
+      msg += ` ⚠️ NR 上有 ${d.duplicate_tabs.length} 个同名 tab，请手动清理多余的：${d.duplicate_tabs.join(", ")}`;
+    }
+    toast(msg);
   } catch (e) { toast("安装失败：" + e.message); }
 }
 async function refreshLinkApis() {
