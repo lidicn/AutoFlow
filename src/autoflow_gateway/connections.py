@@ -192,6 +192,18 @@ def _source(cfg, spec: FieldSpec, saved: Dict[str, str]) -> str:
     return "unset"
 
 
+def bark_ready(cfg) -> bool:
+    """Bark 安装前置判定：BARK_SERVER 与 BARK_KEY 均「有效」（任一来源非空）。
+
+    「未配置 Bark 时按钮禁用」硬前置（A5/#171）：两者缺一不可——只填 server 没 key
+    推送会 401，只填 key 没 server 无处可推。供 WebUI 子流程 Tab 的 Bark 安装按钮
+    判定启用/禁用，以及 bark 安装端点做服务端兜底校验。
+    """
+    saved = load_saved(cfg)
+    return bool(_effective(cfg, _SPEC_BY_KEY["BARK_SERVER"], saved)) and \
+        bool(_effective(cfg, _SPEC_BY_KEY["BARK_KEY"], saved))
+
+
 def describe(cfg) -> Dict[str, Any]:
     """给 WebUI 的只读视图：分组 + 每字段当前值/掩码/来源。secret 绝不明文外传。"""
     saved = load_saved(cfg)

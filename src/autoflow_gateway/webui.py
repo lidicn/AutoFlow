@@ -592,6 +592,11 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                 if spec is not None and getattr(spec, "self_use", False):
                     continue
             visible.append(r)
+        # A5(#171)：Bark 安装前置判定——BARK_SERVER/BARK_KEY 都配齐才允许安装按钮启用。
+        # 仅给 bark_push 行打标记，前端据此禁用按钮并提示去「连接设置」填写。
+        for r in visible:
+            if r.get("key") == "bark_push":
+                r["bark_ready"] = connections.bark_ready(cfg)
         return _js({"subflows": visible, "count": len(visible)})
 
     # ── A2：Link API 配置表单持久化（方案 B：api_configs 表）──
@@ -792,6 +797,36 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         return _js({"ok": True, "key": key,
                     "created": res.get("created"), "exists": res.get("exists"),
                     "rebuilt": res.get("rebuilt"), "detail": res})
+
+    async def install_bark_subflow_endpoint(request: Request):
+        """A5(#171)：安装 Bark 子流程到 NR（幂等），从 connections.json 注入 BARK_* env。
+
+        - 前置校验：BARK_SERVER 与 BARK_KEY 必须都已配置，否则 400 提示先去
+          「设置 → 连接配置 → Bark」填写；
+        - allow_prod=True（人手动触发，prod 下写 NR 必须）；
+        - env 由进程内 os.environ 注入（apply_saved_to_env 在启动/保存时已生效，这里再补一次
+          以覆盖「网关运行期间改过连接设置」的情况）；不碰 1880/1990 既有无关节点。
+        返回 {ok, key, created, exists, detail}。"""
+        if not connections.bark_ready(cfg):
+            return _js({"ok": False,
+                        "error": "Bark 未配置：请先在「设置 → 连接配置 → Bark」填写 BARK_SERVER 与 BARK_KEY"},
+                        400)
+        # 确保最新保存的 connections 已注入进程 env（用户可能在网关运行期间改过）
+        try:
+            connections.apply_saved_to_env(cfg)
+        except Exception:
+            pass
+        client = getattr(gw.nr, "client", None)
+        if client is None:
+            return _js({"ok": False, "error": "NR 未连接，无法安装"}, 503)
+        try:
+            from .subflows import ensure_bark_subflow
+            res = await asyncio.to_thread(ensure_bark_subflow, client, True)
+        except Exception as e:
+            return _js({"ok": False, "error": f"安装失败：{e}"}, 502)
+        return _js({"ok": True, "key": "bark_push",
+                    "created": res.get("created"), "exists": res.get("exists"),
+                    "detail": res})
 
     # ── 版本同步已剥离为独立 CLI（C3 / B8）──
     # 后端逻辑保留在 autoflow_gateway/sync.py，由命令行脚本调用；
@@ -1028,6 +1063,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/subflows/import", import_subflow, methods=["POST"]),
         Route("/api/subflows/{key}/status", set_subflow_status, methods=["PATCH"]),
         Route("/api/subflows/{key}/ensure", ensure_subflow_endpoint, methods=["POST"]),
+        Route("/api/subflows/bark/install", install_bark_subflow_endpoint, methods=["POST"]),
         Route("/api/subflows/{key}", delete_subflow_endpoint, methods=["DELETE"]),
         # A2：Link API 配置读写（GET 读 / PUT 写 api_configs 表）
         Route("/api/link-apis/{name}/config", link_api_config_endpoint,

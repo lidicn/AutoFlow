@@ -1577,13 +1577,36 @@ function renderSfList(filter) {
       </div>
       <div class="desc">DSL 调用：<code>调用子流程: ${esc(s.key)}(...)</code></div>
       <div class="desc">前置参数 ${ins} 项 ｜ 需配置 env ${envs} 项 ｜ ${idLine}</div>
-      <div class="actions"><button class="btn sm" data-detail="${esc(s.key)}">查看前置参数</button>${sfEnsureAction(s)}${sfStatusActions(s)}${sfDeleteAction(s)}</div>
+      <div class="actions"><button class="btn sm" data-detail="${esc(s.key)}">查看前置参数</button>${sfEnsureAction(s)}${sfBarkAction(s)}${sfStatusActions(s)}${sfDeleteAction(s)}</div>
     </div>`;
   }).join("");
   $$("[data-detail]").forEach((b) => (b.onclick = () => showSfDetail(b.dataset.detail)));
   $$("[data-sf-status]").forEach((b) => (b.onclick = () => setSfStatus(b.dataset.key, b.dataset.sfStatus)));
   $$("[data-sf-del]").forEach((b) => (b.onclick = () => deleteSubflow(b.dataset.sfDel)));
   $$("[data-sf-ensure]").forEach((b) => (b.onclick = () => ensureSubflow(b.dataset.sfEnsure)));
+  $$("[data-bark-install]").forEach((b) => (b.onclick = () => installBarkSubflow(b.dataset.barkInstall)));
+}
+
+// ── A5(#171)：Bark 安装前置参数 ──
+// 未配 BARK_SERVER/BARK_KEY 时按钮禁用并提示；配置后调 POST /api/subflows/bark/install。
+function sfBarkAction(s) {
+  if (s.key !== "bark_push") return "";
+  const ready = !!s.bark_ready;
+  const title = ready
+    ? "幂等安装 Bark 子流程到 Node-RED（已存在则跳过）"
+    : "请先在「设置 → 连接配置 → Bark」填写 BARK_SERVER 与 BARK_KEY";
+  return ` <button class="btn sm" data-bark-install="${esc(s.key)}" ${ready ? "" : "disabled"} title="${title}">安装 Bark 子流程</button>`;
+}
+
+async function installBarkSubflow(key) {
+  try {
+    const r = await api("POST", "/subflows/bark/install", {});
+    if (!r.ok) return toast("安装失败：" + (r.data?.error || r.status));
+    const d = r.data || {};
+    toast(d.exists ? "Bark 子流程已存在，无需安装：" + key
+      : d.created ? "已安装 Bark 子流程到 NR：" + key : "安装完成：" + key);
+    await refreshSfList();
+  } catch (e) { toast("安装失败：" + e.message); }
 }
 // ── A1：Link API Tab（网关 HTTP 桥接：link_out / http_api）─────────────
 // 仅展示；配置表单（A2）/ 安装 AutoFlow API tab（A3）按钮在对应卡片接入。
