@@ -275,6 +275,44 @@ class TestWebUI(TmpCfgMixin, unittest.TestCase):
         finally:
             os.environ.pop("AF_WEBUI_TOKEN", None)
 
+    def test_webui_token_non_ascii_not_500(self):
+        """P0-1 (S-1) 加固：非 ASCII token（原始字节含重音）不应触发 500，仍返回干净 403。
+
+        hmac.compare_digest 对 str 要求纯 ASCII，非 ASCII 会抛 TypeError 致 500；加固后转字节比较，
+        任意内容安全比较，响应为 403 而非 500。
+        """
+        import asyncio
+        import os
+        tok = "af_test_secret_token_xyz"
+        os.environ["AF_WEBUI_TOKEN"] = tok
+        try:
+            async def _raw_call_auth(app, path, auth_header_bytes):
+                scope = {
+                    "type": "http", "method": "GET", "path": path,
+                    "query_string": b"", "headers": [(b"authorization", auth_header_bytes)],
+                    "client": ("testclient", 1234),
+                }
+                captured = {}
+
+                async def _receive():
+                    return {"type": "http.request", "body": b"", "more_body": False}
+
+                async def _send(message):
+                    if message["type"] == "http.response.start":
+                        captured["status"] = message["status"]
+                    elif message["type"] == "http.response.body":
+                        captured["body"] = message.get("body", b"")
+
+                await app(scope, _receive, _send)
+                return captured.get("status")
+
+            app = build_webui_asgi(self.cfg, gateway=self.gw)
+            # 非 ASCII token（Bearer café，utf-8 字节）应 403，不 500
+            status = asyncio.run(_raw_call_auth(app, "/api/health", "Bearer café".encode("utf-8")))
+            self.assertEqual(status, 403)
+        finally:
+            os.environ.pop("AF_WEBUI_TOKEN", None)
+
     def test_webui_non_local_no_token_returns_403(self):
         """P0-3 (S-4)：未配置 token 时，非本机/回环 IP 访问 /api 一律 403；本机放行。"""
         import asyncio

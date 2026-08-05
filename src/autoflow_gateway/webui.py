@@ -1020,7 +1020,11 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         if not provided:
             provided = _cookie_token(headers)
         # ★S-1 安全修复：常量时间比较，避免时序攻击逐字节猜 token
-        if not hmac.compare_digest(provided or "", token or ""):
+        # 转字节比较：hmac.compare_digest 对 str 要求纯 ASCII，非 ASCII token 会抛
+        # TypeError 致 500；转 utf-8 字节后对任意内容安全比较（仍拒绝，响应干净）。
+        if not hmac.compare_digest(
+            (provided or "").encode("utf-8"), (token or "").encode("utf-8")
+        ):
             await JSONResponse({"ok": False, "error": "unauthorized"}, status_code=403)(scope, receive, send)
             return
         await raw(scope, receive, send)
