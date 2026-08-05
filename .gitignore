@@ -83,3 +83,13 @@ _*.jsonl
 
 # 个人 HA 配置导出（含 Bark key / NAS IP，非 AutoFlow 源码）
 /smarthome-assistant/
+
+# ===== P0 安全审计（P-3/P-5/P-8）：诊断/交接/产物脚本与缓存不进版本库 =====
+# 这些文件含 NAS UNC 路径、真实内网 IP、一次性热修逻辑，非仓库源码，误 git add -A 会泄漏。
+HANDOFF_*.md
+.cbcache/
+fix_hist_wires.py
+scan_*.py
+validate_flows.py
+build_capmatrix_flow.py
+capmatrix_flow*.json
