@@ -184,7 +184,7 @@ docker exec autoflow_gateway cat /data/.webui_token
 
 ```bash
 TOKEN=$(docker exec autoflow_gateway cat /data/.webui_token)
-echo "http://192.168.2.200:8000/?token=$TOKEN"
+echo "http://<你的机器IP>:8000/?token=$TOKEN"
 ```
 
 > 容器名不是默认的 `autoflow_gateway`？先 `docker ps | grep autoflow` 看实际名字，命令里替换掉即可。
