@@ -93,7 +93,7 @@ function fmtTime(s) {
 }
 
 // ── 导航（C1/C3：工作区 + 版本同步已移除，新增设置管理界面）──
-const TABS = ["dashboard", "safe", "proposals", "deployed", "subflows", "agents", "diagnostics", "notes", "settings"];
+const TABS = ["dashboard", "safe", "proposals", "deployed", "subflows", "link_apis", "agents", "diagnostics", "notes", "settings"];
 function setTab(tab) {
   if (!TABS.includes(tab)) tab = "dashboard";
   $$(".navitem").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
@@ -106,6 +106,7 @@ function setTab(tab) {
   else if (tab === "notes") loadNotes();
   else if (tab === "diagnostics") loadDiagnostics();
   else if (tab === "subflows") loadSubflows();
+  else if (tab === "link_apis") loadLinkApis();
   else if (tab === "settings") loadSettings();
 }
 
@@ -1525,9 +1526,11 @@ $$(".navitem").forEach((b) => (b.onclick = () => setTab(b.dataset.tab)));
 
 // ── 子流程注册表（#575/#579/#580）──
 let _sfList = [];
+let _sfView = "subflow";  // A1：当前子流程类视图（subflow=子流程 Tab | link_api=Link API Tab）
 async function loadSubflows() {
+  _sfView = "subflow";
   const v = $("#view-subflows");
-  v.innerHTML = `<div class="view-head"><h2>子流程（link API 注册表）</h2>
+  v.innerHTML = `<div class="view-head"><h2>子流程</h2>
     <button class="btn primary" id="sf-import-btn">＋ 导入 NR 子流程</button></div>
     <div class="row" style="gap:8px;margin:8px 0">
       <select id="sf-filter"><option value="">全部</option><option value="managed">网关预置</option><option value="imported">用户导入</option></select>
@@ -1550,6 +1553,9 @@ async function refreshSfList() {
 function renderSfList(filter) {
   const el = $("#sf-list"); if (!el) return;
   let rows = _sfList.slice();
+  // A1：按当前 Tab 视图过滤 kind——子流程 Tab 只显 subflow，Link API Tab 只显 link_out/http_api
+  if (_sfView === "subflow") rows = rows.filter((s) => (s.kind || "subflow") === "subflow");
+  else if (_sfView === "link_api") rows = rows.filter((s) => ["link_out", "http_api"].includes(s.kind || ""));
   if (filter) rows = rows.filter((s) => s.source_type === filter);
   const cnt = $("#sf-count"); if (cnt) cnt.textContent = `共 ${rows.length} 条`;
   if (!rows.length) { el.innerHTML = `<div class="empty">暂无子流程（点右上「＋ 导入」从 NR 自省导入）。</div>`; return; }
@@ -1578,6 +1584,49 @@ function renderSfList(filter) {
   $$("[data-sf-status]").forEach((b) => (b.onclick = () => setSfStatus(b.dataset.key, b.dataset.sfStatus)));
   $$("[data-sf-del]").forEach((b) => (b.onclick = () => deleteSubflow(b.dataset.sfDel)));
   $$("[data-sf-ensure]").forEach((b) => (b.onclick = () => ensureSubflow(b.dataset.sfEnsure)));
+}
+// ── A1：Link API Tab（网关 HTTP 桥接：link_out / http_api）─────────────
+// 仅展示；配置表单（A2）/ 安装 AutoFlow API tab（A3）按钮在对应卡片接入。
+async function loadLinkApis() {
+  _sfView = "link_api";
+  const v = $("#view-link_apis");
+  v.innerHTML = `<div class="view-head"><h2>Link API（网关 HTTP 桥接）</h2></div>
+    <div class="row" style="gap:8px;margin:8px 0">
+      <span class="meta" id="la-count"></span>
+    </div>
+    <div id="la-list"><div class="empty">加载中…</div></div>`;
+  await refreshLinkApis();
+}
+async function refreshLinkApis() {
+  try {
+    const r = await api("GET", "/subflows");
+    _sfList = r.data?.subflows || [];
+    _sfView = "link_api";
+    renderLinkApis();
+  } catch (e) {
+    const el = $("#la-list"); if (el) el.innerHTML = errBox(e.message, refreshLinkApis);
+  }
+}
+function renderLinkApis() {
+  const el = $("#la-list"); if (!el) return;
+  let rows = _sfList.filter((s) => ["link_out", "http_api"].includes(s.kind || ""));
+  const cnt = $("#la-count"); if (cnt) cnt.textContent = `共 ${rows.length} 条`;
+  if (!rows.length) { el.innerHTML = `<div class="empty">暂无 Link API（网关桥接类能力）。</div>`; return; }
+  el.innerHTML = rows.map((s) => {
+    const ins = Array.isArray(s.input_schema) ? s.input_schema.length : 0;
+    const kindBadge = badge("kind-link_out", "link API");
+    const idLine = s.kind === "link_out"
+      ? `link out 入口：${esc(s.entry_link_id || "—")}`
+      : "网关内联（不生成 NR 节点）";
+    return `<div class="item" data-key="${esc(s.key)}">
+      <div class="row">
+        <div><span class="title">${esc(s.title || s.key)}</span> <span class="meta">${esc(s.key)}</span></div>
+        <div>${badge("tier-" + (s.source_type === "managed" ? "managed" : "imported"), s.source_type === "managed" ? "网关预置" : "用户导入")} ${kindBadge} ${badge("status-" + s.status, s.status)}</div>
+      </div>
+      <div class="desc">DSL 调用：<code>调用子流程: ${esc(s.key)}(...)</code></div>
+      <div class="desc">前置参数 ${ins} 项 ｜ ${idLine}</div>
+    </div>`;
+  }).join("");
 }
 // history_* 是 DSL 内置原语（编译器语法的一部分），只能禁用不能删除
 const SF_HISTORY_KEYS = ["history_state_at", "history_occurred", "history_duration", "history_aggregate"];

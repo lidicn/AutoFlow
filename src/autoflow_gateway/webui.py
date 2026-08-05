@@ -571,11 +571,24 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
 
     # ── 子流程注册表（#575/#579）──
     async def list_subflows(request: Request):
+        from .api_specs import get_api_spec
         src = request.query_params.get("source_type")
         st = request.query_params.get("status")
         rows = await asyncio.to_thread(gw.tasks.list_subflows,
                                         source_type=src, status=st)
-        return _js({"subflows": rows, "count": len(rows)})
+        # A1/A4：link_out / http_api 类（网关 HTTP 桥接）若标记 self_use（豆包系列
+        # 等网关自用能力），不进入产品列表；其 spec 定义仍保留在 api_specs.json 仅供
+        # 重装，不影响「子流程」Tab（只含 kind=subflow）。这是避免豆包链路在 WebUI
+        # 被误装/被默认 tab 生成覆盖的硬约束之一。
+        visible = []
+        for r in rows:
+            kind = r.get("kind") or "subflow"
+            if kind in ("link_out", "http_api"):
+                spec = get_api_spec(r.get("spec_ref") or r.get("key") or "")
+                if spec is not None and getattr(spec, "self_use", False):
+                    continue
+            visible.append(r)
+        return _js({"subflows": visible, "count": len(visible)})
 
     async def import_subflow(request: Request):
         """自省导入用户既有 NR 子流程：给定 nr_subflow_id → 抽取前置参数
