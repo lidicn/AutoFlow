@@ -31,8 +31,9 @@ from datetime import datetime
 # 默认实例 = 1880。日常测试与编写都在 1880；prod 环境写操作需 allow_prod opt-in。
 # 需要操作 1880 时显式设 NR_URL=http://<NAS_IP>:1880（或按用户发来的 URL 端口为准）。
 NR_URL    = os.getenv("NR_URL",    "http://localhost:1880")
-NR_USER   = os.getenv("NR_USER",   "<LOCAL_USER>")
-NR_PASS   = os.getenv("NR_PASS",   "<SECRET_PASSWORD>")
+NR_USER   = os.getenv("NR_USER",   "")
+# ★S-2 安全修复：占位符凭据默认值改为空字符串，未配置时不再发送假密码登录 NR
+NR_PASS   = os.getenv("NR_PASS",   "")
 
 # 日志目录（WorkBuddy 用户空间）
 LOG_DIR = os.path.expanduser("~/.workbuddy/logs")
@@ -1689,11 +1690,8 @@ class NodeRedClient:
     # ── 端到端验证（e2e verify）─────────────────────────
     # HA 连接（与 homeassistant-kai-dai/ha_client.py 保持一致，零外部依赖）
     _HA_SERVER = os.getenv("HASS_SERVER") or "http://<NAS_IP>:8123"
-    _HA_TOKEN = os.getenv("HASS_TOKEN") or (
-        "<HA_JWT_HEADER>"
-        ".<HA_JWT_PAYLOAD>"
-        ".<HA_JWT_SIG>"
-    )
+    # ★S-3 安全修复：假 JWT 占位符默认值改为空字符串，未配置时拒绝鉴权请求（不泄漏 JWT 结构）
+    _HA_TOKEN = os.getenv("HASS_TOKEN") or ""
 
     def _ha_req(self, path: str, method: str = "GET", payload: Any = None) -> str:
         url = f"{self._HA_SERVER}/api/{path.lstrip('/')}"
