@@ -48,6 +48,7 @@ class ApiSpec:
     nr_body_template: str = ""         # 请求体 JSONata 模板（覆盖默认"透传 payload"）
     nr_out_links: list = field(default_factory=list)  # 出口 link out 目标（空=用户自连；say 指向 TTS）
     nr_debug: bool = True              # 生成 debug 节点便于观测返回
+    self_use: bool = False             # True=豆包等网关自用能力：不进 WebUI 产品列表、不参与默认 tab 生成，但 spec 定义保留（保重装性）
 
     def to_subflow_spec(self) -> SubflowSpec:
         """派生网关侧 SubflowSpec（供 dsl_engine / dsl_help）。"""

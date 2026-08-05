@@ -49,7 +49,8 @@
     "nr_headers": {},
     "nr_body_template": "",
     "nr_out_links": [],
-    "nr_debug": true
+    "nr_debug": true,
+    "self_use": true
   },
   {
     "name": "llm_doubao_say",
@@ -101,7 +102,8 @@
     "nr_headers": {},
     "nr_body_template": "",
     "nr_out_links": [],
-    "nr_debug": true
+    "nr_debug": true,
+    "self_use": true
   },
   {
     "name": "llm_doubao_image",
@@ -129,7 +131,8 @@
     "nr_headers": {},
     "nr_body_template": "",
     "nr_out_links": [],
-    "nr_debug": true
+    "nr_debug": true,
+    "self_use": true
   },
   {
     "name": "llm_doubao_vision",
@@ -173,7 +176,8 @@
     "nr_headers": {},
     "nr_body_template": "",
     "nr_out_links": [],
-    "nr_debug": true
+    "nr_debug": true,
+    "self_use": true
   },
   {
     "name": "llm_caiyun_weather",
