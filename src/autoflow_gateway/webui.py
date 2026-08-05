@@ -15,6 +15,7 @@ import json
 import asyncio
 import secrets
 import hmac
+import re
 import tempfile
 from typing import Optional, Dict, Any
 
@@ -32,6 +33,8 @@ from .notes import NoteStore
 from .device_guard import DeviceGuardStore
 from .audit import AuditStore
 from .subflows import introspect_nr_subflow, validate_subflow_registration
+from .api_config_store import ApiConfigStore
+from .api_specs import get_api_spec
 from . import connections
 
 # 人工抽查（spotcheck）与评测工作台（eval）已从网关剥离，迁移至 archive/agent-loop-migration/（C4）。
@@ -156,6 +159,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     notes = NoteStore(cfg)
     device_guard = DeviceGuardStore(cfg)
     audit_store = AuditStore(gw)
+    api_configs = ApiConfigStore(cfg)  # A0/A2：Link API 运行时配置（api_configs 表）
     static_dir = os.path.join(os.path.dirname(__file__), "webui", "static")
     index_path = os.path.join(static_dir, "index.html")
 
@@ -590,6 +594,57 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             visible.append(r)
         return _js({"subflows": visible, "count": len(visible)})
 
+    # ── A2：Link API 配置表单持久化（方案 B：api_configs 表）──
+    _ENV_PH_RE = re.compile(r"<([A-Z][A-Z0-9_]+)>")
+
+    def _config_fields_for_spec(spec) -> list:
+        """从 spec 的 url / headers / body_template 提取 <ENV_NAME> 占位符，
+
+        作为该 Link API 需用户填写的配置字段（单一真相源，避免手维护字段清单）。"""
+        names: list = []
+        seen = set()
+        texts = [spec.url or "", spec.nr_body_template or ""]
+        for v in (spec.nr_headers or {}).values():
+            texts.append(str(v))
+        for text in texts:
+            for m in _ENV_PH_RE.findall(text or ""):
+                if m not in seen:
+                    seen.add(m)
+                    names.append(m)
+        return names
+
+    async def link_api_config_endpoint(request: Request):
+        """GET 读配置（含推导 config_fields 与当前值）/ PUT 写配置。
+
+        GET 返回 {ok, name, config_fields, config, self_use}；
+        PUT body={config:{ENV: value}}，仅接收 spec 声明的字段（防越权写无关 env），
+        写入 api_configs 表。self_use 能力（豆包系列）禁止配置。"""
+        name = request.path_params.get("name") or ""
+        spec = get_api_spec(name)
+        if spec is None:
+            return _js({"ok": False, "error": f"未知 Link API: {name}"}, 404)
+        if request.method == "GET":
+            return _js({
+                "ok": True, "name": name,
+                "config_fields": _config_fields_for_spec(spec),
+                "config": api_configs.get_api_config(name),
+                "self_use": getattr(spec, "self_use", False),
+            })
+        if getattr(spec, "self_use", False):
+            return _js({"ok": False, "error": "self_use 能力不可配置"}, 403)
+        b = await _body(request)
+        cfg_in = b.get("config")
+        if not isinstance(cfg_in, dict):
+            return _js({"ok": False, "error": "config 必须是对象 {ENV: value}"}, 400)
+        allowed = set(_config_fields_for_spec(spec))
+        cleaned = {k: str(v) for k, v in cfg_in.items() if k in allowed}
+        # 合并而非整体替换：前端对留空的密钥字段(密码框)不发值，
+        # 整体替换会误删既有 token；合并保留未在本轮提交的字段。
+        existing = api_configs.get_api_config(name)
+        merged = {**existing, **cleaned}
+        api_configs.set_api_config(name, merged)
+        return _js({"ok": True, "name": name, "config": merged})
+
     async def import_subflow(request: Request):
         """自省导入用户既有 NR 子流程：给定 nr_subflow_id → 抽取前置参数
         （env + input_schema，免手填）→ 注册进 subflow_registry。
@@ -974,6 +1029,9 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/subflows/{key}/status", set_subflow_status, methods=["PATCH"]),
         Route("/api/subflows/{key}/ensure", ensure_subflow_endpoint, methods=["POST"]),
         Route("/api/subflows/{key}", delete_subflow_endpoint, methods=["DELETE"]),
+        # A2：Link API 配置读写（GET 读 / PUT 写 api_configs 表）
+        Route("/api/link-apis/{name}/config", link_api_config_endpoint,
+              methods=["GET", "PUT"]),
 
         # 静态
         Route("/", index, methods=["GET"]),

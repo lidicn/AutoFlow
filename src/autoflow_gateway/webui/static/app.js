@@ -1625,8 +1625,82 @@ function renderLinkApis() {
       </div>
       <div class="desc">DSL 调用：<code>调用子流程: ${esc(s.key)}(...)</code></div>
       <div class="desc">前置参数 ${ins} 项 ｜ ${idLine}</div>
+      <div class="actions"><button class="btn sm" data-la-cfg="${esc(s.key)}" title="填写 token / 坐标等运行时参数">⚙️ 配置</button></div>
     </div>`;
   }).join("");
+  $$("[data-la-cfg]").forEach((b) => (b.onclick = () => showLinkApiConfig(b.dataset.laCfg)));
+}
+
+// ── A2：Link API 配置表单（方案 B：api_configs 表持久化）──
+async function showLinkApiConfig(key) {
+  const s = _sfList.find((x) => x.key === key);
+  const title = s ? (s.title || key) : key;
+  let data;
+  try {
+    const r = await api("GET", "/link-apis/" + encodeURIComponent(key) + "/config");
+    if (!r.ok) return toast("读取配置失败：" + (r.data?.error || r.status));
+    data = r.data;
+  } catch (e) { return toast("读取配置失败：" + e.message); }
+
+  const fields = data.config_fields || [];
+  const cfg = data.config || {};
+  if (!fields.length) {
+    modal("配置 Link API · " + esc(title),
+      `<div class="empty">该 Link API 无需运行时配置（spec 中无 &lt;ENV&gt; 占位符）。</div>`);
+    return;
+  }
+  // 密钥类字段（含 TOKEN/KEY/SECRET/PASSWORD/API）→ password 不回显；坐标等明文。
+  const isSecret = (n) => /TOKEN|KEY|SECRET|PASSWORD|API/i.test(n);
+  const rows = fields.map((n) => {
+    const val = cfg[n];
+    const set = val !== undefined && val !== null && val !== "";
+    if (isSecret(n)) {
+      const state = set
+        ? `<span class="conn-src">· 已设置（${String(val).length} 字符）</span>`
+        : `<span class="conn-src">· 未设置</span>`;
+      return `<div class="field">
+        <label>${esc(n)} <span class="badge kind-link_out">密钥</span> ${state}</label>
+        <input type="password" data-la-k="${esc(n)}" data-secret="1" autocomplete="new-password"
+               placeholder="${set ? "留空表示不修改" : "请输入 " + esc(n)}">
+      </div>`;
+    }
+    return `<div class="field">
+      <label>${esc(n)}</label>
+      <input data-la-k="${esc(n)}" data-secret="0" value="${esc(val || "")}" placeholder="请输入 ${esc(n)}">
+    </div>`;
+  }).join("");
+  modal("配置 Link API · " + esc(title), `
+    <p class="desc">填写此 Link API 的运行参数。密钥仅本机存储于 <code>api_configs</code> 表，不进 git；保存后立即生效。</p>
+    ${rows}
+    <div class="conn-result" id="la-cfg-result"></div>
+    <button class="btn primary" id="la-cfg-save">保存</button>`);
+  $("#la-cfg-save").onclick = () => saveLinkApiConfig(key);
+}
+
+async function saveLinkApiConfig(key) {
+  const patch = {};
+  $$("#modalBody [data-la-k]").forEach((el) => {
+    const n = el.dataset.laK;
+    const v = el.value;                 // 密钥不 trim（保留首尾空格意图）；坐标允许 trim
+    if (el.dataset.secret === "1") {
+      if (v) patch[n] = v;              // 空 = 保留已有
+    } else {
+      patch[n] = v.trim();
+    }
+  });
+  const out = $("#la-cfg-result");
+  if (!Object.keys(patch).length) { out.textContent = "没有改动。"; return; }
+  out.textContent = "保存中…";
+  const btn = $("#la-cfg-save"); if (btn) btn.disabled = true;
+  try {
+    const r = await api("PUT", "/link-apis/" + encodeURIComponent(key) + "/config", { config: patch });
+    if (!r.ok) { out.textContent = "保存失败：" + (r.data?.error || r.status); return; }
+    toast("已保存：" + key);
+    closeModal();
+    await refreshLinkApis();
+  } catch (e) {
+    out.textContent = "保存失败：" + e.message;
+  } finally { if (btn) btn.disabled = false; }
 }
 // history_* 是 DSL 内置原语（编译器语法的一部分），只能禁用不能删除
 const SF_HISTORY_KEYS = ["history_state_at", "history_occurred", "history_duration", "history_aggregate"];
