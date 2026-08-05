@@ -74,7 +74,7 @@ class GatewayConfig:
 
     # ── NR 连接（网关独占）。默认 http://localhost:1880，可用 NR_URL 覆盖 ──
     nr_url: str = field(default_factory=lambda: os.environ.get("NR_URL", "http://localhost:1880"))
-    nr_user: str = field(default_factory=lambda: os.environ.get("NR_USER", "<LOCAL_USER>"))
+    nr_user: str = field(default_factory=lambda: os.environ.get("NR_USER", ""))
     nr_pass: str = field(default_factory=lambda: os.environ.get("NR_PASS", ""))
     # NR 中配置的 Home Assistant server id（server-state-changed 节点绑定用）。
     # 部署 DSL 提案时把 dsl_engine 的 HA_SERVER_ID 占位符替换为该值；为空则保留占位符。
