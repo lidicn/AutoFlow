@@ -622,7 +622,11 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         返回 {ok, key, nr_removed, nr_kept}。"""
         from .subflows import HISTORY_REGISTRY_KEYS
         key = request.path_params.get("key")
-        meta = await asyncio.to_thread(gw.tasks.get_subflow_meta, key)
+        # #119-fix: 与 ensure_subflow_endpoint 同构，get_subflow_meta 裸抛会裸 500；纳入 try。
+        try:
+            meta = await asyncio.to_thread(gw.tasks.get_subflow_meta, key)
+        except Exception as e:
+            return _js({"ok": False, "error": f"读取子流程元数据失败：{e}"}, 502)
         if not meta:
             return _js({"ok": False, "error": f"子流程不存在: {key}"}, 404)
         if key in HISTORY_REGISTRY_KEYS:
@@ -660,7 +664,12 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         幂等：已存在即 no-op。返回 {ok, key, created, exists, rebuilt}。"""
         from .subflows import HISTORY_REGISTRY_KEYS, ensure_history_subflow
         key = request.path_params.get("key")
-        meta = await asyncio.to_thread(gw.tasks.get_subflow_meta, key)
+        # #119-fix: 原 get_subflow_meta 在 try 之外，注册表/DB 异常会裸抛 500。
+        # 纳入 try，DB 读取失败统一返 502（带错误信息），不再裸 500。
+        try:
+            meta = await asyncio.to_thread(gw.tasks.get_subflow_meta, key)
+        except Exception as e:
+            return _js({"ok": False, "error": f"读取子流程元数据失败：{e}"}, 502)
         if not meta:
             return _js({"ok": False, "error": f"子流程不存在: {key}"}, 404)
         if key not in HISTORY_REGISTRY_KEYS:

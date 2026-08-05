@@ -444,6 +444,18 @@ HISTORY_SUBFLOW_IDS = {
     HISTORY_DURATION_SUBFLOW_ID, HISTORY_AGGREGATE_SUBFLOW_ID,
 }
 
+# ⚠️ 注册表 key（history_*）≠ NR 子流程 id（af_hist_*），两者绝不可互换：
+# WebUI 的「安装到 NR」/「注销」端点拿到的是 path_params 里的**注册表 key**，
+# 故判定必须用本集合；误用 HISTORY_SUBFLOW_IDS 会让 `key not in` 恒真 → 稳定 400。
+# #711 只在 webui.py 引用了本名字却漏了定义 → ImportError 在函数体首行抛出、
+# 位于所有 try 之外 → Starlette 裸 500（「安装历史子流程」按钮全线不可用）。
+# 从 SUBFLOWS 单一真源派生，避免再出现两处硬编码漂移。
+HISTORY_REGISTRY_KEYS = frozenset(
+    key for key, spec in SUBFLOWS.items()
+    if isinstance(getattr(spec, "call", None), dict)
+    and spec.call.get("subflow_id") in HISTORY_SUBFLOW_IDS
+)
+
 _HISTORY_BUILT_PATH = os.path.join(
     os.path.dirname(__file__), "nr_subflows", "history", "subflows_built.json")
 
