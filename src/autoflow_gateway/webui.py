@@ -901,8 +901,13 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     def _resolve_af_api_tab_id(entry_ids=None):
         """解析「AutoFlow API」tab 的真实 id（risk-1 / #177）。
 
-        顺序：① 本地台账命中且 NR 上仍在 → 直接用；② 否则 list_flows 按 label 找，
-        找到就回写台账；③ 都没有 → None（尚未安装，走首次创建路径）。
+        顺序：① 本地台账命中、NR 上仍在**且 label 仍是「AutoFlow API」** → 直接用；
+        ② 否则 list_flows 按 label 找，找到就回写台账；③ 都没有 → None（尚未安装，
+        走首次创建路径）。
+
+        #178：台账命中必须复验 label。台账可能变脏（换了 NR 实例 / 用户手动改过 /
+        原 tab 被删后该 id 被别的 tab 复用），只判「flow 存在」会误命中无关 tab，
+        把我们的节点塞进人家的流程里。label 不符则视同台账过期，落到重扫。
 
         Args:
             entry_ids: 入口节点 id 集合（重名 tab 时用于挑真身）。
@@ -914,7 +919,8 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         if cached:
             try:
                 f = gw.nr.get_flow(cached)
-                if isinstance(f, dict) and f.get("id"):
+                if (isinstance(f, dict) and f.get("id")
+                        and (f.get("label") or "").strip() == AF_API_TAB_LABEL):
                     return f.get("id"), [f.get("id")]
             except Exception:
                 pass   # 台账过期（tab 被删 / 换了 NR 实例）→ 落到重扫

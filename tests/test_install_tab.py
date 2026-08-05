@@ -16,6 +16,9 @@ risk-1（#177）回归重点：Node-RED 的 POST /flow 会自行分配 tab id �
 "id"。A3 初版拿字面量 "af_api_tab" 探测 → 恒 404 → 每次都新建重名 tab。故本文件的
 fake NR 忠实模拟该行为：get_flow 未命中直接抛（404），POST 路径另发真实 id 并改写
 节点 z。旧版 fake 未命中时返回空 flow，恰好把这个 bug 掩盖了。
+
+#178 补充回归：台账命中分支必须复验 label —— 台账指向「存在但无关」的 tab 时
+（换实例 / 手动改过 / id 被复用），只判存在会把节点灌进人家的流程里。
 """
 import os
 import sys
@@ -282,6 +285,57 @@ class TestInstallTab(unittest.TestCase):
         self.assertEqual(fake.tabs_named("AutoFlow API"), [FakeNRClients.NEW_TAB_ID])
         with open(self._ledger, encoding="utf-8") as f:
             self.assertEqual(f.read().strip(), FakeNRClients.NEW_TAB_ID)
+
+    def test_dirty_ledger_pointing_at_unrelated_tab_is_ignored(self):
+        """#178：台账指向「存在但无关」的 tab → 不得误命中，须落到重扫认领真身。
+
+        台账变脏的现实路径：换了 NR 实例、用户手动改过台账、或原 tab 被删后该 id
+        被别的 tab 复用。只判「flow 存在」会把节点塞进人家的流程里。
+        """
+        self._set_all_cfgs()
+        fake = self._inject_fake_nr()
+        fake.flows[USER_TAB_ID] = copy.deepcopy(USER_TAB)
+        before_user = copy.deepcopy(fake.flows[USER_TAB_ID])
+        # 现网真身存在，但台账脏指向用户自用 tab
+        fake.flows[FakeNRClients.NEW_TAB_ID] = {
+            "id": FakeNRClients.NEW_TAB_ID, "label": "AutoFlow API", "nodes": []}
+        with open(self._ledger, "w", encoding="utf-8") as f:
+            f.write(USER_TAB_ID)
+
+        body = self._install().json()
+        self.assertTrue(body["ok"])
+        # 认领的是 label 匹配的真身，而不是台账里那个无关 tab
+        self.assertEqual(body["tab_id"], FakeNRClients.NEW_TAB_ID)
+        # 无关 tab 逐字节不变，且从未被写入
+        self.assertEqual(fake.flows[USER_TAB_ID], before_user)
+        self.assertNotIn(USER_TAB_ID, [fid for fid, _, _ in fake.create_calls])
+        # 台账被纠正
+        with open(self._ledger, encoding="utf-8") as f:
+            self.assertEqual(f.read().strip(), FakeNRClients.NEW_TAB_ID)
+
+    def test_dirty_ledger_without_existing_af_tab_creates_new(self):
+        """#178 凶险变体：台账脏指向无关 tab、且现网尚无 AutoFlow API tab。
+
+        旧逻辑（只判存在）会把我们的节点直接灌进用户自用 tab —— 不可逆污染。
+        正确行为：label 不符 → 重扫无果 → 走首次创建，另建真身。
+        """
+        self._set_all_cfgs()
+        fake = self._inject_fake_nr()
+        fake.flows[USER_TAB_ID] = copy.deepcopy(USER_TAB)
+        before_user = copy.deepcopy(fake.flows[USER_TAB_ID])
+        with open(self._ledger, "w", encoding="utf-8") as f:
+            f.write(USER_TAB_ID)
+
+        body = self._install().json()
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["tab_created"])
+        self.assertNotEqual(body["tab_id"], USER_TAB_ID)
+        self.assertEqual(fake.tabs_named("AutoFlow API"), [body["tab_id"]])
+        # 用户 tab 未被当成安装目标
+        self.assertEqual(fake.flows[USER_TAB_ID], before_user)
+        self.assertNotIn(USER_TAB_ID, [fid for fid, _, _ in fake.create_calls])
+        ids = {n["id"] for n in fake.flows[body["tab_id"]]["nodes"]}
+        self.assertIn("af_weather_in", ids)
 
     def test_config_change_refreshes_nodes(self):
         """改了 token 再装 → 既有节点就地刷新（否则用户改配置永远不生效）。"""
