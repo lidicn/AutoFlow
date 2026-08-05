@@ -31,7 +31,7 @@ disable: true
 1. **实体必须真实**：所有 `entity_id` 只能来自 `autoflow_resolve_entity` 的返回，**绝不靠记忆拼** `light.xxx`——拼错网关闸门直接判 FAIL。
 2. **你不需要猜设备是 light 还是 switch**：把自然语言设备名丢给 `autoflow_resolve_entity(name=..., area=...)`，网关返回该区域所有沾边实体（含 `domain`、`state` 当前状态、`possible_states` 可能状态），**由你挑**该用哪个。
    - ★★ **同名设备有多个子实体，必须按用途挑对的那个**：一个自然语言名可能返回同一物理设备的好几个 entity。典型：「书房人体传感器」会同时返回 `binary_sensor..._motion`(移动检测) 和 `sensor..._illuminance`(光照度数值)——做"有人移动"触发选 `_motion`；做"光照度低于 10"数值条件选 `_illuminance`。**两个是不同实体，别混用、别只取第一个。**
-   - ★★ **吊灯 ≠ 台灯 ≠ 牌匾灯泡**：书房吊灯/射灯是 `switch` 域（`switch.lumi..._p_3_1` / `_p_2_1`），动作用 `switch.turn_on`；只有台灯(`light.philips...rwread...`)、牌匾灯泡(`light.philips...cbulb...`)是 `light` 域。名字里带"开关/电脑"的（如 `switch.d4f0eaeab731_switch`）是干扰项，绝不拿来冒充灯。拿不准就把候选读全、按 domain+friendly_name 挑。
+   - ★★ **吊灯 ≠ 台灯 ≠ 牌匾灯泡**：书房吊灯/射灯是 `switch` 域（`switch.lumi..._p_3_1` / `_p_2_1`），动作用 `switch.turn_on`；只有台灯(`light.philips...rwread...`)、牌匾灯泡(`light.philips...cbulb...`)是 `light` 域。名字里带"开关/电脑"的（如 `switch.example_switch`）是干扰项，绝不拿来冒充灯。拿不准就把候选读全、按 domain+friendly_name 挑。
 3. **零信任**：你只做「发现 + 提案/部署」。不部署审批（人在 WebUI 做）、不直连 HA/NR、不提交任何地址/端口/令牌。
 4. **resolve 返回 0 候选就停手**：说明该区域根本无此设备（如「客厅窗帘」客厅没窗帘）。**不要跨区 scavenge 去别的房间顺一个凑**——应改用 `autoflow_report_issue(title=…, body=…, task_id="…", severity="high", category="entity")` 上报（属任务编排错误），人类会看到。
 5. **聊天框优先（交互原则）**：你是**交互式 chat agent**，人类就在这段对话里。轻量、可逆的歧义（如「开哪盏灯」「用什么亮度」「叫什么名」）**直接在聊天框问、等人回复**，不要为此调 `autoflow_request_decision`、也别让人跑去 WebUI 点选——把正在对话协作的人类切去另一个界面会有割裂感。仅当 (1) agent **无人值守**（headless / 任务池 worker / 定时任务，对话里没人）或 (2) 该选择需**持久化 / 可审计**地记进网关时，才走 `autoflow_request_decision` → WebUI 通道。完整通道选择见下方「人类决策协议」。
@@ -135,7 +135,7 @@ disable: true
 ```
 场景: 书房台灯今日亮灯累计时长
 触发: inject
-调用子流程: history_duration(entity=light.philips_cn_249518489_rwread_s_2_light, start=2026-08-01T00:00:00, end=2026-08-03T12:00:00, state=on)
+调用子流程: history_duration(entity=light.study_desk_lamp, start=2026-08-01T00:00:00, end=2026-08-03T12:00:00, state=on)
 ```
 
 - **原生节点逃逸（Phase 4，中风险）**：若只想在 DSL 里嵌一小段手写 NR 节点（如复合 switch 条件、JSONata 变换），可用 `原生节点:` 原语，例：
@@ -147,19 +147,19 @@ disable: true
 **① 多触发 OR 汇聚**（"有人 或 开门 → 都开灯"）：连写多行 `触发:`，彼此之间不夹动作。
 ```
 场景: 书房有人或开门开台灯
-触发: binary_sensor.0x00158d0001a2520d_motion on
-触发: binary_sensor.e4aaec34e80f_contact on
-动作: light.turn_on(light.philips_cn_249518489_rwread_s_2_light)
+触发: binary_sensor.0x00158d0000000001_motion on
+触发: binary_sensor.front_door_contact on
+动作: light.turn_on(light.study_desk_lamp)
 ```
 
 **② 数值条件 + 否则**（"光照度<10 且有人 → 开灯，否则不动"）：`取值:` 读光照度进 msg，`分支:` 用 `$number()` 数值比较。
 注意 motion 与 illuminance 是"书房人体传感器"这一个名字下的两个子实体，各自 resolve。
 ```
 场景: 书房暗且有人开台灯
-触发: binary_sensor.0x00158d0001a2520d_motion on
-取值: sensor.0x00158d0001a2520d_illuminance lux
+触发: binary_sensor.0x00158d0000000001_motion on
+取值: sensor.0x00158d0000000001_illuminance lux
 分支: $number(lux) < 10
-  动作: light.turn_on(light.philips_cn_249518489_rwread_s_2_light)
+  动作: light.turn_on(light.study_desk_lamp)
 否则:
   注释: 光线足够，不动作
 ```
@@ -167,16 +167,16 @@ disable: true
 **③ 工作日时间段触发**（"工作日 20:00-23:00 有人 → 开吊灯"）：`时间段:` 带星期限定；吊灯是 switch 域。
 ```
 场景: 工作日晚间有人开吊灯
-触发: binary_sensor.0x00158d0001a2520d_motion on
+触发: binary_sensor.0x00158d0000000001_motion on
 时间段: 工作日 20:00-23:00
-  动作: switch.turn_on(switch.lumi_cn_lumi_158d000239c546_aq1_on_p_3_1)
+  动作: switch.turn_on(switch.study_ceiling_lamp_p_3_1)
 ```
 
 **④ 开灯 + TTS 语音播报**（跨域：light 动作 + demo_notify 子流程）：
 ```
 场景: 书房有人开灯并播报
-触发: binary_sensor.0x00158d0001a2520d_motion on
-动作: light.turn_on(light.philips_cn_249518489_rwread_s_2_light)
+触发: binary_sensor.0x00158d0000000001_motion on
+动作: light.turn_on(light.study_desk_lamp)
 调用子流程: demo_notify(text=书房已有人，灯已打开, room=书房, level=一般)
 ```
 
@@ -184,16 +184,16 @@ disable: true
 ❌ 错误写法（裸写动作，条件被丢，闸门会判 `lint_error`）：
 ```
 场景: 书房暗才开灯
-触发: binary_sensor.0x00158d0001a2520d_motion on
-动作: light.turn_on(light.philips_cn_249518489_rwread_s_2_light)
+触发: binary_sensor.0x00158d0000000001_motion on
+动作: light.turn_on(light.study_desk_lamp)
 ```
 ✅ 正确写法（取值+分支+否则，条件成立才开）：
 ```
 场景: 书房暗才开灯
-触发: binary_sensor.0x00158d0001a2520d_motion on
-取值: sensor.0x00158d0001a2520d_illuminance lux
+触发: binary_sensor.0x00158d0000000001_motion on
+取值: sensor.0x00158d0000000001_illuminance lux
 分支: $number(lux) < 10
-  动作: light.turn_on(light.philips_cn_249518489_rwread_s_2_light)
+  动作: light.turn_on(light.study_desk_lamp)
 否则:
   注释: 光线够，不动作
 ```
