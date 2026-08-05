@@ -1595,7 +1595,12 @@ function sfBarkAction(s) {
   const title = ready
     ? "幂等安装 Bark 子流程到 Node-RED（已存在则跳过）"
     : "请先在「设置 → 连接配置 → Bark」填写 BARK_SERVER 与 BARK_KEY";
-  return ` <button class="btn sm" data-bark-install="${esc(s.key)}" ${ready ? "" : "disabled"} title="${title}">安装 Bark 子流程</button>`;
+  const status = ready
+    ? '<span class="meta" style="color:#28a745;margin-right:6px">✅ Bark 已配置</span>'
+    : '<span class="meta" style="color:#dc3545;margin-right:6px">⚠️ Bark 未配置</span>';
+  const disabledAttr = ready ? "" : "disabled";
+  const disabledStyle = ready ? "" : "opacity:0.5;cursor:not-allowed";
+  return ` ${status}<button class="btn sm" data-bark-install="${esc(s.key)}" ${disabledAttr} style="${disabledStyle}" title="${title}">安装 Bark 子流程</button>`;
 }
 
 async function installBarkSubflow(key) {
@@ -1609,16 +1614,33 @@ async function installBarkSubflow(key) {
   } catch (e) { toast("安装失败：" + e.message); }
 }
 // ── A1：Link API Tab（网关 HTTP 桥接：link_out / http_api）─────────────
-// 仅展示；配置表单（A2）/ 安装 AutoFlow API tab（A3）按钮在对应卡片接入。
+// A2：配置表单 / A3：一键安装「AutoFlow API」tab 到 NR（按节点 id 增量合并，不删旧节点）。
 async function loadLinkApis() {
   _sfView = "link_api";
   const v = $("#view-link_apis");
-  v.innerHTML = `<div class="view-head"><h2>Link API（网关 HTTP 桥接）</h2></div>
+  v.innerHTML = `<div class="view-head"><h2>Link API（网关 HTTP 桥接）</h2><button class="btn" id="la-install-tab" title="把已配置好的 Link API 增量合并到 NR 的 AutoFlow API tab">📦 安装到 Node-RED</button></div>
     <div class="row" style="gap:8px;margin:8px 0">
       <span class="meta" id="la-count"></span>
     </div>
     <div id="la-list"><div class="empty">加载中…</div></div>`;
+  $("#la-install-tab").onclick = installLinkApiTab;
   await refreshLinkApis();
+}
+
+async function installLinkApiTab() {
+  try {
+    const r = await api("POST", "/link-apis/install-tab", {});
+    if (!r.ok) {
+      const d = r.data || {};
+      if (Array.isArray(d.missing) && d.missing.length) {
+        const info = d.missing.map((m) => `${esc(m.title || m.name)}：缺少 ${m.missing.join("、")}`).join("；");
+        return toast("安装失败：" + (d.error || "配置不完整") + " — " + info);
+      }
+      return toast("安装失败：" + (d.error || r.status));
+    }
+    const d = r.data || {};
+    toast(`已更新 AutoFlow API tab：新增 ${d.nodes_added || 0} 个节点，总计 ${d.nodes_total || 0} 个。包含 ${(d.specs || []).join(", ")}`);
+  } catch (e) { toast("安装失败：" + e.message); }
 }
 async function refreshLinkApis() {
   try {
