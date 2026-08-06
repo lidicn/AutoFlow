@@ -11,13 +11,12 @@ AutoFlow Gateway — WebUI 后端（人类控制面）
 MCP 身份闸另由 mcp_server 的 ASGI 中间件独立强制（两者互不替代）。
 """
 import os
-import json
 import asyncio
 import secrets
 import hmac
 import re
 import tempfile
-from typing import Optional, Dict, Any
+from typing import Optional, Dict
 
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
@@ -34,7 +33,7 @@ from .device_guard import DeviceGuardStore
 from .audit import AuditStore
 from .subflows import introspect_nr_subflow, validate_subflow_registration
 from .api_config_store import ApiConfigStore
-from .api_specs import get_api_spec
+from .api_specs import ApiSpec, get_api_spec
 from . import connections
 
 # 人工抽查（spotcheck）与评测工作台（eval）已从网关剥离，迁移至 archive/agent-loop-migration/（C4）。
@@ -602,13 +601,20 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     # ── A2：Link API 配置表单持久化（方案 B：api_configs 表）──
     _ENV_PH_RE = re.compile(r"<([A-Z][A-Z0-9_]+)>")
 
-    def _config_fields_for_spec(spec) -> list:
-        """从 spec 的 url / headers / body_template 提取 <ENV_NAME> 占位符，
+    # spec 中会被嵌入生成节点、因而需要占位符替换的「表达式字段」。
+    # 推导(_config_fields_for_spec) 与替换(_effective_spec) 必须共用这份清单：
+    # 只推导不替换 → 用户被要求填一个永远不生效的字段，装出来的 flow 带着裸占位符。
+    # 注意不含 description/notes —— 那是给人看的文档，扫了会造出幽灵配置字段。
+    _SPEC_EXPR_FIELDS = ("url", "nr_body_template", "extract", "nr_assemble")
 
-        作为该 Link API 需用户填写的配置字段（单一真相源，避免手维护字段清单）。"""
+    def _config_fields_for_spec(spec) -> list:
+        """从 spec 的表达式字段 + headers 提取 <ENV_NAME> 占位符，
+
+        作为该 Link API 需用户填写的配置字段（单一真相源，避免手维护字段清单）。
+        A3(#179)：extract / nr_assemble 也会进 change 节点，故一并纳入扫描。"""
         names: list = []
         seen = set()
-        texts = [spec.url or "", spec.nr_body_template or ""]
+        texts = [getattr(spec, f, "") or "" for f in _SPEC_EXPR_FIELDS]
         for v in (spec.nr_headers or {}).values():
             texts.append(str(v))
         for text in texts:
@@ -929,15 +935,18 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             _af_tab_ledger_write(fid)
         return fid, matched
 
-    def _effective_spec(spec, config: dict) -> "ApiSpec":
-        """把 spec 的 url/headers/body_template 中 <ENV> 占位符替换为 api_configs 值。
+    def _effective_spec(spec, config: dict) -> ApiSpec:
+        """把 spec 表达式字段 + headers 中的 <ENV> 占位符替换为 api_configs 值。
 
+        覆盖面与 _config_fields_for_spec 严格一致（共用 _SPEC_EXPR_FIELDS），
+        否则会出现「要求用户填、但装进 NR 的节点里仍是裸占位符」的错位。
         返回替换后的 ApiSpec 副本（不改原 spec）；build_nr_tab_flows 据此生成真值节点。"""
         sub = lambda m: config.get(m.group(1), m.group(0))
-        url = _ENV_PH_RE.sub(sub, spec.url or "")
-        headers = {k: _ENV_PH_RE.sub(sub, str(v)) for k, v in (spec.nr_headers or {}).items()}
-        body = _ENV_PH_RE.sub(sub, spec.nr_body_template or "")
-        return _dc.replace(spec, url=url, nr_headers=headers, nr_body_template=body)
+        patch = {f: _ENV_PH_RE.sub(sub, getattr(spec, f, "") or "")
+                 for f in _SPEC_EXPR_FIELDS}
+        patch["nr_headers"] = {k: _ENV_PH_RE.sub(sub, str(v))
+                               for k, v in (spec.nr_headers or {}).items()}
+        return _dc.replace(spec, **patch)
 
     async def install_link_api_tab_endpoint(request: Request):
         """A3(#170)：安装「AutoFlow API」tab（id=af_api_tab）到 NR。

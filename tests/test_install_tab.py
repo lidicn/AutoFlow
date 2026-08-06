@@ -369,5 +369,103 @@ class TestInstallTab(unittest.TestCase):
         self.assertNotIn(USER_TAB_ID, fake.get_flow_calls)
 
 
+@unittest.skipUnless(_HAVE_WEB_DEPS, "A3(#179) 测试需要 starlette。")
+class TestExprFieldSubstitution(unittest.TestCase):
+    """A3(#179) 替换侧：extract / nr_assemble 的 <ENV> 必须真的被替换掉。
+
+    推导侧（config_fields）在 test_link_api_config.py 覆盖。两侧必须成对——
+    只推导不替换的话，用户被要求填了字段，装进 NR 的 change 节点里却仍是裸
+    <ENV>，JSONata 求值直接炸，比不推导更糟。
+    """
+
+    SPEC_NAME = "t179_expr_probe"
+    ENTRY = "t179_in"
+    CFG = {"EXTRACT_KEY": "temp_c", "ASSEMBLE_ROOM": "书房", "HDR_TOKEN": "hdrTOK"}
+
+    def setUp(self):
+        from autoflow_gateway import api_specs as _as
+        self._as = _as
+        self.spec = _as.ApiSpec(
+            name=self.SPEC_NAME,
+            title="占位符探针",
+            kind="link_out",
+            url="https://example.invalid/probe",   # url 里故意不放占位符
+            method="POST",
+            entry_link_id=self.ENTRY,
+            nr_downstream_link_id="t179_downstream",
+            extract="payload.<EXTRACT_KEY>",
+            nr_assemble='{"room": "<ASSEMBLE_ROOM>"}',
+            nr_headers={"Authorization": "Bearer <HDR_TOKEN>"},
+            nr_tab=True,
+        )
+        _as.API_SPECS.append(self.spec)
+
+        self.tmp = tempfile.mkdtemp(prefix="af_expr_sub_")
+        self.cfg = GatewayConfig(data_dir=self.tmp, env="staging")
+        self.gw = Gateway(self.cfg)
+        self.app = build_webui_asgi(self.cfg, gateway=self.gw)
+        self.client = TestClient(self.app)
+        self.client.__enter__()
+
+    def tearDown(self):
+        self.client.__exit__(None, None, None)
+        try:
+            self._as.API_SPECS.remove(self.spec)
+        except ValueError:
+            pass
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _set_cfg(self, name, d):
+        st = ApiConfigStore(config=SimpleNamespace(data_dir=self.tmp))
+        try:
+            st.set_api_config(name, d)
+        finally:
+            st.close()
+
+    def test_extract_and_assemble_placeholders_substituted_in_nodes(self):
+        self._set_cfg("llm_caiyun_weather", CAIYUN_CFG)
+        self._set_cfg("anysearch_batch", ANYSEARCH_CFG)
+        self._set_cfg(self.SPEC_NAME, self.CFG)
+        fake = FakeNRClients()
+        self.gw.nr._client = fake
+        self.gw.nr._client_rev = getattr(self.cfg, "connection_revision", 0)
+
+        r = self.client.post("/api/link-apis/install-tab", json={})
+        self.assertEqual(r.status_code, 200, r.text)
+
+        nodes = fake.flows[FakeNRClients.NEW_TAB_ID]["nodes"]
+        by_id = {n["id"]: n for n in nodes}
+
+        extract = by_id[f"{self.ENTRY}_extract"]
+        self.assertEqual(extract["rules"][0]["to"], "payload.temp_c")
+        self.assertNotIn("<EXTRACT_KEY>", extract["rules"][0]["to"])
+
+        assemble = by_id[f"{self.ENTRY}_assemble"]
+        self.assertEqual(assemble["rules"][0]["to"], '{"room": "书房"}')
+        self.assertNotIn("<ASSEMBLE_ROOM>", assemble["rules"][0]["to"])
+
+        # 全 tab 兜底扫描：任何节点的任何字符串都不该残留裸 <ENV> 占位符
+        import json as _json
+        blob = _json.dumps(nodes, ensure_ascii=False)
+        import re as _re
+        leftovers = sorted(set(_re.findall(r"<([A-Z][A-Z0-9_]+)>", blob)))
+        self.assertEqual(leftovers, [], f"生成节点残留未替换占位符：{leftovers}")
+
+    def test_missing_expr_config_blocks_install(self):
+        """extract 里的字段没填 → 必须 400 拦住，不能带着裸占位符装进 NR。"""
+        self._set_cfg("llm_caiyun_weather", CAIYUN_CFG)
+        self._set_cfg("anysearch_batch", ANYSEARCH_CFG)
+        self._set_cfg(self.SPEC_NAME, {"HDR_TOKEN": "hdrTOK"})  # 故意缺两个
+        fake = FakeNRClients()
+        self.gw.nr._client = fake
+        self.gw.nr._client_rev = getattr(self.cfg, "connection_revision", 0)
+
+        r = self.client.post("/api/link-apis/install-tab", json={})
+        self.assertEqual(r.status_code, 400)
+        miss = next(m for m in r.json()["missing"] if m["name"] == self.SPEC_NAME)
+        self.assertEqual(set(miss["missing"]), {"EXTRACT_KEY", "ASSEMBLE_ROOM"})
+        self.assertEqual(fake.create_calls, [], "被 400 拦下时不应写 NR")
+
+
 if __name__ == "__main__":
     unittest.main()

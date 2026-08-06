@@ -134,5 +134,80 @@ class TestLinkApiConfig(unittest.TestCase):
         self.assertEqual(r.status_code, 404)
 
 
+@unittest.skipUnless(_HAVE_WEB_DEPS, "A3 测试需要 starlette。")
+class TestExprFieldPlaceholders(unittest.TestCase):
+    """A3(#179)：extract / nr_assemble 里的 <ENV> 也要被推导为配置字段。
+
+    这两个字段会被 build_nr_tab_flows 写进 change 节点（api_specs.py 的
+    `to: spec.extract` / `to: spec.nr_assemble`），所以里面的占位符不替换
+    就会带着裸 <ENV> 进 NR。现网 spec 暂未用到，故用合成 spec 覆盖。
+    """
+
+    SPEC_NAME = "t179_expr_probe"
+
+    def setUp(self):
+        from autoflow_gateway import api_specs as _as
+        self._as = _as
+        # 合成 spec：url 无占位符，占位符只藏在 extract / nr_assemble / headers。
+        # 若推导只扫 url+body+headers，EXTRACT_KEY / ASSEMBLE_ROOM 就会漏掉。
+        self.spec = _as.ApiSpec(
+            name=self.SPEC_NAME,
+            title="占位符探针",
+            kind="link_out",
+            url="https://example.invalid/probe",
+            entry_link_id="t179_in",
+            nr_downstream_link_id="t179_out",
+            extract="payload.<EXTRACT_KEY>",
+            nr_assemble='{"room": "<ASSEMBLE_ROOM>"}',
+            nr_headers={"Authorization": "Bearer <HDR_TOKEN>"},
+            nr_tab=True,
+        )
+        _as.API_SPECS.append(self.spec)
+
+        self.tmp = tempfile.mkdtemp(prefix="af_expr_")
+        self.cfg = GatewayConfig(data_dir=self.tmp, env="staging")
+        self.gw = Gateway(self.cfg)
+        self.app = build_webui_asgi(self.cfg, gateway=self.gw)
+        self.client = TestClient(self.app)
+        self.client.__enter__()
+
+    def tearDown(self):
+        self.client.__exit__(None, None, None)
+        try:
+            self._as.API_SPECS.remove(self.spec)
+        except ValueError:
+            pass
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_extract_and_assemble_placeholders_become_config_fields(self):
+        r = self.client.get(f"/api/link-apis/{self.SPEC_NAME}/config")
+        self.assertEqual(r.status_code, 200)
+        fields = set(r.json()["config_fields"])
+        self.assertIn("EXTRACT_KEY", fields, "extract 里的 <ENV> 未被推导为配置字段")
+        self.assertIn("ASSEMBLE_ROOM", fields, "nr_assemble 里的 <ENV> 未被推导为配置字段")
+        self.assertIn("HDR_TOKEN", fields)  # 原有 headers 覆盖不能回退
+        self.assertEqual(fields, {"EXTRACT_KEY", "ASSEMBLE_ROOM", "HDR_TOKEN"})
+
+    def test_declared_expr_fields_are_writable(self):
+        """推导出来就必须写得进去，否则用户永远填不上这个字段（越权过滤用同一份清单）。"""
+        r = self.client.put(
+            f"/api/link-apis/{self.SPEC_NAME}/config",
+            json={"config": {"EXTRACT_KEY": "temp_c", "ASSEMBLE_ROOM": "书房"}},
+        )
+        self.assertEqual(r.status_code, 200)
+        g = self.client.get(f"/api/link-apis/{self.SPEC_NAME}/config").json()
+        self.assertEqual(g["config"]["EXTRACT_KEY"], "temp_c")
+        self.assertEqual(g["config"]["ASSEMBLE_ROOM"], "书房")
+
+    def test_description_notes_not_scanned(self):
+        """description/notes 是给人看的文档，扫它会造出幽灵配置字段。"""
+        self.spec.description = "示例里会写 <SOME_TOKEN> 这种占位符做说明"
+        self.spec.notes = "另见 <ANOTHER_ONE>"
+        fields = set(self.client.get(
+            f"/api/link-apis/{self.SPEC_NAME}/config").json()["config_fields"])
+        self.assertNotIn("SOME_TOKEN", fields)
+        self.assertNotIn("ANOTHER_ONE", fields)
+
+
 if __name__ == "__main__":
     unittest.main()
