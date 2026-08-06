@@ -93,3 +93,8 @@ scan_*.py
 validate_flows.py
 build_capmatrix_flow.py
 capmatrix_flow*.json
+
+# ===== REG 矩阵真实 fixture（隐私，永不 push GitHub）=====
+# 3 个 REG tab 导出 JSON / 真实 HA 设备拓扑，含潜在令牌，绝不可进版本库。
+# 活存档在 1990 测试实例；本地仅 gitignored 导出，容器重建后重新导入。
+tests/fixtures_local/
