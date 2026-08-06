@@ -68,6 +68,9 @@ _archive_restarts/
 # A4 归档区：根目录临时脚本与一次性 flow 导出移入此处（不进版本库）
 scratch/
 
+# 交付卡 / PR 正文（含真实 NAS IP、部署路径，误提交会破 P-2 门禁，不进版本库）
+artifacts/
+
 # 深层历史调试目录（build_subflows.py 等 dev 脚本，不随发布版分发）。
 # R2 起唯一的运行时依赖 subflows_built.json 已迁至 data/subflows/nr_defs/，
 # 此处不再有需白名单放行的文件（少一处「被排除目录内捞文件」的脆弱模式）。
