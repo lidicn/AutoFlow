@@ -9,6 +9,7 @@ commands / decisions / proposals 同库（autoflow.db），复用 WAL + busy_tim
 访问器：
 - get_api_config(name) -> dict
 - set_api_config(name, config_dict)
+- delete_api_config(name) -> bool
 - list_api_configs() -> dict[name -> config_dict]
 """
 from __future__ import annotations
@@ -87,6 +88,27 @@ class ApiConfigStore:
             (name, json.dumps(config, ensure_ascii=False), now),
         )
         self._conn.commit()
+
+    def delete_api_config(self, name: str) -> bool:
+        """删除某 spec 的配置行（#182 Link API 删除）。
+
+        幂等：不存在时返回 False 而非抛异常 —— 调用方（DELETE 端点）需要区分
+        「真的删掉了配置」与「本来就没配过」，但两种情况都不该报错。
+
+        Args:
+            name: spec 名称（对应 ApiSpec.name）。
+        Returns:
+            True=确实删掉了一行；False=该 spec 本来就没有配置行。
+        Raises:
+            ValueError: name 为空。
+        """
+        if not name:
+            raise ValueError("spec_name 必填")
+        cur = self._conn.execute(
+            "DELETE FROM api_configs WHERE spec_name=?", (name,)
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
 
     def list_api_configs(self) -> Dict[str, Dict[str, Any]]:
         """列出所有已配置项 -> {spec_name: config_dict}。"""

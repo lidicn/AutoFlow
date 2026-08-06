@@ -52,6 +52,7 @@ class FakeNRClients:
     - get_flow：未命中抛异常（等价 404），**不返回空壳** —— 这是 #177 的照妖镜；
     - create_or_update_flow：flow 已存在走 PUT 原地更新；不存在则模拟 POST /flow，
       忽略调用方传的 id、自行分配真实 id 并把节点 z 改写为该真实 id；
+    - update_flow：纯 PUT /flow/:id（#182 删除路径用），不存在即 404，绝不隐式创建；
     - list_flows：返回 GET /flows 那样的扁平数组（tab 对象 + 所有节点）。
     """
 
@@ -61,6 +62,7 @@ class FakeNRClients:
         self.flows = {}            # flow_id -> flow_data
         self.get_flow_calls = []   # 每次 get_flow 的 flow_id
         self.create_calls = []     # (flow_id, force, allow_prod)
+        self.update_calls = []     # (flow_id, force, allow_prod) —— PUT 路径（#182）
         self.list_flows_calls = 0
         self._seq = 0
 
@@ -91,6 +93,14 @@ class FakeNRClients:
         nodes = [dict(copy.deepcopy(n), z=real) for n in flow_data.get("nodes", [])]
         self.flows[real] = {**copy.deepcopy(flow_data), "id": real, "nodes": nodes}
         return {"id": real, "created": True, "raw": None}
+
+    def update_flow(self, flow_id, flow_data, force=False, allow_prod=False):
+        """PUT /flow/:id 原地更新（#182 删除路径走这条；不存在则等价 404）。"""
+        self.update_calls.append((flow_id, force, allow_prod))
+        if flow_id not in self.flows:
+            raise RuntimeError(f"HTTP 404 Not Found: /flow/{flow_id}")
+        self.flows[flow_id] = {**copy.deepcopy(flow_data), "id": flow_id}
+        return {"id": flow_id, "created": False, "raw": None}
 
     # ── 断言辅助 ──
     def tabs_named(self, label):

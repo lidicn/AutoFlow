@@ -1051,6 +1051,133 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             "detail": res,
         })
 
+    def _derived_node_ids(spec, tab_id: str) -> set:
+        """该 spec 在「AutoFlow API」tab 里派生出的节点 id 集合（#182）。
+
+        id 规则不在这里复刻，而是直接调 build_nr_tab_flows 生成一遍取 id ——
+        规则只有一处真相源（api_specs.build_nr_tab_flows），避免删除逻辑与安装
+        逻辑对 id 命名各自为政，改一处漏一处就会留孤儿节点或误删。
+
+        Args:
+            spec: ApiSpec。
+            tab_id: 目标 tab id（只影响节点的 z 字段，不影响 id）。
+        Returns:
+            节点 id 集合；spec 不生成 NR 流时返回空集。
+        """
+        from .api_specs import build_nr_tab_flows
+        if not spec.needs_nr_flow():
+            return set()
+        return {n.get("id") for n in build_nr_tab_flows(tab_id, specs=[spec])
+                if n.get("id")}
+
+    async def delete_link_api_endpoint(request: Request):
+        """#182：删除（卸载）一个 Link API。
+
+        语义：Link API 是「网关声明的桥接能力 + 用户填的运行配置 + NR tab 里派生
+        的执行链」三件套。删除 = 拆掉后两件（用户资产），spec 声明本身保留在
+        api_specs.json（代码级数据，随版本库走，供日后重装），与 self_use 一贯做法一致。
+
+        步骤（顺序有讲究）：
+        1. 未知 name → 404；self_use 能力 → 403（与配置端点同口径）；
+        2. 先清 NR：定位真实 tab（台账+扫描），移除本 spec 派生的节点后 PUT 回写
+           （allow_prod=True）。**NR 写失败即 502 且本地状态一律不动** —— 宁可重试，
+           也不能出现「配置已删、NR 里还挂着带旧 token 的孤儿链」；
+        3. 再清本地：api_configs 配置行 + subflow_registry 登记（前端列表源自后者，
+           删掉它面板才会真的少一条）。
+
+        跨 spec 保护：若两个 spec 的 entry_link_id 撞车，只删「仅本 spec 会生成」
+        的 id，其余留给它的主人。
+
+        Returns:
+            200 {ok, name, config_removed, registry_removed, nodes_removed,
+                 node_ids, tab_id, nr_skipped}
+        Raises:
+            404 未知 Link API；403 self_use；400 该 key 不是 Link API；502 NR 写失败。
+        """
+        from .api_specs import API_SPECS
+        name = request.path_params.get("name") or ""
+        spec = get_api_spec(name)
+        try:
+            meta = await asyncio.to_thread(gw.tasks.get_subflow_meta, name)
+        except Exception as e:
+            return _js({"ok": False, "error": f"读取子流程元数据失败：{e}"}, 502)
+        if spec is None and not meta:
+            return _js({"ok": False, "error": f"未知 Link API: {name}"}, 404)
+        if spec is not None and getattr(spec, "self_use", False):
+            return _js({"ok": False,
+                        "error": "self_use 能力（网关自用）不可删除"}, 403)
+        if meta and (meta.get("kind") or "subflow") not in ("link_out", "http_api"):
+            return _js({"ok": False,
+                        "error": f"{name} 不是 Link API（kind={meta.get('kind')}），"
+                                 f"请在「子流程」Tab 删除"}, 400)
+
+        # ── 1) 清 NR：只删本 spec 独有的派生节点 ──
+        nodes_removed, removed_ids, tab_id, nr_skipped = 0, [], None, True
+        if spec is not None and spec.needs_nr_flow():
+            others = [s for s in API_SPECS
+                      if s.name != name and s.needs_nr_flow()
+                      and not getattr(s, "self_use", False)]
+            # 与 install-tab 同口径：只拿非 self_use 的入口 id 作重名 tab 的挑真身依据，
+            # 免得豆包（用户自用 tab）的入口把解析引到人家的流程上。
+            entry_ids = {(s.entry_link_id or f"{s.name}_in")
+                         for s in API_SPECS
+                         if s.needs_nr_flow() and not getattr(s, "self_use", False)}
+            tab_id, _matched = await asyncio.to_thread(
+                _resolve_af_api_tab_id, entry_ids)
+            if tab_id:
+                probe = tab_id or AF_API_TAB_SEED_ID
+                own = _derived_node_ids(spec, probe)
+                for s in others:                      # entry_link_id 撞车保护
+                    own -= _derived_node_ids(s, probe)
+                try:
+                    existing = await asyncio.to_thread(gw.nr.get_flow, tab_id)
+                except Exception:
+                    existing = None
+                exist_nodes = ((existing or {}).get("nodes", [])
+                               if isinstance(existing, dict) else [])
+                kept = [n for n in exist_nodes if n.get("id") not in own]
+                removed_ids = [n.get("id") for n in exist_nodes
+                               if n.get("id") in own]
+                nodes_removed = len(exist_nodes) - len(kept)
+                if nodes_removed:
+                    flow_data = {
+                        "id": tab_id,
+                        "label": (existing or {}).get("label") or AF_API_TAB_LABEL,
+                        "nodes": kept,
+                        "disabled": bool((existing or {}).get("disabled", False)),
+                        "info": (existing or {}).get("info", False),
+                    }
+                    try:
+                        await asyncio.to_thread(
+                            gw.nr.update_flow_nodes, tab_id, flow_data, True, True)
+                    except Exception as e:
+                        return _js({"ok": False,
+                                    "error": f"清理 NR 派生节点失败（本地配置未动）：{e}"},
+                                   502)
+                    nr_skipped = False
+
+        # ── 2) 清本地：配置 + 注册表登记 ──
+        try:
+            config_removed = await asyncio.to_thread(
+                api_configs.delete_api_config, name)
+        except Exception as e:
+            return _js({"ok": False, "error": f"删除配置失败：{e}"}, 502)
+        registry_removed = False
+        if meta:
+            r = await asyncio.to_thread(gw.tasks.delete_subflow, name)
+            if not r.get("ok"):
+                return _js({"ok": False, "error": r.get("error")}, 400)
+            registry_removed = True
+        return _js({
+            "ok": True, "name": name,
+            "config_removed": config_removed,
+            "registry_removed": registry_removed,
+            "nodes_removed": nodes_removed,
+            "node_ids": removed_ids,
+            "tab_id": tab_id,
+            "nr_skipped": nr_skipped,
+        })
+
     # ── 版本同步已剥离为独立 CLI（C3 / B8）──
     # 后端逻辑保留在 autoflow_gateway/sync.py，由命令行脚本调用；
     # WebUI 不再承载版本同步面板。
@@ -1294,6 +1421,12 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         # A3：安装「AutoFlow API」tab 到 NR（增量合并，绝不整体覆盖）
         Route("/api/link-apis/install-tab", install_link_api_tab_endpoint,
               methods=["POST"]),
+        # #182：删除（卸载）Link API —— 清配置 + 清 tab 内派生节点 + 取消登记。
+        # 必须排在 install-tab 之后：`{name}` 会字面匹配 "install-tab"，
+        # Starlette 靠方法不同（POST vs DELETE）走 partial-match 继续找，
+        # 但顺序摆对更不容易在日后加 POST 时踩坑。
+        Route("/api/link-apis/{name}", delete_link_api_endpoint,
+              methods=["DELETE"]),
 
         # 静态
         Route("/", index, methods=["GET"]),

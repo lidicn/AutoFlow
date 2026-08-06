@@ -1679,10 +1679,37 @@ function renderLinkApis() {
       </div>
       <div class="desc">DSL 调用：<code>调用子流程: ${esc(s.key)}(...)</code></div>
       <div class="desc">前置参数 ${ins} 项 ｜ ${idLine}</div>
-      <div class="actions"><button class="btn sm" data-la-cfg="${esc(s.key)}" title="填写 token / 坐标等运行时参数">⚙️ 配置</button></div>
+      <div class="actions">
+        <button class="btn sm" data-la-cfg="${esc(s.key)}" title="填写 token / 坐标等运行时参数">⚙️ 配置</button>
+        <button class="btn sm danger" data-la-del="${esc(s.key)}" title="清空本机配置并移除 AutoFlow API tab 里由它派生的节点">🗑️ 删除</button>
+      </div>
     </div>`;
   }).join("");
   $$("[data-la-cfg]").forEach((b) => (b.onclick = () => showLinkApiConfig(b.dataset.laCfg)));
+  $$("[data-la-del]").forEach((b) => (b.onclick = () => deleteLinkApi(b.dataset.laDel)));
+}
+
+// ── #182：删除（卸载）Link API ──
+// 语义要跟用户讲清楚：删的是「你的配置 + NR 里那条链」，能力声明本身留在网关，
+// 日后想用还能重新配置+安装。不说清楚，用户会以为能力被永久拆了而不敢点。
+async function deleteLinkApi(key) {
+  const s = _sfList.find((x) => x.key === key);
+  const title = s ? (s.title || key) : key;
+  if (!confirm(
+    `确定删除 Link API「${title}」？\n`
+    + "\n将清空它的本机配置（token 等），并移除 Node-RED「AutoFlow API」tab 中"
+    + "由它派生的节点。\n其它 Link API 的链路与你自己的流程不受影响；"
+    + "能力声明保留在网关，之后可重新配置并安装回去。")) return;
+  try {
+    const r = await api("DELETE", "/link-apis/" + encodeURIComponent(key));
+    if (!r.ok) return toast("删除失败：" + (r.data?.error || r.status));
+    const d = r.data || {};
+    const nrPart = d.nodes_removed
+      ? `，已从 tab ${d.tab_id || "?"} 移除 ${d.nodes_removed} 个节点`
+      : "（NR 上无派生节点，无需改动）";
+    toast(`已删除 ${title}${nrPart}。`);
+    await refreshLinkApis();
+  } catch (e) { toast("删除失败：" + e.message); }
 }
 
 // ── A2：Link API 配置表单（方案 B：api_configs 表持久化）──
