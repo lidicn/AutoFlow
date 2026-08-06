@@ -1,7 +1,7 @@
 """AutoFlow 预建子流程注册表（P3 子流程库 #1/#2）。
 
 来源：直接取自 NR 1990 真实 flow（见 docs/dsl_design.md §9）。
-- tts_speak      = 智能语音播报队列 (e70a201b5f004927)，最复杂且被多场景复用。
+- demo_notify   = 示例通知（link_out 教学示例，参数形状继承历史 TTS 播报规格）。
 
 设计铁律（§18.2/§9.3）：状态ful 基础设施（队列/互斥/计时循环/全局状态）**不属于 DSL 表达对象**，
 由这里 hand-build 为预建子流程，agent 只"按名调用"不"重建"。
@@ -12,7 +12,7 @@
 - type="subflow"   → 生成一个 `subflow` 实例节点，引用已部署的 subflow type。
   当前范例是 bark_push；历史查询 history_* 4 个能力同样走此模式（请求/响应，
   子流程经输出口把答案透传回 msg.payload 供下游分支）。与 link_out 的
-  fire-and-forget 单向模型本质不同（天气/AnySearch/tts_speak 不返回值）。
+  fire-and-forget 单向模型本质不同（天气/AnySearch/demo_notify 不返回值）。
 """
 
 from __future__ import annotations
@@ -53,6 +53,11 @@ class SubflowSpec:
     # 来源：managed（网关预置，参数契约权威，调用方传参严格校验）
     #       imported（用户从 NR 自省导入，input_schema 为 best-effort 推断，传参宽松）
     source: str = "managed"
+    # 是否随网关启动 seed 进用户注册表（WebUI 默认面板）。
+    # preload=False 的子流程仍注册在 SUBFLOWS（编译器/dsl_help 可见、可作测试基线、
+    # 用户可从示例主动导入），但不在全新/重置用户的默认预置面板出现。
+    # 例：demo_notify 是 link_out 编译路径的教学示例，注册但不预载。
+    preload: bool = True
 
     def resolve_args(self, raw: dict[str, str]) -> dict[str, Any]:
         """合并默认值、类型转换、枚举校验，返回规范化入参。
@@ -258,22 +263,28 @@ HISTORY_AGGREGATE_SUBFLOW_ID = "af_hist_aggregate"
 
 
 SUBFLOWS: dict[str, SubflowSpec] = {
-    "tts_speak": SubflowSpec(
-        name="tts_speak",
-        title="智能语音播报队列",
-        call={"type": "link_out", "entry_link_id": TTS_ENTRY_LINK_ID},
-        description="队列化 TTS 播报：全局锁防并发、10 条上限去重、优先级(P1 强制全屋且跳夜间/过期)、"
-        "夜间静默(23:00–07:00)、按文本长度算时长、多房间→设备 notify 映射、音量三档。",
+    # ── demo_notify：link_out 编译路径的教学示例（#181 注册进 SUBFLOWS，#183 标记 preload=False）──
+    # 参数形状与历史 TTS 播报规格完全一致（既有测试/golden fixture 经机械重命名即可继续作回归基线）。
+    # 注册但不预载：编译器 / dsl_help 可见、可作测试基线、用户可从示例主动导入；
+    # 但全新/重置用户的默认预置面板不出现（个人 TTS 队列 link 不应作为默认功能）。
+    # entry_link_id 指向 TTS 队列入口（与历史 TTS 播报同一真实下游 b595563939283231）。
+    "demo_notify": SubflowSpec(
+        name="demo_notify",
+        title="示例通知（link_out 演示）",
+        call={"type": "link_out", "entry_link_id": DEMO_NOTIFY_ENTRY_LINK_ID},
+        description="【示例子流程，非产品功能】仅用于演示『调用子流程 → 生成 change(设参) + link out』"
+                    "的 link_out 编译路径。entry_link_id 指向 TTS 队列入口 b595563939283231。"
+                    "生产请改用 imported 子流程或教学导入（bark_push / anysearch 等）。",
         params={
-            "text": Param("text", required=True, desc="播报文本（announce 模式必填）"),
+            "text": Param("text", required=True, desc="通知文本（必填）"),
             "room": Param(
                 "room", required=False, default="default",
-                desc="播报房间；default=书房+客厅。取值见 notes。",
+                desc="通知房间；default=书房+客厅。取值见 notes。",
             ),
             "level": Param(
                 "level", required=False, default="一般", type="str",
                 enum=["一般", "重要", "警告"],
-                desc="音量档位：一般30%/重要50%/警告80%（与 volume 二选一）",
+                desc="音量/重要档位：一般30%/重要50%/警告80%（与 volume 二选一）",
             ),
             "volume": Param("volume", required=False, default=None, type="int",
                             desc="手动音量 0-100，优先级高于 level"),
@@ -281,15 +292,19 @@ SUBFLOWS: dict[str, SubflowSpec] = {
                              desc="优先级 1 最高，强制全屋并跳过夜间/过期"),
             "mode": Param("mode", required=False, default="announce", type="str",
                           enum=["announce", "command"],
-                          desc="announce=播报文本；command=执行文本指令(小爱)"),
+                          desc="announce=播报文本；command=执行文本指令"),
             "message": Param("message", required=False, default=None,
                              desc="command 模式的指令文本"),
         },
         notes=(
+            "【示例】参数形状与历史 TTS 播报规格完全一致，以便既有测试/golden fixture 经机械重命名即可继续作为"
+            "link_out 编译路径的回归基线。生产请改用 imported 子流程或教学导入。"
             "room 取值：default / 客厅 / 房间 / 卧室 / 书房 / 卫生间 / 主卧室 / 主卧室浴室 / 全屋。"
-            "⚠️ 真实 weigh flow 曾误用 room:'all'，正确值是 '全屋'，已在此规格纠正。"
-            "level 与 volume 同时给时以 volume 为准。"
         ),
+        param_style="payload",
+        positional=None,
+        source="managed",
+        preload=False,
     ),
 
     "bark_push": SubflowSpec(
@@ -791,7 +806,7 @@ def validate_subflow_registration(key, nr_subflow_id, source_type="imported",
 
 
 # 网关预置、需在注册表登记的「subflow 实例型」子流程（NR 子流程实例，需 nr_subflow_id）。
-# link_out 型能力（tts_speak / apisay / weather / anysearch）不再排除，
+# link_out 型能力（demo_notify / apisay / weather / anysearch）不再排除，
 # 见 seed_managed_subflows：它们以 kind=link_out 纳入治理（fire-and-forget，网关发 link out
 # 到 entry_link_id，无 NR 子流程实例，但仍可在 WebUI 查看入参与状态）。
 _MANAGED_SUBFLOW_KEYS = (
@@ -812,7 +827,7 @@ def seed_managed_subflows(store) -> dict:
 
     覆盖两类：
       - subflow 实例型（_MANAGED_SUBFLOW_KEYS：bark_push / history_* 等），需 nr_subflow_id；
-      - link_out 型（SUBFLOWS 中 call.type=="link_out" 的能力：tts_speak /
+      - link_out 型（SUBFLOWS 中 call.type=="link_out" 的能力：demo_notify /
         apisay / weather / anysearch），网关只发 link out 到 entry_link_id，无 NR 子流程实例。
     仅 seed 未在表中的 key（已存在则跳过，保护用户可能手动改过的 status / input_schema /
     title）。返回 {ok, seeded, skipped}。运行时机：网关启动时（Gateway.__init__ 注入 store 后）。
@@ -823,6 +838,9 @@ def seed_managed_subflows(store) -> dict:
     for key in _MANAGED_SUBFLOW_KEYS:
         spec = SUBFLOWS.get(key)
         if spec is None:
+            continue
+        # preload=False 的示例（如 demo_notify）注册但不随启动预载到用户面板
+        if spec.preload is False:
             continue
         seen.add(key)
         if store.get_subflow_meta(key):
@@ -844,6 +862,9 @@ def seed_managed_subflows(store) -> dict:
     for key, spec in SUBFLOWS.items():
         call = spec.call or {}
         if call.get("type") != "link_out":
+            continue
+        # preload=False 的示例（如 demo_notify）注册但不随启动预载到用户面板
+        if spec.preload is False:
             continue
         if key in seen:
             continue

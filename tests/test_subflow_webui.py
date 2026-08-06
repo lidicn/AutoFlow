@@ -3,9 +3,12 @@
 """WebUI 子流程注册表端点单测（#579，离线 starlette TestClient）。
 
 验证：
-  - GET  /api/subflows        → 返回网关 seed 的 9 条 managed（5 subflow：bark_push + 4 history；4 link_out）
+  - GET  /api/subflows        → 返回网关 seed 且「产品可见」的 managed 条目
+    （5 subflow：bark_push + 4 history；外加 preload 不为 False 且非 self_use 的 link_out）
   - POST /api/subflows/import → 自省（离线 stub）+ 注册，列表新增 imported 一条
 不触真实 NR/HA；introspect_nr_subflow 以离线 stub 替换。
+
+⚠️ 计数一律从 SUBFLOWS 动态推导，不硬编码 —— 新增/下线能力时测试自动跟随（#183）。
 """
 import os
 import sys
@@ -24,10 +27,32 @@ from autoflow_gateway import webui as webui_mod
 from autoflow_gateway.subflows import SUBFLOWS
 
 LINKOUT_KEYS = {k for k, s in SUBFLOWS.items() if (s.call or {}).get("type") == "link_out"}
+
+
+def _is_self_use(key: str) -> bool:
+    """该 key 对应的 api_spec 是否标记 self_use（网关自用，不进产品列表）。"""
+    from autoflow_gateway.api_specs import get_api_spec
+    spec = get_api_spec(key)
+    return bool(spec is not None and getattr(spec, "self_use", False))
+
+
+# GET /api/subflows 可见的 link_out：
+#   1) 注册在 SUBFLOWS 且 preload 不为 False —— demo_notify 注册但 preload=False（#183），
+#      编译器/dsl_help 可见，但不随启动 seed 进用户面板；
+#   2) 且 api_spec 未标记 self_use —— 如 llm_doubao_say 是网关自用能力，
+#      seed 进注册表但被 list_subflows 过滤（A1/A4 硬约束）。
+# 两条都从单一真相源推导，避免硬编码计数随能力增减漂移。
+VISIBLE_LINKOUT_KEYS = {
+    k for k, s in SUBFLOWS.items()
+    if (s.call or {}).get("type") == "link_out"
+    and getattr(s, "preload", True) is not False
+    and not _is_self_use(k)
+}
 SUBFLOW_KEYS = {
     "bark_push", "history_state_at", "history_occurred",
     "history_duration", "history_aggregate",
 }
+VISIBLE_COUNT = len(SUBFLOW_KEYS) + len(VISIBLE_LINKOUT_KEYS)
 
 try:
     from starlette.testclient import TestClient
@@ -76,9 +101,9 @@ class TestSubflowWebUI(unittest.TestCase):
         r = self.client.get("/api/subflows")
         self.assertEqual(r.status_code, 200)
         body = r.json()
-        self.assertEqual(body["count"], 9)    # 5 subflow + 4 link_out
+        self.assertEqual(body["count"], VISIBLE_COUNT)  # 5 subflow + 可见 link_out
         keys = {s["key"] for s in body["subflows"]}
-        self.assertEqual(keys, SUBFLOW_KEYS | LINKOUT_KEYS)
+        self.assertEqual(keys, SUBFLOW_KEYS | VISIBLE_LINKOUT_KEYS)
         for s in body["subflows"]:
             self.assertEqual(s["source_type"], "managed")
             self.assertEqual(s["status"], "active")
@@ -103,9 +128,9 @@ class TestSubflowWebUI(unittest.TestCase):
         self.assertEqual(body["key"], "my_dummy")
         # 自省结果回传
         self.assertEqual(body["introspect"]["nr_subflow_id"], "sf_dummy_99")
-        # 列表新增 imported 一条（共 10）
+        # 列表新增 imported 一条
         lst = self.client.get("/api/subflows").json()
-        self.assertEqual(lst["count"], 10)
+        self.assertEqual(lst["count"], VISIBLE_COUNT + 1)
         imported = [s for s in lst["subflows"] if s["key"] == "my_dummy"]
         self.assertEqual(len(imported), 1)
         m = imported[0]

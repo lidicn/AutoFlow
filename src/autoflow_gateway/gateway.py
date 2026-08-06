@@ -1451,9 +1451,9 @@ class Gateway:
                     "场景: 书房入户播报\n"
                     "触发: <发现的传感器 entity_id> on\n"
                     "动作: light.turn_on(<发现的灯 entity_id>)\n"
-                    "调用子流程: tts_speak(text=欢迎回家, room=书房, level=一般)"
+                    "调用子流程: demo_notify(text=欢迎回家, room=书房, level=一般)"
                 ),
-                "expected_postconditions_json_example": '[{"entity_id":"<灯 entity_id>","state":"on"},{"subflow":"tts_speak"}]',
+                "expected_postconditions_json_example": '[{"entity_id":"<灯 entity_id>","state":"on"},{"subflow":"demo_notify"}]',
             },
             "help": "语法/子流程随时调 autoflow_dsl_help()。",
         }
@@ -1679,7 +1679,7 @@ class Gateway:
                 "取值(数值条件)": "取值: <entity_id> <字段名>   把实体当前 state 读进 msg.<字段名>，供下面『分支』做数值判断。数值比较要用 $number(字段名)，如 分支: $number(lux) < 10。见 examples.数值条件",
                 "构建": "构建: <JSON对象 或 JSONata表达式>   把 msg.payload 设为请求体；动态值用反引号包裹，如 `payload`",
                 "请求": "请求: <METHOD> <url> [<字面JSON body>] [K=V headers]   不带字面 body 时自动把上游『构建』的 msg.payload 作为请求体发送",
-                "调用子流程": "调用子流程: <name>(k=值, ...)   如 tts_speak(text=..., room=书房, level=一般)。见 examples.TTS播报",
+                "调用子流程": "调用子流程: <name>(k=值, ...)   如 demo_notify(text=..., room=书房, level=一般)。见 examples.TTS播报",
                 "分支": "分支: <jsonata 条件>\n  动作: ...   条件成立才走缩进块。支持【嵌套】（分支体内再写 分支: 生成多级判断）与【多路】（连续写多个 分支: 或改用 否则如果: 接更多条件分支）",
                 "否则": "否则:\n  动作: ...   紧跟『分支』或『时间段/查询』门之后；不动作可留『注释:』占位",
                 "否则如果": "否则如果: <jsonata 条件>\n  动作: ...   紧跟『分支』之后再追加一个条件分支，实现 if/elif/else 多路判断（也可用连续 分支: 表达；嵌套判断在 分支/否则 体内再写 分支: 即可）",
@@ -1699,7 +1699,7 @@ class Gateway:
                 "场景: 书房入户播报\n"
                 "触发: binary_sensor.0x00158d0001a2520d_motion on\n"
                 "动作: light.turn_on(light.philips_cn_249518489_rwread_s_2_light, brightness_pct=80)\n"
-                "调用子流程: tts_speak(text=欢迎回到书房，已为你打开台灯, room=书房, level=一般)"
+                "调用子流程: demo_notify(text=欢迎回到书房，已为你打开台灯, room=书房, level=一般)"
             ),
             "examples": {
                 "OR多触发": (
@@ -1727,11 +1727,11 @@ class Gateway:
                     "  动作: switch.turn_on(switch.lumi_cn_lumi_158d000239c546_aq1_on_p_3_1)"
                 ),
                 "TTS播报": (
-                    "# 有人移动 → 开台灯 并 语音播报（跨域：light 动作 + tts_speak 子流程）\n"
+                    "# 有人移动 → 开台灯 并 语音播报（跨域：light 动作 + demo_notify 子流程）\n"
                     "场景: 书房有人开灯并播报\n"
                     "触发: binary_sensor.0x00158d0001a2520d_motion on\n"
                     "动作: light.turn_on(light.philips_cn_249518489_rwread_s_2_light)\n"
-                    "调用子流程: tts_speak(text=书房已有人，灯已打开, room=书房, level=一般)"
+                    "调用子流程: demo_notify(text=书房已有人，灯已打开, room=书房, level=一般)"
                 ),
                 "持久等待": (
                     "# 有人移动且持续 5 分钟 → 才开吊灯（避免人一晃就亮灯；持续时长支持 分钟/小时/秒）\n"
@@ -1748,7 +1748,7 @@ class Gateway:
                     "调用子流程: history_state_at(entity=climate.书房空调, at=昨晚23:12, attribute=temperature)\n"
                     "提取: 设定温度 = payload.value\n"
                     "分支: $number(设定温度) > 26\n"
-                    "  动作: 调用子流程: tts_speak(text=昨晚空调设到了27度以上，偏高, room=书房, level=一般)\n"
+                    "  动作: 调用子流程: demo_notify(text=昨晚空调设到了27度以上，偏高, room=书房, level=一般)\n"
                     "否则:\n"
                     "  注释: 温度正常，不提醒\n"
                     "# 另一例：门昨天11-12点开过没？→ occurred=true/false 在 msg.payload\n"
@@ -1760,7 +1760,7 @@ class Gateway:
                 "autoflow_propose_dsl(\n"
                 "  dsl=<上面的 DSL 文本>,\n"
                 "  expected_postconditions_json='[{\"entity_id\":\"<灯 entity_id>\",\"state\":\"on\"},"
-                "{\"subflow\":\"tts_speak\"}]'\n"
+                "{\"subflow\":\"demo_notify\"}]'\n"
                 ")"
             ),
             "note": "写作中任何不确定，随时再调 autoflow_dsl_help() 复查语法、examples 与子流程参数。",
@@ -2753,7 +2753,7 @@ class Gateway:
             f"7. 只解析不提交 = 失败。解析→写全 DSL（触发+条件+动作齐全）→提交，一气呵成。\n"
             f"8. 【复杂场景（多分支/多动作/含查询+子流程）】：先在本轮脑内列出『触发→条件→各分支动作』清单，"
             f"再把完整 DSL 一次性写进单个代码块提交，**不要分多次调用 propose_dsl、也不要中途反复翻 help**；"
-            f"多分支用嵌套 分支/否则，TTS/大模型调用用 调用子流程: tts_speak(...)，保持每个动作一行、参数精简。\n"
+            f"多分支用嵌套 分支/否则，TTS/大模型调用用 调用子流程: demo_notify(...)，保持每个动作一行、参数精简。\n"
         )
 
     def _wait_ds_bridge_idle(self, max_wait: int = 45, settle: float = 4.0, job_id: str = None) -> Dict[str, Any]:
@@ -3820,7 +3820,7 @@ class Gateway:
                     "message": (
                         f"link out『{lo_name}』指向不存在的 link-in/子流程入口「{tgt}」："
                         f"部署后运行时将报『Error delivering message to node:undefined』。"
-                        f"请确认目标 id 正确（如 tts_speak=b595563939283231、"
+                        f"请确认目标 id 正确（如 demo_notify=b595563939283231、"
                         f"anysearch_batch=af_anysearch_in）且该子流程已在目标 NR 注册。"
                     ),
                 })

@@ -72,7 +72,7 @@
       }
     },
     "description": "【示例子流程，非产品功能】仅用于演示『调用子流程 → 生成 change(设参) + link out』的 link_out 编译路径。entry_link_id 为占位 id，需用户自备真实下游入口（或改用 bark_push / anysearch 等教学导入子流程）。",
-    "notes": "【示例】参数形状与历史 tts_speak 完全一致，以便既有测试/golden fixture 经机械重命名即可继续作为 link_out 编译路径的回归基线。生产请改用 imported 子流程或教学导入。room 取值：default / 客厅 / 房间 / 卧室 / 书房 / 卫生间 / 主卧室 / 主卧室浴室 / 全屋。",
+    "notes": "【示例】参数形状与历史 TTS 播报规格完全一致，以便既有测试/golden fixture 经机械重命名即可继续作为 link_out 编译路径的回归基线。生产请改用 imported 子流程或教学导入。room 取值：default / 客厅 / 房间 / 卧室 / 书房 / 卫生间 / 主卧室 / 主卧室浴室 / 全屋。",
     "param_style": "payload",
     "positional": null,
     "source": "managed"
