@@ -3650,7 +3650,8 @@ class Gateway:
             | {"http request", "api-call-service", "server-state-changed",
                "api-current-state", "switch", "change", "function", "template",
                "delay", "debug", "inject", "link in", "link out", "catch",
-               "status", "merge", "split", "join", "csv", "json", "xml", "html",
+               # 注：不含 "merge"——NR 核心无此类型（见 dsl_engine.RAW_NODE_ALLOWED 注释）
+               "status", "split", "join", "csv", "json", "xml", "html",
                "markdown", "range", "exec", "file", "mqtt in", "mqtt out",
                "tcp in", "udp in", "email", "http in", "websocket in", "time",
                "trigger", "comment", "subflow"}

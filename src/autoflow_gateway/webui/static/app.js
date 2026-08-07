@@ -636,7 +636,23 @@ async function deployProposal(id) {
   const r = await api("POST", `/proposals/${id}/deploy`, { target: "prod" });
   if (!r.ok) {
     if (r.data?.conflict) return toast("冲突：" + (r.data.error || "同名子流程已存在，可改名或 force 重建"));
-    return toast((isSub ? "注册失败：" : "部署失败：") + (r.data?.error || r.status));
+    // 安全闸 / staging 闸门拦截：常驻对话框，必须点「确定」才关闭（不自动消失）
+    const errText = String(r.data?.error || r.status || "未知错误");
+    const isGate = r.data?.stage === "gate" || /闸门|受保护对象|安全闸/.test(errText);
+    if (isGate) {
+      const ent = r.data?.protected_entity
+        ? `<p style="color:#c0392b">受保护实体：${esc(r.data.protected_entity)}</p>` : "";
+      const detail = r.data?.gate
+        ? `<pre style="white-space:pre-wrap;max-height:240px;overflow:auto;background:#f6f6f6;padding:8px;border-radius:6px">${esc(JSON.stringify(r.data.gate, null, 2))}</pre>`
+        : "";
+      modal("安全闸 / staging 闸门拦截",
+        `<p style="line-height:1.7">${esc(errText)}</p>` +
+        detail + ent +
+        `<p style="color:#888">未部署。请检查 DSL 与预期后置条件是否一致，或调整安全闸规则后重试。</p>` +
+        `<div style="margin-top:14px;text-align:right"><button class="btn" onclick="closeModal()">确定</button></div>`);
+      return;
+    }
+    return toast((isSub ? "注册失败：" : "部署失败：") + errText);
   }
   toast((isSub ? "注册成功：" : "部署成功：") + (r.data.label || r.data.flow_id || r.data.subflow_id));
   loadProposals();
