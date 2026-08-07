@@ -95,7 +95,13 @@ def _resolve_entity_attributes(entity: str) -> Optional[set]:
 RAW_NODE_ALLOWED = {
     # 核心流控 / 变换
     "switch", "change", "template", "delay", "debug", "inject",
-    "join", "split", "sort", "batch", "merge",
+    # ⚠ 此处曾有 "merge"：Node-RED 核心从未提供该节点类型（1880/1990 两实例
+    #   GET /nodes 均查无，合并职责由 join 承担）。放行它等于给 agent 埋雷——
+    #   flow 里只要出现一个 merge 节点，NR 会打印 "Waiting for missing types to
+    #   be registered: - merge" 并让**整个 tab 拒绝启动**（inject 触发 404），
+    #   且部署接口返回 200，属静默失败。已移除；回归见
+    #   tests/regression/reg_m/capmatrix_probe_types.py（白名单 × 运行时注册表比对）。
+    "join", "split", "sort", "batch",
     "csv", "html", "xml", "json", "yaml", "range",
     # 事件 / 状态 / 观测
     "status", "catch", "complete", "trigger",
