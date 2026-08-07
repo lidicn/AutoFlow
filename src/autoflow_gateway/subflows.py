@@ -255,7 +255,8 @@ def flow_uses_bark_subflow(nodes) -> bool:
 # type="subflow"，由 NR 子流程实例真正干活（link in → 时间解析 → api-get-history / statistics
 # → 计算 → link out），网关只引用 subflow_id。
 # 以下 4 个 id 已于 Task #272（2026-07-21）部署到 NR 1990，回填真实子流程 id
-# （与 nr_subflows/history/build_subflows.py 的 HIST_IDS 对齐）。
+# （与 data/subflows/nr_defs/subflows_built.json 中的 4 个 af_hist_* 子流程对齐；
+#  旧 build_subflows.py 生成器已废弃，该 JSON 即单一真源）。
 HISTORY_STATE_AT_SUBFLOW_ID = "af_hist_state_at"
 HISTORY_OCCURRED_SUBFLOW_ID = "af_hist_occurred"
 HISTORY_DURATION_SUBFLOW_ID = "af_hist_duration"
@@ -447,7 +448,7 @@ SUBFLOWS: dict[str, SubflowSpec] = {
 }
 
 # ── 历史查询子流程：幂等 ensure（仿 bark_push 的 A3 模式）──────────────
-# 4 个历史子流程（af_hist_*）的【原生节点图】存于 nr_subflows/history/subflows_built.json
+# 4 个历史子流程（af_hist_*）的【原生节点图】存于 data/subflows/nr_defs/subflows_built.json
 # （每个子流程 = [def 节点 + n_parse + n_hist + n_catch + n_err + n_calc] 扁平条目数组）。
 # Task #272（2026-07-21）已手动部署进 NR1990 并回填 id；但此前无等价 ensure 函数——
 # 一旦 NR1990 被清空/重置即永久丢失（这是 agent「历史查询子流程无法使用」的三重根因之一）。
@@ -471,8 +472,11 @@ HISTORY_REGISTRY_KEYS = frozenset(
     and spec.call.get("subflow_id") in HISTORY_SUBFLOW_IDS
 )
 
+# 真源：4 个历史子流程的原生节点图就手维护在 data/subflows/nr_defs/subflows_built.json
+# （仓库无 build_subflows.py 生成器，该 JSON 即源码+产物单一真源）。
+# 旧路径 nr_subflows/history/ 自 R2 数据/代码分离后已废弃，目录不存在 → 必须指到新位置。
 _HISTORY_BUILT_PATH = os.path.join(
-    os.path.dirname(__file__), "nr_subflows", "history", "subflows_built.json")
+    os.path.dirname(__file__), "data", "subflows", "nr_defs", "subflows_built.json")
 
 
 def _load_history_subflows_built() -> list:
