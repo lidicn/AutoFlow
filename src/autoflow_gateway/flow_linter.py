@@ -10,8 +10,10 @@
    - 子流程定义 in/out 端口声明却无连线（死端口）→ R18。
    - switch 某条分支无输出连线（静默死分支）→ R21（warning，不拦）。
    - 节点必填字段缺失（api-call-service/service、switch/rules 等）→ R22（error 硬拦 / warning 软提示）。
-   - 节点关键空参（空 func 的 function / 空 domain 的 api-call-service）→ R32（error 硬拦，补 R22 未覆盖的死角）。
-   - 整条流无任何 effectful 节点（纯 stub / pass-through）→ R33（warning，fail-open 不拦）。
+  - 节点关键空参（空 func 的 function / 空 domain 的 api-call-service）→ R32（error 硬拦，补 R22 未覆盖的死角）。
+  - 整条流无任何 effectful 节点（纯 stub / pass-through）→ R33（warning，fail-open 不拦）。
+  - switch 直接读 `msg.<实体ID>` 路径（如 `sun.sun` / `weather.xxx`，首段为已知 HA 域）→ R34（error，
+    提示改用 api-current-state + switch(payload)。HA websocket 不注入 `msg.<entity_id>`，条件恒假静默失败）。
   - http request bodyType=json 但上游没有 change/function 构造 msg.payload → body 可能为空/错。
   - switch/change 的 JSONata 表达式语法预校验（启发式，NR 同款引擎才 100% 准）。
 
@@ -31,6 +33,31 @@ from typing import Any, Dict, List, Optional, Tuple
 # ── 公共类型 ──
 # lint issue: {"level": "error"|"warning"|"info", "rule": "R1".."R4",
 #              "node_id": str, "node_type": str, "message": str}
+
+
+# ── R34：switch 直接读 `msg.<实体ID>` 路径检测所需 ──
+# HA 已知域集合（首段）。用于判断 switch.property 的「首段」是否像实体 ID（如 sun/weather/sensor…）。
+# 注意：payload/data/topic/headers/name/req/res/error 等是 NR 合法 msg 根，绝不可误判。
+_HA_DOMAINS = frozenset({
+    "sun", "weather", "sensor", "binary_sensor", "light", "switch", "climate",
+    "cover", "fan", "lock", "media_player", "device_tracker", "person", "zone",
+    "input_boolean", "input_number", "input_select", "input_text", "input_datetime",
+    "number", "select", "button", "event", "update", "vacuum", "humidifier",
+    "water_heater", "alarm_control_panel", "camera", "image", "scene", "automation",
+    "group", "script", "timer", "plant", "valve", "notify", "geo_location", "tag",
+})
+# 实体 ID 形状：<domain>.<object_id>[.<sub>]*，全小写字母数字下划线，≥2 段、首段为已知域才判。
+_ENTITY_ID_PATH_RE = re.compile(r"^([a-z][a-z0-9_]*)\.[a-z0-9_]+(\.[a-z0-9_]+)*$")
+
+
+def _looks_like_entity_path(prop: str) -> bool:
+    """switch.property 是否形如 HA 实体 ID 路径（首段为已知 HA 域）。"""
+    if not isinstance(prop, str):
+        return False
+    m = _ENTITY_ID_PATH_RE.match(prop)
+    if not m:
+        return False
+    return m.group(1) in _HA_DOMAINS
 
 
 # ── 节点关系工具 ──
@@ -374,10 +401,38 @@ def lint_flow(flow: Dict[str, Any], b1_unreachable: bool = False) -> List[Dict[s
 
 
 # ── R1：switch otherwise 前置 → 死代码 ──
+def _r34_issue(nid: str, prop: str, ptype: str, rule_idx: int = 0) -> Dict[str, str]:
+    """构造一条 R34 error issue：switch 直接读实体 ID 路径。"""
+    where = f"第 {rule_idx} 条分支的" if rule_idx else "节点级"
+    return {
+        "level": "error", "rule": "R34", "node_id": nid, "node_type": "switch",
+        "message": (
+            f"switch 的{where}`property` 为 `{prop}`（propertyType={ptype}），"
+            f"形如 HA 实体 ID 路径。HA websocket 节点**不会**把实体状态注入 `msg.{prop}`，"
+            f"该路径运行态恒为 undefined → 条件永远为假、动作永不执行"
+            f"（典型黑箱静默 bug，灯永不响应）。"
+            f"请先在 flow 内放 `api-current-state` 节点读取该实体（输出落到 `msg.payload`/`msg.data`），"
+            f"再把 switch 的 property 改为 `payload`（或 `payload.state`）。"
+            f"编译器 DSL 用 `取值: {prop}  分支: payload == ...` 会自动生成正确链路。"
+        ),
+    }
+
+
 def _lint_switch(n: Dict[str, Any], nid: str) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
     rules = n.get("rules") or []
     checkall = n.get("checkall", True)
+    # R34：switch 直接读 `msg.<实体ID>` 路径（如 sun.sun / weather.xxx）→ 条件恒假静默 bug。
+    # HA websocket 不会把实体状态注入 msg.<entity_id>，必须先用 api-current-state 读到 msg.payload。
+    # 仅对 path 型 propertyType（msg/flow/global）生效；jsonata 走 R30 另查。
+    ptype = n.get("propertyType") or "msg"
+    if ptype in ("msg", "flow", "global"):
+        if _looks_like_entity_path(n.get("property")):
+            out.append(_r34_issue(nid, n.get("property"), ptype))
+        for ri, r in enumerate(rules):
+            # 规则级 property 覆盖（非 jsonata 比较规则才有「路径」语义）
+            if (r.get("t") not in ("jsonata", "jsonata_exp")) and _looks_like_entity_path(r.get("property")):
+                out.append(_r34_issue(nid, r.get("property"), ptype, rule_idx=ri + 1))
     # R30：switch 规则的 JSONata 语法预检（括号/引号配平）。WB16 iss_d184f78b7c。
     # 必须在「有无 else 分支」判断之前执行——否则无 else 的纯 jsonata 分支 switch
     # 会整段跳过本检查（早期 `if not else_indices: return out` 漏掉），导致非法表达式

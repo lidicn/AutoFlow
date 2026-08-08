@@ -316,6 +316,24 @@ JSON**（供人类迭代编译器）。这是"看看 agent 到底能写出什么
    HA 节点要求 **camelCase** 字段名——实体用 `entityId`（不是 snake_case 的 `entity_id`），服务调用用
    `entityId` + `dataType:"json"` 的 `data`。写错 `entity_id` 会被 L1 lint 的 **R19** 拦下（提示会直接告诉你
    改成 `entityId`），但部署前最好就写对，别等闸门报错。社区/旧文档示例多用 `entity_id`，**别照抄**。
+3c. **⚠️ 条件判断「非触发实体」当前状态，必须先 `api-current-state` 再 `switch(payload)`**：
+   当用户意图含「天黑/日落/日出/天气/温度/某实体此刻状态」等**依赖某实体当前值做分支**的语义时，
+   **绝不允许**在 `switch` 节点里直接读 `msg.sun.sun` / `msg.weather.xxx` / `msg.sensor.xxx` 这类路径——
+   HA websocket 节点**不会**把实体状态注入 `msg.<entity_id>`，该路径恒为 `undefined` → 条件**永远为假**、
+   动作永不执行，且静默失败、staging 不报明确错，是最典型的黑箱静默 bug。正确做法二选一：
+   - **编译器（首选）**：用 `取值: sun.sun` + `分支: payload == "below_horizon"`，编译器自动生成
+     `api-current-state`（输出到 `msg.payload`）+ `switch(property="payload")` 链路，无需手写。
+   - **原生手写**：先放 `api-current-state` 节点读该实体（其输出落到 `msg.payload` / `msg.data`，
+     **不是** `msg.<entity_id>`），再接 `switch`，`property="payload"`（或 `"payload.state"`）、
+     `propertyType:"msg"`，规则比对 `msg.payload`。标准模板：
+     ```
+     [server-state-changed: 触发实体] → [api-current-state: 读 sun.sun] →
+     [switch: property="payload", rule eq "below_horizon"] → [api-call-service: 开灯]
+     ```
+   - 提示：`autoflow_get_entity_state(entity_id)` 是**写 flow 前**确认实体此刻状态的 MCP 工具（只读探查），
+     **不能**替代 flow 内部的 `api-current-state` 节点——分支逻辑必须靠 in-flow 节点在运行时实时读。
+   - 静态闸 `R34` 会在 `switch.property` 形如 `msg.<实体ID>` 时直接报 error 并提示改用 `api-current-state`，
+     落提案/verify 回执里即可看到，务必照改再交。
 3. 直接写完整 flow JSON（`{id, label:"[DS白箱] xxx", nodes:[...]}`）。
 4. 提交提案（**注意：现已统一为提案闸，不再直写 NR**）：
    ```
