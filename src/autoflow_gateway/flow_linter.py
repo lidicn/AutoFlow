@@ -449,7 +449,7 @@ _FIELD_TOKEN_RE = re.compile(r"(?<![.\w$一-鿿])([A-Za-z_一-鿿][\w一-鿿]*)(
 
 
 def _collect_defined_fields(nodes: List[Dict[str, Any]]) -> set:
-    """收集编译产物中「已声明可用」的字段名：取值字段(payload.<x>) + 变量(flow.<x>)。"""
+    """收集编译产物中「已声明可用」的字段名：取值字段(payload.<x>) + 变量(flow.<x>) + 提取(msg.<x>)。"""
     defined: set = {"state"}  # payload.state 由取值节点恒提供
     for n in nodes:
         if n.get("type") == "api-current-state":
@@ -459,7 +459,8 @@ def _collect_defined_fields(nodes: List[Dict[str, Any]]) -> set:
                     defined.add(p[len("payload."):])
         elif n.get("type") == "change":
             for r in (n.get("rules") or []):
-                if r.get("pt") == "flow" and r.get("p"):
+                # 变量: → flow.<x>；提取: → msg.<x>（顶层字段，供下游 分支/条件 引用）
+                if r.get("p") and r.get("pt") in ("flow", "msg"):
                     defined.add(r["p"])
     return defined
 

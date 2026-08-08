@@ -158,6 +158,8 @@ C_JSONATA_SYNTAX = "C_JSONATA_SYNTAX"    # 分支/条件 JSONata 语法断裂（
 C_COMPARE_TYPE_WARN = "C_COMPARE_TYPE_WARN"  # 数值比较未包 $number()（state 为字符串，比较可能恒假）
 C_ENTITY_UNRESOLVED = "C_ENTITY_UNRESOLVED"  # 中文/友好实体名未解析为 entity_id（原样写入 NR 必然找不到实体）
 C_PARSE = "C_PARSE"                      # 兜底（未归类解析错误）
+C_TIME_RANGE = "C_TIME_RANGE"            # 定时时间超出合法范围（小时 0-23 / 分钟 0-59）
+C_VAR_NAME = "C_VAR_NAME"                # 变量名含非法字符（-/空格/点），JSONata 把 - 当减号会崩
 
 
 class DSLError(Exception):
@@ -561,8 +563,15 @@ def parse(text: str) -> Scene:
         elif kw == "let":
             kv = _after_colon(stripped)
             if "=" in kv:
-                k, v = kv.split("=", 1)
-                scene.variables[k.strip()] = v.strip()
+                name = kv.split("=", 1)[0].strip()
+                # B3(a) 变量名校验：JSONata 把 - 当减号、空格/点破坏标识符，
+                # 含这些字符的变量名下游 $number(名) 必然崩或作用域错乱。编译期拦截。
+                if not re.fullmatch(r"[\w一-鿿][\w一-鿿]*", name):
+                    raise DSLError(
+                        f"变量名『{name}』含非法字符（-/空格/点）。JSONata 把 - 当减号会崩，"
+                        f"且裸名无法绑定到 flow 上下文。请用下划线，例如『阈值_上限』。",
+                        i + 1, code=C_VAR_NAME)
+                scene.variables[name] = kv.split("=", 1)[1].strip()
         elif kw == "branch":
             cond = _extract_branch_cond(stripped)
             top = _ctx[-1]
@@ -680,9 +689,16 @@ def _parse_raw_node(s: str, line: int) -> RawNode:
 
 
 def _extract_branch_cond(stripped: str) -> str:
-    body = (_after_colon(stripped) if stripped.startswith("分支:")
-            else stripped[len("分支"):].strip())
-    return body.rstrip(":").strip()
+    # B2 根因修复：原实现只特判「分支:」前缀，否则写死砍掉「分支」2 字符——
+    # 对「否则如果:」这类更长前缀会漏掉「如果:」，导致 switch 第 2 条规则带上
+    # 脏前缀（v="如果: $number(...) < 20"），运行态 JSONata 解析失败、第 2 路全失效。
+    # 改为按全部 branch/elif 别名词首剥离（中/英冒号 + 前置空白），不误伤裸条件。
+    for prefix in ("分支", "case", "switch", "否则如果", "否则若", "elif"):
+        if stripped.startswith(prefix):
+            rest = stripped[len(prefix):]
+            rest = re.sub(r"^[：:]\s*", "", rest)  # 去掉跟随的冒号（中/英）与空白
+            return rest.strip()
+    return stripped
 
 
 # 时长词 → 折算分钟的系数（省略单位默认按分钟）
@@ -739,8 +755,10 @@ def _parse_trigger(s: str, line: int) -> Trigger:
         wd = re.search(r"weekday\s*=\s*([0-6](?:\s*,\s*[0-6])*)", s)
         if hh:
             h = int(hh.group(1)); m_ = int(mm_val.group(1)) if mm_val else 0
+            _require_valid_time(h, m_, f"{h}:{m_:02d}", s, line)
             if eh:
                 eh_v = int(eh.group(1)); em_v = int(em.group(1)) if em else 0
+                _require_valid_time(eh_v, em_v, f"{eh_v}:{em_v:02d}", s, line)
                 hr = f"{h}-{eh_v}" if eh_v != h else f"{h}"
                 mn = f"{m_}-{em_v}" if (em and em_v != m_) else f"{m_}"
             else:
@@ -751,9 +769,9 @@ def _parse_trigger(s: str, line: int) -> Trigger:
                 nums = [int(x) for x in re.split(r"[,\s]+", wd.group(1)) if x.strip() != ""]
                 dow = ",".join(str((n + 1) % 7) for n in nums)
             return Trigger(kind="time", cron=f"{mn} {hr} * * {dow}", raw=s)
-        return Trigger(kind="time", cron=_parse_cron_zh(s), raw=s)
+        return Trigger(kind="time", cron=_parse_cron_zh(s, line), raw=s)
     if ("每天" in s or "每周" in s or "周末" in s) or re.search(r"\d{1,2}:\d{2}", s):
-        return Trigger(kind="time", cron=_parse_cron_zh(s), raw=s)
+        return Trigger(kind="time", cron=_parse_cron_zh(s, line), raw=s)
     # event 实体触发（门锁开门/门窗打开/按钮点击等）：单 token、无状态部分。
     # HA 中 event 实体每次事件 state 更新为时间戳，server-state-changed 监听任意变化即触发。
     if re.match(r"^event\.\S+$", s):
@@ -778,11 +796,32 @@ def _parse_trigger(s: str, line: int) -> Trigger:
                    for_minutes=for_minutes)
 
 
-def _parse_cron_zh(s: str) -> str:
-    hhmm = re.search(r"(\d{1,2}):(\d{2})", s)
+def _require_valid_time(h: int, m: int, raw: str, s: str, line: int) -> None:
+    """校验定时小时/分钟在合法范围；越界抛 C_TIME_RANGE（带行号+合法示例）。
+
+    B1 根因修复：_parse_cron_zh 此前 h,m=int() 无范围校验，非法时间（25:99）
+    直接透传成 crontab='99 25 * * *' 进 NR，运行态 cron 模块报错。这里在编译期拦截。"""
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        raise DSLError(
+            f"定时时间『{raw}』（出自『{s.strip()}』）超出合法范围："
+            f"小时须 0-23、分钟须 0-59。正确示例：『每天 07:30』或『每天 23:00-02:00』（跨夜）。",
+            line, code=C_TIME_RANGE)
+
+
+def _parse_cron_zh(s: str, line: int = 1) -> str:
+    # 同时匹配单点 HH:MM 与时段 HH:MM-HH:MM（跨夜范围如 23:00-02:00）
+    hhmm = re.search(r"(\d{1,2}):(\d{2})(?:\s*-\s*(\d{1,2}):(\d{2}))?", s)
     if not hhmm:
         return "0 0 * * *"
     h, m = int(hhmm.group(1)), int(hhmm.group(2))
+    _require_valid_time(h, m, hhmm.group(0), s, line)
+    if hhmm.group(3) is not None:
+        # 时段范围：两端都要校验
+        eh, em = int(hhmm.group(3)), int(hhmm.group(4))
+        _require_valid_time(eh, em, hhmm.group(0), s, line)
+        if eh == h and em == m:
+            return f"{m} {h} * * *"
+        return f"{m}-{em} {h}-{eh} * * *"
     if "周一至周五" in s or "工作日" in s:
         return f"{m} {h} * * 1-5"
     if "周末" in s:
@@ -981,6 +1020,10 @@ def _validate_subflow_attribute(name: str, args: dict, line: int) -> None:
     if not attrs:  # None 或空集 → 无法判定 → 跳过
         return
     attr = args["attribute"].strip()
+    # B4 根因修复：state 是实体的主状态，恒有效（即便不在 attributes 集里）。
+    # 此前误杀 attribute=state（C_SUBFLOW_ATTR_UNKNOWN）。实体主状态直接放行。
+    if attr == "state":
+        return
     if attr not in attrs:
         raise DSLError(
             f"子流程 {name} 的 attribute='{attr}' 不是实体 {args['entity']} 的已知属性"
@@ -1590,8 +1633,12 @@ def compile(scene: Scene, target: str = "staging") -> dict:
         else:
             # 非状态断言（其他复杂 JSONata 表达式）仍走 jsonata switch 兜底；
             # 经 _sanitize_jsonata 归一全角符号（（）＝），避免 R7 静默不求值。
+            # B3(b)：与 分支 一致，复杂条件表达式也要把【已声明变量名】绑定到 flow 上下文，
+            # 否则 $number(阈值_上限) 里裸名不被识别 → 表达式静默不求值、条件恒假。
+            cond_v = (_bind_flow_vars(_sanitize_jsonata(cond), em.flow_vars)
+                      if em.flow_vars else _sanitize_jsonata(cond))
             sid = em.add("switch", name=f"条件: {cond}",
-                         rules=[{"t": "jsonata_exp", "v": _sanitize_jsonata(cond), "vt": "jsonata"}],
+                         rules=[{"t": "jsonata_exp", "v": cond_v, "vt": "jsonata"}],
                          outputs=1)
             for s in all_src_ids:
                 em.connect(s, sid)
