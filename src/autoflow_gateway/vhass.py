@@ -13,9 +13,14 @@ vhass — AutoFlow 虚拟 Home Assistant（数字孪生 / staging 数据源）
 - light/switch/fan/input_boolean: turn_on→on, turn_off→off
 - cover: open_cover→open, close_cover→closed, stop_cover→stopped
 - lock: lock→locked, unlock→unlocked
-- climate: turn_on/off 改 state；set_temperature 改 attributes.temperature
+- climate: turn_on/off 改 state；set_hvac_mode 改 state（HA 里 climate 的 state 就是
+  hvac_mode）；set_temperature/set_fan_mode/... 改对应 attributes
+- fan/cover/media_player/humidifier: set_percentage / set_cover_position / volume_set 等
+  改对应 attributes，state 不变（见 _ATTR_FROM_DATA）
 - scene: turn_on 为 no-op（记忆被触发）
-- 未知 service：state 置为 service 名（便于观测），attributes 保留
+- 未建模 service：**state 保持不变**（绝不写成 service 名），只在
+  attributes.last_service / _unmodeled_service 留痕并登记 store.unmodeled_calls，
+  由 staging 闸门如实降级为「后置条件未验证」（A14）
 
 合成触发（POST /api/trigger）模拟"现实世界发生了某事"：
 - 例：{"entity_id":"device_tracker.me","state":"home"} 模拟人回家
@@ -54,6 +59,70 @@ _ON_OFF = {"turn_on": "on", "turn_off": "off", "enable": "on", "disable": "off"}
 _COVER = {"open_cover": "open", "close_cover": "closed", "stop_cover": "stopped",
           "open": "open", "close": "closed"}
 _LOCK = {"lock": "locked", "unlock": "unlocked"}
+
+# ── A14：非 toggle 服务的真实副作用建模 ──────────────────────────────────
+# 为什么需要：旧实现对「不在上面三张表里的服务」一律 `state = service 名`，
+# 于是 climate.set_hvac_mode 会把 state 写成字面量 "set_hvac_mode"。
+# staging 闸门随后按 state 回读断言，必然与真实 HA 语义（climate 的 state
+# 就是 hvac_mode）不符 → 误判 FAIL；反之若期望恰好写了服务名则误判 PASS。
+# 下面三张表按 HA 文档把服务映射到「它真正写哪个 state / 哪个 attribute」。
+
+# (domain, service) → 固定终态
+_FIXED_STATE = {
+    ("media_player", "media_play"): "playing",
+    ("media_player", "media_pause"): "paused",
+    ("media_player", "media_stop"): "idle",
+    ("media_player", "play_media"): "playing",
+    ("vacuum", "start"): "cleaning",
+    ("vacuum", "pause"): "paused",
+    ("vacuum", "stop"): "idle",
+    ("vacuum", "return_to_base"): "returning",
+    ("alarm_control_panel", "alarm_arm_home"): "armed_home",
+    ("alarm_control_panel", "alarm_arm_away"): "armed_away",
+    ("alarm_control_panel", "alarm_arm_night"): "armed_night",
+    ("alarm_control_panel", "alarm_disarm"): "disarmed",
+    ("valve", "open_valve"): "open",
+    ("valve", "close_valve"): "closed",
+    ("humidifier", "turn_on"): "on",
+}
+
+# (domain, service) → state 取自 data 的哪个键（HA 中这类实体 state 即该值）
+_STATE_FROM_DATA = {
+    ("climate", "set_hvac_mode"): "hvac_mode",
+    ("water_heater", "set_operation_mode"): "operation_mode",
+    ("input_select", "select_option"): "option",
+    ("select", "select_option"): "option",
+    ("input_number", "set_value"): "value",
+    ("number", "set_value"): "value",
+    ("input_text", "set_value"): "value",
+    ("text", "set_value"): "value",
+    ("input_datetime", "set_datetime"): "datetime",
+}
+
+# (domain, service) → {data 键: attribute 名}；state 保持不变
+_ATTR_FROM_DATA = {
+    ("climate", "set_temperature"): {"temperature": "temperature",
+                                     "target_temp_high": "target_temp_high",
+                                     "target_temp_low": "target_temp_low"},
+    ("climate", "set_fan_mode"): {"fan_mode": "fan_mode"},
+    ("climate", "set_preset_mode"): {"preset_mode": "preset_mode"},
+    ("climate", "set_swing_mode"): {"swing_mode": "swing_mode"},
+    ("climate", "set_humidity"): {"humidity": "humidity"},
+    ("fan", "set_percentage"): {"percentage": "percentage"},
+    ("fan", "set_preset_mode"): {"preset_mode": "preset_mode"},
+    ("fan", "set_direction"): {"direction": "current_direction"},
+    ("fan", "oscillate"): {"oscillating": "oscillating"},
+    ("cover", "set_cover_position"): {"position": "current_position"},
+    ("cover", "set_cover_tilt_position"): {"tilt_position": "current_tilt_position"},
+    ("media_player", "volume_set"): {"volume_level": "volume_level"},
+    ("media_player", "select_source"): {"source": "source"},
+    ("media_player", "select_sound_mode"): {"sound_mode": "sound_mode"},
+    ("humidifier", "set_humidity"): {"humidity": "humidity"},
+    ("humidifier", "set_mode"): {"mode": "mode"},
+    ("light", "turn_on"): {"brightness": "brightness", "brightness_pct": "brightness_pct",
+                           "color_temp": "color_temp", "rgb_color": "rgb_color"},
+    ("water_heater", "set_temperature"): {"temperature": "temperature"},
+}
 
 
 def now_iso():
@@ -102,6 +171,9 @@ class VHassStore:
             self._demo()
         self._clock_lock = threading.Lock()
         self._vclock_epoch = time.time()  # 虚拟时钟（秒，epoch）
+        # A14：本 store 生命周期内被调用过、但 vhass 未建模真实副作用的服务。
+        # staging 闸门据此把「后置状态未被验证」如实降级，而不是假装验证过。
+        self.unmodeled_calls = []
 
     # ── 载入 ──
     def load_seed(self, path):
@@ -192,27 +264,66 @@ class VHassStore:
         return changed
 
     def _mutate(self, e, domain, service, data):
+        """把一次 service 调用的副作用写进实体。返回 True=该服务已建模。
+
+        A14：未建模的服务【绝不】把 service 名伪造成 state——那会让 staging 闸门
+        按一个不存在的状态做断言，制造误判 FAIL / 误判 PASS。未建模时保持 state
+        原样、只留痕，并登记到 store.unmodeled_calls 供闸门降级为「未验证」。
+        """
         t = now_iso()
         e["last_changed"] = t
         e["last_updated"] = t
+        attrs = e.setdefault("attributes", {})
+        key = (domain, service)
+        modeled = True
+
+        # 1) 属性副作用（可与终态叠加，如 light.turn_on + brightness）
+        attr_map = _ATTR_FROM_DATA.get(key)
+        if attr_map:
+            for dkey, aname in attr_map.items():
+                if dkey in data:
+                    attrs[aname] = data[dkey]
+
+        # 2) 终态
         if service in _ON_OFF:
             e["state"] = _ON_OFF[service]
         elif service in _COVER:
             e["state"] = _COVER[service]
         elif service in _LOCK:
             e["state"] = _LOCK[service]
-        elif domain == "climate" and service == "set_temperature":
-            e["attributes"]["temperature"] = data.get("temperature", e["attributes"].get("temperature"))
+        elif key in _FIXED_STATE:
+            e["state"] = _FIXED_STATE[key]
+        elif key in _STATE_FROM_DATA:
+            dkey = _STATE_FROM_DATA[key]
+            if dkey in data and data[dkey] is not None:
+                e["state"] = str(data[dkey])
+                attrs[dkey] = data[dkey]
+            else:
+                # 服务已建模但调用缺关键参数 → 无法推导终态，同样不许瞎写
+                modeled = False
         elif domain == "light" and service == "toggle":
             e["state"] = "off" if e["state"] == "on" else "on"
         elif domain == "cover" and service == "toggle":
             e["state"] = "closed" if e["state"] == "open" else "open"
         elif service == "toggle":
             e["state"] = "off" if e["state"] == "on" else "on"
+        elif attr_map:
+            pass  # 纯属性服务（如 fan.set_percentage）：state 不变，属已建模
         else:
-            # 未知 service：用 service 名标注，便于观测
-            e["state"] = service
-            e.setdefault("attributes", {})["last_service"] = f"{domain}.{service}"
+            modeled = False
+
+        attrs["last_service"] = f"{domain}.{service}"
+        if modeled:
+            attrs.pop("_unmodeled_service", None)
+        else:
+            attrs["_unmodeled_service"] = f"{domain}.{service}"
+            call = f"{domain}.{service}({e['entity_id']})"
+            calls = getattr(self, "unmodeled_calls", None)
+            if calls is None:
+                calls = self.unmodeled_calls = []
+            if call not in calls:
+                calls.append(call)
+        return modeled
 
     def inject_trigger(self, entity_id, state, attributes=None):
         """模拟现实事件（合成触发）。返回更新后的实体。"""
