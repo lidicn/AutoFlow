@@ -19,10 +19,61 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from .subflows import Param, SubflowSpec
+
+
+# ── A25：系统占位符解析（<NAS_IP> → 真实主机名）───────────────────────
+# 为什么需要：data/api_specs.json 里 url 写死 `http://<NAS_IP>:1880/...`，
+# 是为了过 P-2 门禁 test_no_secrets_in_tracked_files（真 IP 不进版本库）。
+# 但此前三层（编译 / 部署 / 运行）都没有把占位符换回真值，字面量
+# `<NAS_IP>` 直接进了 NR 的 http request 节点 → DNS 不可解析 → 调用必失败。
+#
+# 与 <ENV_NAME> 类占位符的区别（关键）：
+#   - <CAIYUN_TOKEN> 这类是**用户资产**，必须用户在「Link API」里填，网关无从得知；
+#   - <NAS_IP> 是**部署环境事实**，网关自己就知道（NR_URL 环境变量），
+#     让用户手填等于把网关的内部知识摊派给使用者。故此处自动解析，
+#     且 webui 的配置字段推导会显式排除它（见 webui._config_fields_for_spec）。
+SYSTEM_PLACEHOLDERS = ("NAS_IP",)
+
+
+def _nas_host() -> str:
+    """从 NR_URL 推断 NAS 主机名（<NAS_IP> 的真值）。
+
+    豆包中枢等家用能力与 NR 同主机同 1880 端口，故 NR_URL 的 hostname
+    即是 <NAS_IP> 应有的值。
+
+    Returns:
+        主机名字符串；NR_URL 未设或不可解析时回落 "localhost"（不抛异常，
+        避免模块导入期因环境变量缺失而整体崩掉）。
+    """
+    raw = os.environ.get("NR_URL") or "http://localhost:1880"
+    try:
+        host = urllib.parse.urlparse(raw).hostname
+    except Exception:
+        host = None
+    return host or "localhost"
+
+
+def resolve_system_placeholders(text: str) -> str:
+    """把 spec 表达式里的系统占位符替换为当前部署环境的真值。
+
+    幂等：已解析过的字符串再调一次不会变化（没有占位符可换）。
+
+    Args:
+        text: 可能含 `<NAS_IP>` 的表达式（url / body 模板 / header 值等）。
+
+    Returns:
+        替换后的字符串；入参为空或无占位符时原样返回。
+    """
+    if not text or "<" not in text:
+        return text
+    if "<NAS_IP>" in text:
+        text = text.replace("<NAS_IP>", _nas_host())
+    return text
 
 
 @dataclass
@@ -51,11 +102,18 @@ class ApiSpec:
     self_use: bool = False             # True=豆包等网关自用能力：不进 WebUI 产品列表、不参与默认 tab 生成，但 spec 定义保留（保重装性）
 
     def to_subflow_spec(self) -> SubflowSpec:
-        """派生网关侧 SubflowSpec（供 dsl_engine / dsl_help）。"""
+        """派生网关侧 SubflowSpec（供 dsl_engine / dsl_help）。
+
+        A25：url 在此再解析一次系统占位符。`_load_api_specs()` 已在加载期解析过，
+        这里是**幂等兜底**，覆盖两类不经加载期的 spec：
+          ① 代码里直接 `ApiSpec(url="http://<NAS_IP>:...")` 构造的（测试/运行期注册）；
+          ② 用户自助注册的 link api（其 url 同样可能含 `<NAS_IP>`）。
+        少了这一层，A25 只修好了内置 spec，用户注册路径照样把占位符下发生产。
+        """
         if self.kind == "http_api":
             call = {
                 "type": "http_api",
-                "url": self.url,
+                "url": resolve_system_placeholders(self.url),
                 "method": self.method,
                 "extract": self.extract,
             }
@@ -93,6 +151,10 @@ def _load_api_specs() -> list[ApiSpec]:
     for d in raw:
         params = {k: Param(**pv) for k, pv in (d.get("params") or {}).items()}
         rest = {k: v for k, v in d.items() if k != "params"}
+        # A25：加载期即把 <NAS_IP> 解析成真主机。数据文件继续留占位符（过 P-2
+        # 门禁，真 IP 不进版本库），只在内存里持真值。
+        if rest.get("url"):
+            rest["url"] = resolve_system_placeholders(rest["url"])
         specs.append(ApiSpec(params=params, **rest))
     return specs
 
@@ -235,7 +297,8 @@ def build_nr_tab_flows(tab_id: str, specs: Optional[list[ApiSpec]] = None) -> li
         http = {
             "id": hid, "type": "http request", "z": tab_id,
             "name": f"→ {spec.title}", "method": method,
-            "ret": "obj", "paytoqs": "ignore", "url": spec.url,
+            # A25 幂等兜底：直接构造 / 运行期注册的 spec 未经加载期解析
+            "ret": "obj", "paytoqs": "ignore", "url": resolve_system_placeholders(spec.url),
             "x": x + 780, "y": y, "wires": [[xid]],
         }
         if spec.nr_headers and not spec.nr_body_template:

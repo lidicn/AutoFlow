@@ -35,6 +35,8 @@ except ImportError:
     _HAVE_WEB_DEPS = False
     TestClient = build_webui_asgi = None
 
+from api_spec_fixture import make_spec, temp_api_spec
+
 
 @unittest.skipUnless(_HAVE_WEB_DEPS, "A2 测试需要 starlette（缺失则 pip install starlette）。")
 class TestLinkApiConfig(unittest.TestCase):
@@ -121,13 +123,17 @@ class TestLinkApiConfig(unittest.TestCase):
         self.assertEqual(saved.get("CAIYUN_TOKEN"), "x")
 
     def test_put_self_use_rejected(self):
-        # 豆包系列打了 self_use 标记 → 禁止通过此端点配置（403）
-        r = self.client.put(
-            "/api/link-apis/llm_doubao_chat/config",
-            json={"config": {"FOO": "bar"}},
-        )
-        self.assertEqual(r.status_code, 403)
-        self.assertFalse(r.json()["ok"])
+        # self_use 能力 → 禁止通过此端点配置（403）。
+        # 豆包系列已按用户决策移除，用临时 self_use spec 驱动同一代码路径。
+        spec = make_spec(name="t_self_use", title="自测自拒绝", kind="link_out",
+                         self_use=True, entry_link_id="af_selfuse_in")
+        with temp_api_spec(spec):
+            r = self.client.put(
+                "/api/link-apis/t_self_use/config",
+                json={"config": {"FOO": "bar"}},
+            )
+            self.assertEqual(r.status_code, 403)
+            self.assertFalse(r.json()["ok"])
 
     def test_get_unknown_spec_404(self):
         r = self.client.get("/api/link-apis/does_not_exist/config")

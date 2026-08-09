@@ -644,8 +644,9 @@ def flow_uses_history_subflow(nodes) -> bool:
 
 
 # ── API 能力从 api_specs 单一真相源派生（见 api_specs.py）──────────────
-# 不再在此手搓 llm_doubao_chat / llm_doubao_say：它们的网关注册与 NR tab flow
-# 都由 api_specs.API_SPECS 一处定义、两处派生，避免"改一处漏一处"的 split。
+# 所有 API 能力（如 llm_caiyun_weather / anysearch_batch）只在此处经
+# api_specs.API_SPECS 一处定义、两处派生（网关 SubflowSpec + NR tab flow），
+# 不再在此手搓，避免"改一处漏一处"的 split。
 from .api_specs import API_SPECS  # noqa: E402  (循环导入：subflows 先定义 Param/SubflowSpec/SUBFLOWS)
 for _api_spec in API_SPECS:
     SUBFLOWS[_api_spec.name] = _api_spec.to_subflow_spec()

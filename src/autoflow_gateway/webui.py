@@ -33,7 +33,12 @@ from .device_guard import DeviceGuardStore
 from .audit import AuditStore
 from .subflows import introspect_nr_subflow, validate_subflow_registration
 from .api_config_store import ApiConfigStore
-from .api_specs import ApiSpec, get_api_spec
+from .api_specs import (
+    SYSTEM_PLACEHOLDERS,
+    ApiSpec,
+    get_api_spec,
+    resolve_system_placeholders,
+)
 from . import connections
 
 # 人工抽查（spotcheck）与评测工作台（eval）已从网关剥离，迁移至 archive/agent-loop-migration/（C4）。
@@ -611,7 +616,9 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         """从 spec 的表达式字段 + headers 提取 <ENV_NAME> 占位符，
 
         作为该 Link API 需用户填写的配置字段（单一真相源，避免手维护字段清单）。
-        A3(#179)：extract / nr_assemble 也会进 change 节点，故一并纳入扫描。"""
+        A3(#179)：extract / nr_assemble 也会进 change 节点，故一并纳入扫描。
+        A25：`<NAS_IP>` 等**系统占位符不进此清单**——那是部署环境事实，网关从
+        NR_URL 就能推出来；要用户手填等于把网关的内部知识摊派给使用者。"""
         names: list = []
         seen = set()
         texts = [getattr(spec, f, "") or "" for f in _SPEC_EXPR_FIELDS]
@@ -619,6 +626,8 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             texts.append(str(v))
         for text in texts:
             for m in _ENV_PH_RE.findall(text or ""):
+                if m in SYSTEM_PLACEHOLDERS:
+                    continue
                 if m not in seen:
                     seen.add(m)
                     names.append(m)
@@ -940,11 +949,16 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
 
         覆盖面与 _config_fields_for_spec 严格一致（共用 _SPEC_EXPR_FIELDS），
         否则会出现「要求用户填、但装进 NR 的节点里仍是裸占位符」的错位。
-        返回替换后的 ApiSpec 副本（不改原 spec）；build_nr_tab_flows 据此生成真值节点。"""
+        返回替换后的 ApiSpec 副本（不改原 spec）；build_nr_tab_flows 据此生成真值节点。
+
+        A25：用户配置替换完后再过一遍系统占位符解析。顺序不能反——用户若显式
+        配了 NAS_IP（老数据里可能有），以用户值优先，系统解析只兜没配的。"""
         sub = lambda m: config.get(m.group(1), m.group(0))
-        patch = {f: _ENV_PH_RE.sub(sub, getattr(spec, f, "") or "")
+        patch = {f: resolve_system_placeholders(
+                     _ENV_PH_RE.sub(sub, getattr(spec, f, "") or ""))
                  for f in _SPEC_EXPR_FIELDS}
-        patch["nr_headers"] = {k: _ENV_PH_RE.sub(sub, str(v))
+        patch["nr_headers"] = {k: resolve_system_placeholders(
+                                   _ENV_PH_RE.sub(sub, str(v)))
                                for k, v in (spec.nr_headers or {}).items()}
         return _dc.replace(spec, **patch)
 
