@@ -290,13 +290,27 @@ def _vg_resolve_path(msg, path):
     return cur
 
 def _vg_set_path(msg, path, val):
+    """按点路径写 msg，返回是否真正写入。
+
+    刻意复刻 NR `RED.util.setObjectProperty` 的语义：中间段若**既非 dict 也非缺失**
+    （典型：inject payloadType=date → msg.payload 是标量），既不下钻也不创建，
+    直接放弃写入且不报错。返回 False 让调用方能把这次「静默丢写」显式记为告警，
+    而不是像旧版那样连闸门自己都不知道字段没落地（A15-b）。
+    """
     cur = msg
     parts = path.split(".")
     for p in parts[:-1]:
         cur = cur.setdefault(p, {})
         if not isinstance(cur, dict):
-            return
+            return False
     cur[parts[-1]] = val
+    return True
+
+
+# 编译器为规避「标量 payload 静默吞写」在取值节点注入的容器归一表达式，
+# 形如 `$type(payload) = "object" ? payload : {}`（见 dsl_engine._emit_read_state）。
+_VG_PAYLOAD_OBJ_RE = re.compile(
+    r'^\s*\$type\(\s*(?P<p>[\w.]+)\s*\)\s*=\s*"object"\s*\?\s*(?P=p)\s*:\s*\{\s*\}\s*$')
 
 def _vg_val_eq(val, expect, vt):
     # 剥离两侧单/双引号（与编译器分支值归一化保持一致），避免 'off' vs "off" 类引号不一致误判
@@ -425,7 +439,14 @@ def _vg_eval_switch(node, msg, warnings=None):
             if not _vg_val_eq(val, rule.get("v"), rule.get("vt")):
                 taken.append(i)
                 matched = True
-        elif t == "jsonata":
+        elif t in ("jsonata", "jsonata_exp") or (
+                t not in ("else", "otherwise") and rule.get("vt") == "jsonata"):
+            # A15 关键：NR switch 的 JSONata 规则类型是 **jsonata_exp**（编译器亦按此产出，
+            # 见 dsl_engine._parse_switch_rule / _emit_switch）。旧代码只判 t == "jsonata"，
+            # 对真实产物**永不命中** → 有 else 体时恒走 else（断言反向后置条件），
+            # 无 else 体时一个分支都不走 → 重放归零（0 意图 → 闸门 skip → 假过）。
+            # 这里同时兜住 vt=="jsonata" 的变体写法，并显式排除 else/otherwise
+            # （编译器给 else 规则也带 vt="jsonata"，不可当条件求值）。
             matched_rule, known = _vg_eval_jsonata_expr(rule.get("v", ""), msg)
             if known:
                 if matched_rule:
@@ -508,6 +529,131 @@ def _vg_apply_change(node, msg):
         _vg_set_path(m, p, val)
     return m
 
+def _vg_is_external_call(node_type) -> bool:
+    """是否为「外部调用」节点：link out 或子流程实例。
+
+    A12 关键：NR 5.x 的子流程**实例** type 是 `subflow:<subflow_id>`（带前缀），
+    旧代码只判 `t in ("link out","subflow")`，对真实编译产物**永不命中** →
+    external_calls 恒空 → 「期待调用某子流程」根本无从验证。
+    """
+    t = node_type or ""
+    return t in ("link out", "subflow") or t.startswith("subflow:")
+
+
+def _ha_node_call(nd) -> tuple:
+    """从 api-call-service 节点解析 (domain, service, targets, data)。
+
+    必须兼容两种写法，否则白箱路径重放不到任何意图：
+      - 编译产物：domain/service/entityId 三字段；
+      - agent 手写 / NR HA 2.x：action="light.turn_on" + data.entity_id 或 entities.entity。
+    """
+    raw = nd.get("data")
+    try:
+        if isinstance(raw, str):
+            data = json.loads(raw or "{}")
+        elif isinstance(raw, dict):
+            data = dict(raw)
+        else:
+            data = {}
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    domain = nd.get("domain") or ""
+    service = nd.get("service") or ""
+    if not (domain and service):
+        action = nd.get("action") or ""
+        if isinstance(action, str) and "." in action:
+            domain, service = action.split(".", 1)
+    targets = nd.get("entityId") or []
+    if isinstance(targets, str):
+        targets = [t.strip() for t in targets.split(",") if t.strip()]
+    if not targets:
+        ent = (nd.get("entities") or {}).get("entity") or []
+        if isinstance(ent, list):
+            targets = [e for e in ent if e]
+    if not targets:
+        eid = data.get("entity_id") or data.get("entityId")
+        if isinstance(eid, str):
+            targets = [t.strip() for t in eid.split(",") if t.strip()]
+        elif isinstance(eid, list):
+            targets = [e for e in eid if e]
+    return domain, service, list(targets), data
+
+
+def _expected_state_for(domain, service, data):
+    """按 vhass 的服务建模推导「调用后该实体应有的 state」。
+
+    A18 之二：旧实现只认 turn_on/turn_off，导致 climate.set_hvac_mode /
+    fan.set_percentage 之类**一个期望都提不出来** → 闸被 skip → 顶层假 pass。
+    这里直接复用 vhass 的建模表作为唯一事实源，能推就推、推不出就说清为什么。
+
+    返回 (expected_state | None, unverifiable_reason | None)。
+    """
+    from . import vhass as _vh
+    key = (domain, service)
+    if service in _vh._ON_OFF:
+        return _vh._ON_OFF[service], None
+    if service in _vh._COVER:
+        return _vh._COVER[service], None
+    if service in _vh._LOCK:
+        return _vh._LOCK[service], None
+    if key in _vh._FIXED_STATE:
+        return _vh._FIXED_STATE[key], None
+    if key in _vh._STATE_FROM_DATA:
+        dkey = _vh._STATE_FROM_DATA[key]
+        val = data.get(dkey)
+        if val is not None:
+            return str(val), None
+        return None, f"{domain}.{service} 缺少参数 {dkey}，无法推导后置状态"
+    if key in _vh._ATTR_FROM_DATA:
+        return None, f"{domain}.{service} 只改属性不改 state，无法用 state 断言"
+    if service == "toggle":
+        return None, f"{domain}.toggle 终态取决于初始态，无法静态推导"
+    return None, f"{domain}.{service} 未被 vhass 建模，后置状态无法验证"
+
+
+def _auto_expected_from_nodes(nodes) -> tuple:
+    """从 flow 的 api-call-service 节点自动推导 (expected 列表, 不可验证原因列表)。"""
+    expected, unverifiable = [], []
+    for n in nodes or []:
+        if n.get("type") != "api-call-service":
+            continue
+        domain, service, targets, data = _ha_node_call(n)
+        if not (domain and service):
+            unverifiable.append(f"节点 {n.get('id')} 无法解析 domain.service")
+            continue
+        if not targets:
+            unverifiable.append(f"{domain}.{service} 未指定 entity_id，无法断言")
+            continue
+        state, why = _expected_state_for(domain, service, data)
+        if state is None:
+            unverifiable.append(why)
+            continue
+        for t in targets:
+            item = {"entity_id": t, "state": state}
+            if item not in expected:
+                expected.append(item)
+    return expected, unverifiable
+
+
+def _sub_name_norm(s) -> str:
+    """子流程名归一化：去空白/下划线/连字符/箭头装饰，转小写。
+
+    编译产物里 link out 节点名是 `→ bark_push`、子流程实例名是 `bark_push`，
+    而 expected 里人写的是 `bark_push`，需要能对上。
+    """
+    return re.sub(r"[\s_\-→>]+", "", str(s or "")).lower()
+
+
+def _sub_name_match(want, actual) -> bool:
+    """期望的子流程名是否命中某个实际外部调用名（归一化后相等或被包含）。"""
+    w, a = _sub_name_norm(want), _sub_name_norm(actual)
+    if not w or not a:
+        return False
+    return w == a or w in a
+
+
 def _vg_evaluate_active_intents(flow, world, virtual_time=None, warnings=None):
     """分支感知：返回当前世界态下应执行的 api-call-service 节点 id 集合。
 
@@ -567,9 +713,12 @@ def _vg_evaluate_active_intents(flow, world, virtual_time=None, warnings=None):
             for tgt in outs[0]:
                 _trace(tgt, msg, seen)
             return
-        if t in ("link out", "subflow"):
+        if _vg_is_external_call(t):
             # 外部调用（子流程/link）同样按分支感知标记可达，供闸门只记录命中分支的调用
             active.add(nid)
+            # 子流程实例可有下游（调用完继续往下走），沿 out0 继续传播
+            for tgt in (outs[0] if outs else []):
+                _trace(tgt, msg, seen)
             return
         if t == "switch":
             for oi in _vg_eval_switch(node, msg, warnings):
@@ -578,11 +727,27 @@ def _vg_evaluate_active_intents(flow, world, virtual_time=None, warnings=None):
             return
         if t == "api-current-state":
             if node.get("halt_if") in (None, ""):
-                # 读值节点：把实体态写入 outputProperties 指定的 msg 字段
+                # 读值节点：按 outputProperties **声明顺序**回放
+                # （NR 对同一 msg 逐条 setMessageProperty，顺序即执行序）。
                 m = dict(msg)
+                _ent_state = world(node.get("entityId") or node.get("entity_id"))
                 for op in (node.get("outputProperties") or []):
-                    if op.get("propertyType") == "msg" and op.get("valueType") == "entityState":
-                        _vg_set_path(m, op.get("property"), world(node.get("entityId") or node.get("entity_id")))
+                    if op.get("propertyType") != "msg":
+                        continue
+                    prop = op.get("property") or "payload"
+                    vtp = op.get("valueType")
+                    if vtp == "entityState":
+                        if not _vg_set_path(m, prop, _ent_state) and warnings is not None:
+                            warnings.append(
+                                f"取值节点写 msg.{prop} 被静默丢弃（中间路径不是对象），"
+                                f"下游分支读不到该字段")
+                    elif vtp == "jsonata" and _VG_PAYLOAD_OBJ_RE.match(str(op.get("value") or "")):
+                        # A15-b：这条是编译器插的「payload 容器归一」。旧重放器只认
+                        # entityState、直接跳过它 → 上游 inject 的标量 payload 没被重置成 {}
+                        # → 紧随其后的 payload.<field> 写入静默失败 → 分支变量恒 undefined
+                        # → JSONata 判定不出结果。必须一并回放才能还原真机行为。
+                        if not isinstance(_vg_resolve_path(m, prop), dict):
+                            _vg_set_path(m, prop, {})
                 msg = m
                 for tgt in outs[0]:
                     _trace(tgt, msg)
@@ -3828,13 +3993,18 @@ class Gateway:
         return out
 
     @staticmethod
-    def _build_unified_gate(staging_gate, e2e_result, canary_result) -> Dict[str, Any]:
+    def _build_unified_gate(staging_gate, e2e_result, canary_result,
+                            *, require_e2e: bool = False,
+                            staging_required: bool = False) -> Dict[str, Any]:
         """聚合三类闸为单一可机读门面（P3 核心聚合，#686）。
 
         输入：
           - staging_gate: run_staging_gate 结果 / {"skipped": True} 占位 / None
           - e2e_result: run_e2e_trace_raw 结果 / None（未开启）
           - canary_result: get_nr_subflow_integrity 结果 / {"ok":True,"source":"skipped"}
+          - require_e2e: 调用方是否**要求**跑 e2e（A22）。要求了却没真跑 → 不许判 pass。
+          - staging_required: 调用方是否**期望** vhass 闸真跑（A18，如 run_gate=True 且
+            flow 含 HA 动作）。期望了却被 skip → 后置条件根本没验证，降级 warn。
         输出 {
           verdict: "block" | "warn" | "pass",
           passed: bool,
@@ -3843,19 +4013,30 @@ class Gateway:
         }
         聚合规则：
           vhass 未通过 → block；e2e 真跑且非通过 → block；
+          require_e2e 但 e2e 未真跑 → block（A22：拒绝「空 pass」）；
+          staging_required 但 vhass 被 skip → warn（A18：拒绝「零验证的绿灯」）；
           canary 探测到空壳 / mustache 占位 → warn（fail-open，预存问题非本次部署）；
-          其余（含全 SKIP）→ pass。"""
+          其余（含全 SKIP 且调用方无要求）→ pass。"""
         # ── vhass staging 层 ──
         if (staging_gate is None or not isinstance(staging_gate, dict)
                 or "passed" not in staging_gate):
+            # A18：skip 原因必须如实回传（旧实现硬编码「run_gate=False / 无 HA 动作」，
+            # 在 run_gate=True 且明明有 HA 动作时自相矛盾，误导排障）。
+            _skip_reason = None
+            if isinstance(staging_gate, dict):
+                _skip_reason = staging_gate.get("reason") or staging_gate.get("error")
             vhass = {"ran": False, "passed": None, "verdict": "skipped",
-                     "detail": "未运行（run_gate=False / 无 HA 动作 / dry_run）"}
+                     "detail": _skip_reason or "未运行（run_gate=False / 无 HA 动作 / dry_run）"}
         else:
             vhass = {
                 "ran": True,
                 "passed": bool(staging_gate.get("passed")),
                 "verdict": staging_gate.get("verdict", "?"),
                 "detail": staging_gate.get("reasons") or staging_gate.get("error"),
+                # 闸内「没能真正证实」的项（vhass 未建模的服务 A14 / 无法本地求值只能
+                # 保守视为命中的 JSONata 分支 A15 / 字段静默丢写）。passed=True 只说明
+                # 「没抓到反例」，不等于「验证过」，故单独抬出来供聚合层降级。
+                "warnings": list(staging_gate.get("warnings") or []),
             }
 
         # ── e2e 实机追踪层 ──
@@ -3894,24 +4075,49 @@ class Gateway:
             }
 
         # ── 聚合 verdict ──
-        notes = []
+        # 分别收集 block / warn 理由再定级，避免「命中前一条就吞掉后面所有告警」。
+        block_notes: List[str] = []
+        warn_notes: List[str] = []
+
         if vhass["ran"] and not vhass["passed"]:
-            verdict = "block"
-            notes.append("vhass staging 闸门未通过 → 硬拦")
-        elif e2e["ran"] and not e2e["passed"]:
-            verdict = "block"
-            notes.append("E2E 实机验证未通过 → 硬拦")
-        elif canary["ran"] and canary["verdict"] == "warn":
-            verdict = "warn"
+            block_notes.append("vhass staging 闸门未通过 → 硬拦")
+        if e2e["ran"] and not e2e["passed"]:
+            block_notes.append("E2E 实机验证未通过 → 硬拦")
+        # 【A22】要求跑 e2e 却没真跑（PROD 写保护 / 基建异常 / 被吞成 e2e=False）→
+        # 绝不能顶层 pass 制造「e2e 通过」假象。
+        if require_e2e and not e2e["ran"]:
+            block_notes.append(
+                f"require_e2e=True 但 E2E 未真正执行（层内 verdict={e2e['verdict']}，"
+                f"detail={e2e.get('detail')}）→ 拒绝空 pass[A22]")
+        # 【A14/A15】vhass 闸「过了」但过程中有未证实项（未建模服务 / 只能保守视为命中的
+        # JSONata 分支 / 字段静默丢写）→ 这类绿灯是「没抓到反例」而非「验证通过」，
+        # 不许当作干净 pass 交付，降级 warn 并把原因原样带出。
+        if vhass["ran"] and vhass["passed"] and vhass.get("warnings"):
+            warn_notes.append(
+                "vhass staging 判过，但存在【未证实项】，后置结论不完全可信："
+                + "；".join(str(w) for w in vhass["warnings"])
+                + " → 降级 warn[A14/A15]")
+        # 【A18】期望 vhass 闸运行却被 skip → 后置条件一条都没验证，不许绿灯。
+        if staging_required and not vhass["ran"]:
+            warn_notes.append(
+                f"vhass staging 闸被要求运行却未执行：{vhass['detail']}"
+                f" → 后置条件【未验证】，降级 warn[A18]")
+        if canary["ran"] and canary["verdict"] == "warn":
             if canary["any_empty_shell"]:
-                notes.append("结构金丝雀：预先存在空壳子流程（非本次部署，fail-open 放行）")
+                warn_notes.append("结构金丝雀：预先存在空壳子流程（非本次部署，fail-open 放行）")
             if canary["mustache_warnings"]:
-                notes.append(f"结构金丝雀：{canary['mustache_warnings']} 个子流程含 mustache 占位实体"
-                             f"（降级非致命，WARN）")
+                warn_notes.append(f"结构金丝雀：{canary['mustache_warnings']} 个子流程含 mustache 占位实体"
+                                  f"（降级非致命，WARN）")
+
+        if block_notes:
+            verdict = "block"
+        elif warn_notes:
+            verdict = "warn"
         else:
             verdict = "pass"
             if not (vhass["ran"] or e2e["ran"] or canary["ran"]):
-                notes.append("所有闸均跳过（dry-run / 未开启 / 无 HA 动作）→ 无聚合结论，沿用各闸独立结果")
+                warn_notes.append("所有闸均跳过（dry-run / 未开启 / 无 HA 动作）→ 无聚合结论，沿用各闸独立结果")
+        notes = block_notes + warn_notes
 
         return {
             "verdict": verdict,
@@ -4205,30 +4411,23 @@ class Gateway:
             n.get("type") in ("api-call-service", "server-state-changed", "api-current-state")
             for n in nodes
         )
-        if run_gate and has_ha_actions and not dry_run:
-            # 尝试从 flow 中提取可断言的实体（启发式：从 domain/service/data 中提取 entity_id）
-            expected_auto = []
-            for n in nodes:
-                if n.get("type") == "api-call-service":
-                    data_str = n.get("data", "{}")
-                    try:
-                        data = json.loads(data_str) if isinstance(data_str, str) else data_str
-                    except Exception:
-                        data = {}
-                    entity_id = data.get("entity_id") or data.get("entityId")
-                    if entity_id:
-                        action = n.get("action", "")
-                        state = "on" if "turn_on" in (action or "") else (
-                            "off" if "turn_off" in (action or "") else None)
-                        if state:
-                            expected_auto.append({"entity_id": entity_id, "state": state})
-            if expected_auto:
-                gate = self.run_staging_gate(
-                    dsl=f"# raw-deploy from {agent_id}\n# auto-extracted entities:\n"
-                        + json.dumps(expected_auto, ensure_ascii=False),
-                    expected_postconditions=expected_auto,
-                )
-                if not gate.get("passed"):
+        _gate_unverifiable: List[str] = []
+        _staging_required = bool(run_gate and has_ha_actions and not dry_run)
+        if _staging_required:
+            # 【A18】与 verify_flow 同源修复：改走 flow= 直通口 + 正确 kwarg（旧写法
+            # expected_postconditions= 是 TypeError，dsl 又是伪造的注释文本，两头必死）。
+            expected_auto, _gate_unverifiable = _auto_expected_from_nodes(nodes)
+            if not expected_auto:
+                gate = {"skipped": True,
+                        "reason": ("flow 含 HA 动作，但没有任何后置条件可自动推导，闸未运行："
+                                   + "；".join(sorted(set(_gate_unverifiable)) or ["未知原因"]))}
+            else:
+                try:
+                    gate = self.run_staging_gate(dsl="", expected=expected_auto, flow=flow)
+                except Exception as _ge:
+                    # 闸门基建异常按 fail-open 处理（与本函数既有取向一致），但如实留痕
+                    gate = {"skipped": True, "reason": f"staging 闸异常: {_ge}"}
+                if not gate.get("passed") and not gate.get("skipped"):
                     _slog(_tid, "deploy_raw.gate_fail", elapsed=round(time.perf_counter() - _t0, 3))
                     _record_fail()
                     return {
@@ -4432,7 +4631,10 @@ class Gateway:
             "lint": lint_issues,
             "lint_error_count": sum(1 for v in lint_issues if v["level"] == "error"),
             "lint_warning_count": sum(1 for v in lint_issues if v["level"] == "warning"),
-            "gate": self._build_unified_gate(gate, _e2e, nr_integrity),
+            # A18：闸被要求跑却没跑 → 报告里如实降级 warn（部署侧的 fail-open 策略
+            # 不改，但「验证结论」不能替它撒谎说 pass）。
+            "gate": self._build_unified_gate(gate, _e2e, nr_integrity,
+                                             staging_required=_staging_required),
             "logic": _logic_block,
             "deployed_at": meta["deployed_at"],
             "source_agent": agent_id,
@@ -4495,36 +4697,37 @@ class Gateway:
         warnings = [v for v in validation if v.get("level") == "warning"]
 
         # Step 3: 可选 vhass staging 闸（只读：断言预期后条件，不部署）
-        gate = {"skipped": True, "reason": "无 HA 动作或无预期条件"}
+        # 【A18】三处硬伤一并修：
+        #   1) 旧代码把 expected 用错 kwarg（expected_postconditions=）传给 run_staging_gate，
+        #      必抛 TypeError 被 except 吞成 skipped → 闸门**从来没跑过**；
+        #   2) 旧代码伪造一段注释 DSL 让闸门去 parse，注定编译失败 → 改走 flow= 直通口；
+        #   3) 期望提取只认 turn_on/turn_off，非 on/off 动作一律提不出 → 现按 vhass
+        #      建模表推导，推不出的如实登记为「不可验证」并让顶层降级 warn。
         has_ha_actions = any(
             n.get("type") in ("api-call-service", "server-state-changed", "api-current-state")
             for n in nodes
         )
-        if run_gate and has_ha_actions:
-            expected_auto = []
-            for n in nodes:
-                if n.get("type") == "api-call-service":
-                    data_str = n.get("data", "{}")
-                    try:
-                        data = json.loads(data_str) if isinstance(data_str, str) else data_str
-                    except Exception:
-                        data = {}
-                    entity_id = data.get("entity_id") or data.get("entityId")
-                    if entity_id:
-                        action = n.get("action", "")
-                        state = "on" if "turn_on" in (action or "") else (
-                            "off" if "turn_off" in (action or "") else None)
-                        if state:
-                            expected_auto.append({"entity_id": entity_id, "state": state})
+        staging_required = bool(run_gate and has_ha_actions)
+        unverifiable: List[str] = []
+        if not run_gate:
+            gate = {"skipped": True, "reason": "run_gate=False（调用方未要求跑 staging 闸）"}
+        elif not has_ha_actions:
+            gate = {"skipped": True, "reason": "flow 无 HA 动作节点，没有后置条件可断言"}
+        else:
+            expected_auto, unverifiable = _auto_expected_from_nodes(nodes)
             if expected_auto:
                 try:
-                    gate = self.run_staging_gate(
-                        dsl=f"# verify from {agent_id}\n# auto-extracted entities:\n"
-                            + json.dumps(expected_auto, ensure_ascii=False),
-                        expected_postconditions=expected_auto,
-                    )
+                    gate = self.run_staging_gate(dsl="", expected=expected_auto, flow=flow)
+                    if unverifiable:
+                        gate.setdefault("warnings", []).append(
+                            "部分动作的后置条件无法自动推导，未纳入断言："
+                            + "；".join(sorted(set(unverifiable))))
                 except Exception as _ge:
                     gate = {"skipped": True, "reason": f"staging 闸异常: {_ge}"}
+            else:
+                gate = {"skipped": True,
+                        "reason": ("flow 含 HA 动作，但没有任何后置条件可自动推导，闸未运行："
+                                   + "；".join(sorted(set(unverifiable)) or ["未知原因"]))}
 
         # Step 4: 结构金丝雀（只读内省 NR 子流程完整性；NR 不可达则跳过，不误伤验证）
         nr_integrity: Dict[str, Any] = {"ok": True, "source": "skipped"}
@@ -4542,7 +4745,13 @@ class Gateway:
             except Exception as _ee:
                 _e2e = {"e2e": False, "verdict": "拦截", "error": f"E2E 验证异常：{_ee}"}
 
-        unified = self._build_unified_gate(gate, _e2e, nr_integrity)
+        unified = self._build_unified_gate(gate, _e2e, nr_integrity,
+                                           require_e2e=bool(require_e2e),
+                                           staging_required=staging_required)
+        if unverifiable:
+            unified["notes"].append(
+                "以下动作的后置条件未被验证（vhass 无法用 state 断言）："
+                + "；".join(sorted(set(unverifiable))))
         # 把 lint 硬伤数附进 notes，便于 agent 一眼看到（不影响 verdict，保持 fail-open 语义）
         if any(v.get("level") == "error" for v in lint_issues):
             unified["notes"].append(
@@ -4984,12 +5193,17 @@ class Gateway:
                          scenario: Optional[List[Dict]] = None,
                          virtual_time=None,
                          branch_aware: bool = True,
-                         target: str = "staging") -> Dict[str, Any]:
+                         target: str = "staging",
+                         flow: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """staging 闸门：编译 DSL → 把 flow 的 HA 意图重放到 vhass → 断言后置条件。
 
         不依赖真实 NR/HA：编译产物的 api-call-service 节点即『这个 flow 要对 HA 做的意图』，
         直接在内存 vhass 上重放并断言。子流程(link out/subflow) 属 Tier A 基础设施，
         作为外部调用记录、不参与断言（其效果是人工验证过的）。
+
+        - flow：白箱直通口。给了就跳过 DSL 解析/编译，直接重放这份 NR flow。
+          （旧实现逼白箱路径伪造一段「注释 + JSON」的假 DSL，parse 必失败 →
+           闸门等于从未运行，是 A18 假 pass 的直接成因。）
 
         - 返回 {passed, replayed_services, external_calls, assertions, failures, entity_count}
         """
@@ -4997,18 +5211,21 @@ class Gateway:
                                   Parallel, detect_semantic_gaps)
         from . import vhass as _vh
 
-        try:
-            scene = parse(dsl)
-            flow = compile(scene, target=target)
-        except DSLError as e:
-            return {"passed": False, "stage": "compile", "error": str(e),
-                    "compile_error": _compile_error_envelope(e),
-                    "result_kind": "compile_error",
-                    "verdict": "拦截", "reasons": [f"编译失败：{e}"]}
+        scene = None
+        if flow is None:
+            try:
+                scene = parse(dsl)
+                flow = compile(scene, target=target)
+            except DSLError as e:
+                return {"passed": False, "stage": "compile", "error": str(e),
+                        "compile_error": _compile_error_envelope(e),
+                        "result_kind": "compile_error",
+                        "verdict": "拦截", "reasons": [f"编译失败：{e}"]}
 
         # 0.5) 语义缺口预检（B1）：含历史/首次意图却未用对应原语 → 高声拦截，
         #      不让『静默降级成读当前态』的假阳性 flow 进黑名单之外的任何下游。
-        gaps = detect_semantic_gaps(dsl)
+        #      （白箱直通口无 DSL 文本，此检查不适用）
+        gaps = detect_semantic_gaps(dsl) if scene is not None else []
         if gaps:
             return {"passed": False, "stage": "semantic_gap", "error": "；".join(gaps),
                     "verdict": "拦截", "reasons": gaps}
@@ -5016,7 +5233,7 @@ class Gateway:
         # 0) 实体存在性校验：引用的 entity_id 必须存在于真实设备目录
         #    （防假阳性——假/拼错的 entity_id 不应让闸门误判 PASS；vhass 是空白假 HA，
         #     会无脑接收任何 ID，所以必须靠目录校验兜底。agent 应通过发现工具取真实 ID。）
-        unknown = self._check_entities_known(scene)
+        unknown = self._check_entities_known(scene) if scene is not None else []
         if unknown:
             return {
                 "passed": False,
@@ -5032,7 +5249,7 @@ class Gateway:
         #   若 agent 声明了 resolved_entities（来自 autoflow_resolve_entity 的确认结果），
         #   DSL 引用的所有实体必须 ⊆ resolved_entities，否则拦截。
         #   这直接消灭『把显示器挂灯错配成书房电脑开关』这类合法实体但语义错位的提交。
-        if resolved_entities:
+        if resolved_entities and scene is not None:
             declared = set(resolved_entities)
             used = self._collect_scene_entities(scene)
             rogue = [e for e in used if e not in declared]
@@ -5064,7 +5281,8 @@ class Gateway:
             return rec.get("state") if rec else None
 
         # 1) 单步默认：把首个 state 触发态注入 vhass（兼容旧行为，供条件门控/断言参考）
-        trig = next((t for t in scene.triggers if t.kind == "state"), None)
+        trig = next((t for t in scene.triggers if t.kind == "state"), None) \
+            if scene is not None else None
         if trig and trig.kind == "state":
             tstate = trig.state if trig.state not in ("*", None) else "changed"
             try:
@@ -5076,11 +5294,34 @@ class Gateway:
                 store.inject_trigger(trig.entity, tstate)
             except Exception:
                 pass
+        elif scene is None:
+            # 白箱直通口：无 scene，从 server-state-changed 节点还原触发态
+            for nd in flow.get("nodes", []):
+                if nd.get("type") != "server-state-changed":
+                    continue
+                _ent = (nd.get("entities") or {}).get("entity") or []
+                _eid = (_ent[0] if isinstance(_ent, list) and _ent
+                        else nd.get("entityId") or nd.get("entity_id"))
+                _st = nd.get("ifState")
+                if _eid and _st:
+                    try:
+                        store.inject_trigger(_eid, _st)
+                    except Exception:
+                        pass
+                break
 
         # 2) 重放（分支感知）：单步 = 一个 step；scenario = 多步时间线
         steps = scenario if scenario else [{"expected": expected}]
         step_results = []
         warnings = []
+        # 【A12】flow 里声明过的全部外部调用名（不论本步是否可达）。
+        # 与「本步真的被激活的 external」对照，可把失败精确归因为
+        #「压根没这个子流程」还是「有但挂在死分支」。
+        declared_subflows = [
+            (nd.get("name") or nd.get("type") or "subflow")
+            for nd in flow.get("nodes", [])
+            if _vg_is_external_call(nd.get("type"))
+        ]
         for step in steps:
             # 2a) 应用本步世界事件（多步场景逐步推进现实态）
             for eid, st in (step.get("world") or {}).items():
@@ -5093,20 +5334,18 @@ class Gateway:
             if branch_aware:
                 active = _vg_evaluate_active_intents(flow, _world, vt, warnings)
             else:
+                # 非分支感知：所有 HA 动作 + 所有子流程/link out 都算「会执行」，
+                # 否则 external_calls 恒空，A12 的子流程断言会全体误判 FAIL。
                 active = {n["id"] for n in flow.get("nodes", [])
-                          if n.get("type") == "api-call-service"}
+                          if n.get("type") == "api-call-service"
+                          or _vg_is_external_call(n.get("type"))}
             # 2c) 重放激活意图（link out/subflow 作外部调用记录）
             replayed = []
             external = []
             for nd in flow.get("nodes", []):
                 if nd.get("type") == "api-call-service" and nd["id"] in active:
-                    domain = nd.get("domain")
-                    service = nd.get("service")
-                    targets = nd.get("entityId") or []
-                    try:
-                        data = json.loads(nd.get("data") or "{}")
-                    except Exception:
-                        data = {}
+                    # 统一解析：兼容编译产物(domain/service/entityId)与手写(action/data)
+                    domain, service, targets, data = _ha_node_call(nd)
                     for t in targets:
                         payload = dict(data)
                         payload["entity_id"] = t
@@ -5115,21 +5354,68 @@ class Gateway:
                             replayed.append(f"{domain}.{service}({t})")
                         except Exception as e:  # pragma: no cover
                             replayed.append(f"{domain}.{service}({t})#err:{e}")
-                elif nd.get("type") in ("link out", "subflow"):
+                elif _vg_is_external_call(nd.get("type")):
                     if nd["id"] in active:
-                        external.append(nd.get("name", "subflow"))
+                        external.append(nd.get("name") or nd.get("type") or "subflow")
             # 2d) 断言后置条件
             assertions = []
             failures = []
             for cond in step.get("expected", []):
                 eid = cond.get("entity_id")
-                want = cond.get("state")
-                rec = store.get_state(eid) if eid else None
-                got = rec.get("state") if rec else None
-                ok = (got == want)
-                assertions.append({"entity_id": eid, "expected": want, "actual": got, "ok": ok})
-                if not ok:
-                    failures.append({"entity_id": eid, "expected": want, "actual": got})
+                want_sub = cond.get("subflow") or cond.get("subflow_name")
+                if eid:
+                    want = cond.get("state")
+                    rec = store.get_state(eid)
+                    got = rec.get("state") if rec else None
+                    ok = (got == want)
+                    # A14：失败可能只是「vhass 未建模该服务」，须与「flow 真错了」区分
+                    unmodeled = ((rec or {}).get("attributes") or {}).get("_unmodeled_service")
+                    item = {"kind": "state", "entity_id": eid,
+                            "expected": want, "actual": got, "ok": ok}
+                    if rec is None:
+                        # 归因清楚：不是「状态不对」，是这个实体压根不在设备目录里
+                        item["reason"] = ("实体不在 vhass staging 设备目录"
+                                          "（entity_id 拼错 / 设备未接入 / 目录未同步）")
+                    if unmodeled:
+                        item["unmodeled_service"] = unmodeled
+                    assertions.append(item)
+                    if not ok:
+                        fail = {"entity_id": eid, "expected": want, "actual": got}
+                        if rec is None:
+                            fail["reason"] = item["reason"]
+                        if unmodeled:
+                            fail["unmodeled_service"] = unmodeled
+                            fail["hint"] = (f"vhass 未建模 {unmodeled} 的真实副作用，"
+                                            f"后置状态无法验证（非必然是 flow 的错）")
+                        failures.append(fail)
+                elif want_sub:
+                    # 【A12】真验证：期望被调用的子流程必须在本步真的可达并被激活。
+                    # 旧实现只读 entity_id/state，对 {"subflow": x} 恒 ok=(None==None)=True。
+                    hit = next((c for c in external if _sub_name_match(want_sub, c)), None)
+                    declared = any(_sub_name_match(want_sub, d) for d in declared_subflows)
+                    ok = hit is not None
+                    if ok:
+                        why = f"已调用（{hit}）"
+                    elif declared:
+                        why = ("flow 中存在该子流程节点，但本步世界态下不可达"
+                               "（死分支 / 条件未命中 / 未接线）")
+                    else:
+                        why = (f"flow 中没有任何 link out / 子流程实例匹配「{want_sub}」；"
+                               f"已声明的外部调用：{declared_subflows or '无'}")
+                    assertions.append({"kind": "subflow", "subflow": want_sub,
+                                       "entity_id": None, "expected": f"调用 {want_sub}",
+                                       "actual": hit or "未调用", "ok": ok, "reason": why})
+                    if not ok:
+                        failures.append({"subflow": want_sub, "expected": f"调用 {want_sub}",
+                                         "actual": "未调用", "reason": why})
+                else:
+                    # 【A12·fail-closed】识别不了的期望项一律判失败，绝不静默放行。
+                    why = ("无法识别的期望项：需含 {entity_id, state} 或 {subflow}，"
+                           f"实收 {json.dumps(cond, ensure_ascii=False)}")
+                    assertions.append({"kind": "unknown", "entity_id": None,
+                                       "expected": cond, "actual": None,
+                                       "ok": False, "reason": why})
+                    failures.append({"expected": cond, "actual": None, "reason": why})
             step_results.append({
                 "world": step.get("world", {}),
                 "replayed_services": replayed,
@@ -5137,6 +5423,13 @@ class Gateway:
                 "assertions": assertions,
                 "failures": failures,
             })
+
+        # 2e) A14：未建模服务导致「后置状态压根没被真实改动」，必须显式告警而非静默
+        _unmodeled = list(getattr(store, "unmodeled_calls", []) or [])
+        if _unmodeled:
+            warnings.append(
+                "以下服务 vhass 未建模真实副作用，其后置状态【未被验证】："
+                + "、".join(_unmodeled))
 
         # 3) 汇总返回（单步与旧结构兼容；多步额外给 steps）
         if scenario:
@@ -5155,7 +5448,14 @@ class Gateway:
         reasons = []
         for a in sr["assertions"]:
             mark = "[通过]" if a["ok"] else "[未过]"
-            reasons.append(f"{mark} {a['entity_id']} 期望={a['expected']} 实测={a['actual']}")
+            # A12：断言项现在有 state / subflow / unknown 三种，标签不能只认 entity_id
+            label = a.get("entity_id") or a.get("subflow") or "期望项"
+            line = f"{mark} {label} 期望={a['expected']} 实测={a['actual']}"
+            if a.get("reason"):
+                line += f"（{a['reason']}）"
+            if a.get("unmodeled_service"):
+                line += f"[vhass 未建模 {a['unmodeled_service']}]"
+            reasons.append(line)
         reasons.append(
             f"重放 {len(sr['replayed_services'])} 个 HA 意图、记录 "
             f"{len(sr['external_calls'])} 个外部调用"

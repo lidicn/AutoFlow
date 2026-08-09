@@ -93,9 +93,17 @@ class TestVHassStoreLogic(unittest.TestCase):
         store.entities = {e["entity_id"]: VHassStore._normalize(e) for e in seed["entities"]}
         changed = store.apply_service("light", "turn_on", {"entity_id": "light.x"})
         self.assertEqual(changed[0]["state"], "on")
-        # 未知 service 用 service 名标注
+        # A14：未建模 service 绝不把 service 名伪造成状态。
+        # 旧契约是 state == "weird"，那本身就是「假状态喂给后置断言」的源头，
+        # 已按工单改为：状态原样保留 + 属性留痕 + 登记 unmodeled_calls 供闸门降级。
         store.apply_service("switch", "weird", {"entity_id": "switch.y"})
-        self.assertEqual(store.entities["switch.y"]["state"], "weird")
+        self.assertEqual(store.entities["switch.y"]["state"], "off")
+        self.assertEqual(
+            store.entities["switch.y"]["attributes"].get("_unmodeled_service"),
+            "switch.weird")
+        self.assertTrue(
+            any("switch.weird" in str(c) for c in store.unmodeled_calls),
+            f"未建模调用必须登记进 store.unmodeled_calls，实际={store.unmodeled_calls}")
 
     def test_seed_from_catalog(self):
         cat = {"entities": {
