@@ -118,19 +118,19 @@ def test_R2_subflow_template_interpolation():
 
 def test_R3_bare_handshake_by_default():
     """R3 根因：NR5 /comms 不接受 Authorization 头。默认必须裸握手（无 Bearer）。"""
-    bridge = DebugBridge(nr_client=object(), nr_url="http://192.168.2.200:1880")
-    bare = bridge._handshake_request("192.168.2.200", 1880, "/comms", None)
+    bridge = DebugBridge(nr_client=object(), nr_url="http://localhost:1880")
+    bare = bridge._handshake_request("localhost", 1880, "/comms", None)
     assert b"Authorization" not in bare, "默认握手不应带 Authorization 头"
-    with_tok = bridge._handshake_request("192.168.2.200", 1880, "/comms", "SECRET")
+    with_tok = bridge._handshake_request("localhost", 1880, "/comms", "SECRET")
     assert b"Authorization: Bearer SECRET" in with_tok, "带 token 时才回退 Bearer"
 
 
 def test_R3_retarget_changes_url():
     """运行期改 NR_URL：换址应生效并返回 True；同址应返回 False（不重复踹断）。"""
-    bridge = DebugBridge(nr_client=object(), nr_url="http://192.168.2.200:1880")
+    bridge = DebugBridge(nr_client=object(), nr_url="http://localhost:1880")
     old = bridge.ws_url
-    assert bridge.retarget("http://192.168.2.200:1880") is False
-    assert bridge.retarget("http://192.168.2.200:1990") is True
+    assert bridge.retarget("http://localhost:1880") is False
+    assert bridge.retarget("http://localhost:1990") is True
     assert bridge.ws_url != old
     assert "1990" in bridge.ws_url
 
