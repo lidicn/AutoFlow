@@ -5,6 +5,7 @@
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from autoflow_gateway import dsl_engine as E
 from autoflow_gateway.dsl_engine import DSLError, parse, validate, compile, compile_dsl, RawNode
 from autoflow_gateway.subflows import DEMO_NOTIFY_ENTRY_LINK_ID
+from api_spec_fixture import make_spec, temp_api_spec
 
 # ── MVP 闸门场景：回家开灯+播报（无分支，最薄场景）──────────────────────
 DSL_HOME_ARRIVE = """
@@ -610,40 +612,65 @@ def test_semantic_gap_detect_first_in_body():
     assert any("首次" in g or "去重" in g for g in gaps), gaps
 
 
-def test_image_vision_subflow_compile():
-    """P1②：文生图/图生文 ApiSpec 经 dsl_engine 编译为正确内联 http_api 节点。
+def test_multi_http_api_subflow_compile():
+    """A25 + doubao 移除后：多个 http_api 子流程经 dsl_engine 编译为正确内联节点，
+    且 url 占位符已被解析（不再含 `<NAS_IP>`）。
 
-    验证：两个端点都生成独立 http request（url 正确）；文生图把响应 image_url
-    规整进 payload.reply；图生文的落点本身就是 payload.reply，按 R8(#round4)
-    不再发射 `payload.reply = payload.reply` 自赋值空节点，http 节点直接接续下游。
+    用 temp_api_spec 注册 t_image / t_vision 两条测试 spec（与产品数据解耦），
+    锁的是「http_api 编译路径」这个真不变量，而非「豆包还在不在」；并验证 A25
+    占位符解析 + R8 自赋值空节点抑制：两个端点生成独立 http request（url 已解析）、
+    文生图把 image_url 规整进 payload.reply、图生文 extract 恰为落点本身则按 R8
+    不再发射自赋值空节点、http 节点直接接续下游。
     """
-    dsl = """
+    t_image = make_spec(name="t_image", title="测试文生图", kind="http_api",
+                        url="http://<NAS_IP>:1880/llm/image",
+                        method="POST", extract="payload.image_url",
+                        params={"prompt": {"name": "prompt", "required": True,
+                                           "default": None, "type": "str", "enum": None,
+                                           "desc": "提示词"}})
+    t_vision = make_spec(name="t_vision", title="测试图生文", kind="http_api",
+                         url="http://<NAS_IP>:1880/llm/vision",
+                         method="POST", extract="payload.reply",
+                         params={"prompt": {"name": "prompt", "required": True,
+                                            "default": None, "type": "str", "enum": None,
+                                            "desc": "提问"},
+                                 "image": {"name": "image", "required": True,
+                                           "default": None, "type": "str", "enum": None,
+                                           "desc": "图片"}})
+    os.environ["NR_URL"] = "http://10.99.99.99:1880"
+    try:
+        with temp_api_spec(t_image, t_vision):
+            dsl = """
 场景: 视觉能力
 触发: 每天 20:00
-调用子流程: llm_doubao_image(prompt=`一只赛博朋克风格的猫`)
+调用子流程: t_image(prompt=`一只赛博朋克风格的猫`)
 提取: 图片链接 = payload.reply
-调用子流程: llm_doubao_vision(prompt=`描述这张图`, image=`https://example.com/cat.jpg`)
+调用子流程: t_vision(prompt=`描述这张图`, image=`https://example.com/cat.jpg`)
 提取: 回复 = payload.reply
 """
-    flow = compile_dsl(dsl)
-    nodes = flow["nodes"]
-    urls = {n.get("url") for n in nodes if n.get("type") == "http request"}
-    assert "http://<NAS_IP>:1880/llm/image" in urls, urls
-    assert "http://<NAS_IP>:1880/llm/vision" in urls, urls
-    # 文生图：提取节点把 image_url 规整进 payload.reply
-    ext_img = [n for n in nodes if n.get("type") == "change"
-               and n.get("name") == "取 llm_doubao_image 返回值"]
-    assert ext_img, "缺少 image 提取节点"
-    assert ext_img[0]["rules"][0]["to"] == "payload.image_url"
-    # 图生文：落点已是 payload.reply → R8 不再生成自赋值空节点
-    ext_vis = [n for n in nodes if n.get("type") == "change"
-               and n.get("name") == "取 llm_doubao_vision 返回值"]
-    assert not ext_vis, f"R8：不应生成 payload.reply 自赋值空节点，实得 {ext_vis}"
-    # 链路不能因此断开：vision 的 http 节点必须有下游
-    http_vis = [n for n in nodes if n.get("type") == "http request"
-                and n.get("url") == "http://<NAS_IP>:1880/llm/vision"]
-    assert http_vis and http_vis[0].get("wires") and http_vis[0]["wires"][0], \
-        "vision http 节点下游断开"
+            flow = compile_dsl(dsl)
+            nodes = flow["nodes"]
+            urls = {n.get("url") for n in nodes if n.get("type") == "http request"}
+            # A25：占位符已解析为 NR_URL 主机名，绝不残留 <NAS_IP>
+            assert not any("<NAS_IP>" in (u or "") for u in urls), urls
+            assert "http://10.99.99.99:1880/llm/image" in urls, urls
+            assert "http://10.99.99.99:1880/llm/vision" in urls, urls
+            # 文生图：提取节点把 image_url 规整进 payload.reply
+            ext_img = [n for n in nodes if n.get("type") == "change"
+                       and n.get("name") == "取 t_image 返回值"]
+            assert ext_img, "缺少 image 提取节点"
+            assert ext_img[0]["rules"][0]["to"] == "payload.image_url"
+            # 图生文：extract 恰为落点 payload.reply → R8 不发射自赋值空节点
+            ext_vis = [n for n in nodes if n.get("type") == "change"
+                       and n.get("name") == "取 t_vision 返回值"]
+            assert not ext_vis, f"R8：不应生成 payload.reply 自赋值空节点，实得 {ext_vis}"
+            # 链路不能因此断开：vision 的 http 节点必须有下游
+            http_vis = [n for n in nodes if n.get("type") == "http request"
+                        and n.get("url") == "http://10.99.99.99:1880/llm/vision"]
+            assert http_vis and http_vis[0].get("wires") and http_vis[0]["wires"][0], \
+                "vision http 节点下游断开"
+    finally:
+        os.environ.pop("NR_URL", None)
 
 
 # ── A4 语义缺口检测扩展：间隔触发 / 自然语言条件 / 直到…才 ───────────────

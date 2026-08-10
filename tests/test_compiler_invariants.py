@@ -13,8 +13,27 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)                                  # 导入 compiler_invariants
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "src"))    # 导入 autoflow_gateway 包
 
+import pytest
+from api_spec_fixture import make_spec, temp_api_spec
+
 from compiler_invariants import (check_dsl, check_invariants,
                                  all_violations, INVARIANTS)
+
+
+# doubao 四条 spec 已按用户决策移除（WORKORDER_DEV_http_api_nas_ip）。
+# 用 t_image 临时 spec 代替 llm_doubao_image 驱动 http_api 编译路径，
+# 锁的是「http_api 子流程编译不变量」，而非「豆包还在不在」。
+@pytest.fixture(autouse=True, scope="module")
+def _image_spec():
+    spec = make_spec(
+        name="t_image", title="测试文生图", kind="http_api",
+        url="http://<NAS_IP>:1880/llm/image", method="POST",
+        extract="payload.image_url",
+        params={"prompt": {"name": "prompt", "required": True, "default": None,
+                           "type": "str", "enum": None, "desc": "提示词"}},
+    )
+    with temp_api_spec(spec):
+        yield
 
 # ── 已知良好 DSL（与 test_dsl_engine 的 MVP 场景一致，确认编译器已正确实现）──
 DSL_HOME = """
@@ -92,7 +111,7 @@ DSL_DELAY = """
 DSL_IMAGE = """
 场景: 视觉能力
 触发: 每天 20:00
-调用子流程: llm_doubao_image(prompt=`一只猫`)
+调用子流程: t_image(prompt=`一只猫`)
 提取: 图片链接 = payload.reply
 """
 
@@ -236,7 +255,7 @@ MATRIX = [
     ("delay", lambda t: f"场景: x\n触发: sensor.a 无人\n延时: 30\n动作: light.turn_off(灯)\n"),
     ("subflow_linkout", lambda t: f"场景: x\n触发: sensor.a 有人\n调用子流程: demo_notify(text=hi, room=客厅)\n"),
     ("subflow_instance", lambda t: f"场景: x\n触发: sensor.a 变化\n调用子流程: demo_notify(text=hi, room=客厅)\n"),
-    ("subflow_httpapi", lambda t: f"场景: x\n触发: 每天 20:00\n调用子流程: llm_doubao_image(prompt=`猫`)\n提取: 图片链接 = payload.reply\n"),
+    ("subflow_httpapi", lambda t: f"场景: x\n触发: 每天 20:00\n调用子流程: t_image(prompt=`猫`)\n提取: 图片链接 = payload.reply\n"),
     ("subflow_history", lambda t: f"场景: x\n触发: inject\n调用子流程: history_state_at(entity=climate.x, at=昨晚23:12)\n提取: v = payload.value\n"),
     ("parallel", lambda t: f"场景: x\n触发: sensor.a 有人\n并行:\n    动作: light.turn_on(灯1)\n    动作: light.turn_on(灯2)\n"),
     ("build_http", lambda t: "场景: x\n触发: inject\n构建: {\"m\":\"hi\"}\n请求: POST https://example.com/api\n"),
@@ -256,7 +275,7 @@ MATRIX = [
     ("parallel_subflow_delay", lambda t: f"场景: x\n触发: sensor.a 有人\n并行:\n    动作: light.turn_on(灯1)\n    延时: 10\n    调用子流程: demo_notify(text=hi, room=客厅)\n动作: light.turn_on(灯2)\n"),
     ("kitchen_sink", lambda t: f"场景: x\n触发: sensor.a 有人\n查询: light.b off\n分支 c == 1:\n    动作: light.turn_on(灯1)\n    延时: 5\n    调用子流程: demo_notify(text=hi, room=客厅)\n否则:\n    动作: light.turn_on(灯2)\n取值: sensor.a temp\n提取: 温度 = payload.temp\n动作: light.turn_on(灯)\n观测: 看状态\n"),
     ("multi_trigger_var_subflow", lambda t: f"场景: x\n触发: sensor.a 有人\n触发: sensor.b 变化\n变量: mode = eco\n调用子流程: demo_notify(text=hi, room=客厅)\n动作: light.turn_on(灯)\n"),
-    ("subflow_httpapi_multi", lambda t: f"场景: x\n触发: 每天 20:00\n调用子流程: llm_doubao_image(prompt=`猫`)\n提取: 图片链接 = payload.reply\n提取: 第二 = payload.reply\n动作: light.turn_on(灯)\n"),
+    ("subflow_httpapi_multi", lambda t: f"场景: x\n触发: 每天 20:00\n调用子流程: t_image(prompt=`猫`)\n提取: 图片链接 = payload.reply\n提取: 第二 = payload.reply\n动作: light.turn_on(灯)\n"),
     ("raw_in_branch", lambda t: f'场景: x\n触发: sensor.a 有人\n分支 c == 1:\n    原生节点: {{"type":"change","name":"设v","rules":[{{"t":"set","p":"payload.v","pt":"msg","to":"1","tot":"num"}}]}}\n    动作: light.turn_on(灯)\n否则:\n    动作: light.turn_off(灯)\n'),
     ("cond_then_branch", lambda t: f"场景: x\n触发: sensor.a 有人\n条件: light.b = on\n分支 c == 1:\n    动作: light.turn_on(灯)\n否则:\n    动作: light.turn_off(灯)\n"),
     ("long_entity", lambda t: f"场景: x\n触发: binary_sensor.study_motion_xyz_abc 有人\n动作: light.turn_on(light.study_main_lamp_01)\n"),

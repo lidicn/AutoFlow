@@ -45,6 +45,8 @@ from test_install_tab import (
     FakeNRClients, CAIYUN_CFG, ANYSEARCH_CFG, USER_TAB, USER_TAB_ID,
 )
 
+from api_spec_fixture import make_spec, temp_api_spec
+
 TARGET = "llm_caiyun_weather"   # 被删对象
 KEEP = "anysearch_batch"        # 必须完好无损的邻居
 
@@ -152,9 +154,13 @@ class TestLinkApiDelete(unittest.TestCase):
     # ── 硬约束：self_use 不可删 ──
     def test_delete_self_use_returns_403(self):
         self._inject_fake_nr()
-        r = self._delete("llm_doubao_say")
-        self.assertEqual(r.status_code, 403)
-        self.assertFalse(r.json()["ok"])
+        # 豆包系列已按用户决策移除，用临时 self_use spec 驱动同一代码路径。
+        spec = make_spec(name="t_self_use", title="自测自拒绝", kind="link_out",
+                         self_use=True, entry_link_id="af_selfuse_in")
+        with temp_api_spec(spec):
+            r = self._delete("t_self_use")
+            self.assertEqual(r.status_code, 403)
+            self.assertFalse(r.json()["ok"])
 
     # ── 硬约束：NR 写失败 → 502 且本地状态不动 ──
     def test_nr_failure_keeps_local_state(self):
