@@ -866,6 +866,9 @@ class Gateway:
                     "offset": offset, "next_offset": None, "total": 0,
                     "freshness": "", "area_resolved": None, "area_hint": None}
         area_filter, area_hint = self._resolve_area(area)
+        # A29：区域过滤透明化——area 传入却解析失败(area_filter=None)时实际未按
+        # 区域过滤、返回全量；显式告警，避免 agent 被 area_resolved:null 误导以为过滤生效。
+        area_warning = area_hint if (area and area_filter is None) else None
         area_index = self.state.get_area_index()
         # ── 先全量过滤出命中集合，再分页（这样 matched_count 才准确，B3）──
         matched = []
@@ -913,6 +916,7 @@ class Gateway:
             "freshness": cat.get("freshness", ""),
             "area_resolved": area_filter,
             "area_hint": area_hint,
+            "area_warning": area_warning,
         }
 
     def list_entities(self, domain: Optional[str] = None, area: Optional[str] = None,
@@ -948,6 +952,8 @@ class Gateway:
                     "offset": offset, "next_offset": None, "total": 0,
                     "freshness": "", "area_resolved": None, "area_hint": None}
         area_filter, area_hint = self._resolve_area(area)
+        # A29：同 discover——area 传入却解析失败(area_filter=None)时显式告警。
+        area_warning = area_hint if (area and area_filter is None) else None
         area_index = self.state.get_area_index()
         matched = []
         for eid, meta in ents.items():
@@ -987,6 +993,7 @@ class Gateway:
             "freshness": cat.get("freshness", ""),
             "area_resolved": area_filter,
             "area_hint": area_hint,
+            "area_warning": area_warning,
         }
 
     # 设备级总览里挑代表名 / 关键可控实体状态用的域
@@ -1515,7 +1522,9 @@ class Gateway:
         if not ents:
             return {'ok': False, 'error': 'device_catalog 为空，请先 refresh_catalog()。',
                     'query': name, 'candidates': []}
-        area_filter, _ = self._resolve_area(area) if area else (None, None)
+        area_filter, area_hint = self._resolve_area(area) if area else (None, None)
+        # A29：area 传入却解析失败(area_filter=None)时显式告警（原本 area_hint 被丢弃）。
+        area_warning = area_hint if (area and area_filter is None) else None
         area_index = self.state.get_area_index()
         q = (name or '').strip().lower()
 
@@ -1574,6 +1583,7 @@ class Gateway:
                 'confidence': conf,
             })
         return {'ok': True, 'query': name, 'area': area_filter,
+                'area_warning': area_warning,
                 'domain': domain, 'count': len(out), 'candidates': out}
 
     def _resolve_best(self, name: str) -> Optional[str]:
@@ -2210,6 +2220,14 @@ class Gateway:
         """
         if not flow_id:
             return {"ok": False, "error": "flow_id 为空", "stage": "get_flow"}
+        # A31：af_scene_* 是 propose_dsl 编译产物的逻辑 id，未部署到 Node-RED；
+        # get_flow 仅查已部署 flow，故必 404。明确告知，避免 agent 误以为流程失败。
+        if flow_id.startswith("af_scene") or flow_id.startswith("af_"):
+            return {"ok": False, "proposal": True, "flow_id": flow_id,
+                    "stage": "get_flow",
+                    "error": "该 flow_id 为编译提案逻辑 id（af_scene_*），尚未部署到 Node-RED。",
+                    "hint": "get_flow 只查已部署 flow。如需查看节点图，请用 propose_dsl 返回的 "
+                            "flow 字段；或先 deploy_proposal 部署，再用部署后返回的真实 flow id 回查。"}
         try:
             flow = self.nr.get_flow(flow_id)
         except Exception as e:
