@@ -614,7 +614,8 @@ def test_image_vision_subflow_compile():
     """P1②：文生图/图生文 ApiSpec 经 dsl_engine 编译为正确内联 http_api 节点。
 
     验证：两个端点都生成独立 http request（url 正确）；文生图把响应 image_url
-    规整进 payload.reply，图生文把 reply 规整进 payload.reply（与对话类一致）。
+    规整进 payload.reply；图生文的落点本身就是 payload.reply，按 R8(#round4)
+    不再发射 `payload.reply = payload.reply` 自赋值空节点，http 节点直接接续下游。
     """
     dsl = """
 场景: 视觉能力
@@ -634,11 +635,15 @@ def test_image_vision_subflow_compile():
                and n.get("name") == "取 llm_doubao_image 返回值"]
     assert ext_img, "缺少 image 提取节点"
     assert ext_img[0]["rules"][0]["to"] == "payload.image_url"
-    # 图生文：提取节点把 reply 规整进 payload.reply（identity）
+    # 图生文：落点已是 payload.reply → R8 不再生成自赋值空节点
     ext_vis = [n for n in nodes if n.get("type") == "change"
                and n.get("name") == "取 llm_doubao_vision 返回值"]
-    assert ext_vis, "缺少 vision 提取节点"
-    assert ext_vis[0]["rules"][0]["to"] == "payload.reply"
+    assert not ext_vis, f"R8：不应生成 payload.reply 自赋值空节点，实得 {ext_vis}"
+    # 链路不能因此断开：vision 的 http 节点必须有下游
+    http_vis = [n for n in nodes if n.get("type") == "http request"
+                and n.get("url") == "http://<NAS_IP>:1880/llm/vision"]
+    assert http_vis and http_vis[0].get("wires") and http_vis[0]["wires"][0], \
+        "vision http 节点下游断开"
 
 
 # ── A4 语义缺口检测扩展：间隔触发 / 自然语言条件 / 直到…才 ───────────────

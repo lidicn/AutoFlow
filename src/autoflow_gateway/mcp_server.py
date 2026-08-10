@@ -32,7 +32,7 @@ from contextlib import asynccontextmanager
 
 from mcp.server.fastmcp import FastMCP
 
-from .gateway import Gateway
+from .gateway import Gateway, schema_blocking_issues
 from .flow_linter import lint_flow
 from .flow_simulator import simulate_flow
 from .identity import AgentStore, get_current_agent
@@ -931,6 +931,9 @@ def autoflow_validate_flow(flow_json: str) -> str:
         "errors":  [ {level,rule,node_id,node_type,message}, ... ],
         "warnings":[ {level,rule,node_id,node_type,message}, ... ],
         "will_deploy_block": true|false,  // 真去 deploy_raw 是否会被硬伤规则拦下
+                                          // （含 lint 硬伤 R13/R15/... 与 schema 致命项 S1..S5）
+        "schema_blocking": [ ... ],       // schema 致命项：S1 结构非法 / S2 缺 type /
+                                          // S3 HA 缺 server / S4 switch wires≠rules / S5 空 flow
         "summary": "一句话结论",
         "logic": {                        // 【Phase B 新增】L2 逻辑可达性仿真（仅报告，不阻断部署）
           "ok": true|false,               // 所有动作终点在静态场景下都可达则为 true
@@ -1000,11 +1003,15 @@ def autoflow_validate_flow(flow_json: str) -> str:
 
     # 计算「真部署是否会被硬伤规则拦下」（对齐 deploy_raw 的 _LINT_BLOCK_RULES）
     # 注意：只有 R13/R15/R20/R17/R22 的 error 级才会被 deploy_raw 硬拦；
-    # R19 字段名写错、R21 switch 死分支属报告不阻塞；其余 error（含 schema 错误）仅报告不阻塞，
-    # 故 will_deploy_block 只看 blocking 集。
+    # R19 字段名写错、R21 switch 死分支属报告不阻塞。
+    # R9(#round4) iss_86d66844f7：schema **致命**错误（S1..S5：结构非法/缺 type/缺 server/
+    # switch wires≠rules/空 flow）现在也会被 deploy_raw 以 stage=schema_block 硬拦，
+    # 必须计入 will_deploy_block——此前它们只进 errors 不进 blocking，导致坏流拿到
+    # will_deploy_block=false 的绿灯，一部署就炸。非致命 schema error 仍只报告不阻塞。
     _BLOCK_RULES = {"R13", "R15", "R20", "R17", "R22", "R30", "R32"}
-    blocking = [v for v in lint_issues
-                if v.get("level") == "error" and v.get("rule") in _BLOCK_RULES]
+    blocking = list(schema_blocking_issues(schema_issues)) + [
+        v for v in lint_issues
+        if v.get("level") == "error" and v.get("rule") in _BLOCK_RULES]
     will_block = bool(blocking)
 
     ok = (len(errors) == 0)
@@ -1024,6 +1031,8 @@ def autoflow_validate_flow(flow_json: str) -> str:
         "warnings": warnings,
         "will_deploy_block": will_block,
         "blocking_rules": sorted({b.get("rule") for b in blocking}),
+        # R9：把 schema 致命项单列，让调用方一眼看出是「结构没写对」还是「lint 硬伤」
+        "schema_blocking": schema_blocking_issues(schema_issues),
         "summary": summary,
         "logic": logic_block,
     })

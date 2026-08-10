@@ -277,6 +277,37 @@ def check_unknown_node_types(flow: Dict[str, Any], installed: set) -> List[str]:
             unknown.append(t)
     return unknown
 
+
+# ── R9(#round4) iss_86d66844f7（报告 A19）：schema 级「致命错误」集 ──
+# 症结：validate_flow_schema 一直只把问题**记进 validation 数组**，deploy_raw 里那句
+# `if errors: pass  # 记录后继续` 让缺 server / switch wires≠rules 这种「部署即坏」的流
+# 照样落 NR，自检工具还回 will_deploy_block=false、node_gate_ok=true——绿灯放行坏流。
+# 这里给致命项打上稳定 rule 码，统一升格为 blocking：
+#   S1 结构非法（flow 非对象 / nodes 非数组）—— NR 收到即 400/静默丢弃
+#   S2 节点缺 type       —— NR 无法实例化该节点，整条链断
+#   S3 HA 节点缺 server  —— 注意 _inject_ha_server 只替换 REPLACE_WITH_HA_SERVER 占位符，
+#                          「压根没有 server 字段」的节点不会被补值，部署后永久未配置
+#   S4 switch rules/wires 不匹配 —— 分支错位或整枝丢消息，静态合法运行必错
+#   S5 空 flow（nodes 为空数组）—— 覆盖已有 tab 时等同静默清空，破坏性最强
+# 非致命项（数字 id、负坐标、缺顶层 label、POST 无 body、http 缺 url 等）保持原级别，
+# 仅报告不拦——避免误伤合法手搓流（白箱 escape hatch 原则）。
+SCHEMA_BLOCK_RULES = {"S1", "S2", "S3", "S4", "S5"}
+
+
+def schema_blocking_issues(issues: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """从 validate_flow_schema 结果中挑出会硬拦部署的致命项（R9）。
+
+    Args:
+        issues: validate_flow_schema 返回的 [{"level","rule","node_id","message"}] 列表。
+
+    Returns:
+        致命项子集（level=error 且 rule ∈ SCHEMA_BLOCK_RULES）；输入为空时返回 []。
+    """
+    return [v for v in (issues or [])
+            if isinstance(v, dict) and v.get("level") == "error"
+            and v.get("rule") in SCHEMA_BLOCK_RULES]
+
+
 # ── C4：staging 闸门「分支感知重放」辅助（vhass 真闭环）──
 # 让闸门不再"跳过所有 switch 后代"，而是评估 switch/条件/时间段门控，只重放
 # 命中分支内的 HA 意图，从而能断言多步/状态类场景（关闭"只验闸门没验真跑"缺口）。
@@ -3700,11 +3731,15 @@ class Gateway:
         - switch 节点：rules/property
         - change 节点：rules
         返回 [{"level":"error|warning","node_id":...,"message":...}] 列表。
+
+        【R9】致命项额外带 "rule": S1..S5（见 SCHEMA_BLOCK_RULES），调用方用
+        schema_blocking_issues() 提取后硬拦部署 / 置 will_deploy_block=True。
         """
         issues = []
 
         if not isinstance(flow, dict):
-            return [{"level": "error", "node_id": "_root", "message": "flow 必须是 JSON 对象"}]
+            return [{"level": "error", "rule": "S1", "node_id": "_root",
+                     "message": "flow 必须是 JSON 对象"}]
 
         for field in ("id",):
             if not flow.get(field):
@@ -3713,8 +3748,14 @@ class Gateway:
 
         nodes = flow.get("nodes")
         if not isinstance(nodes, list):
-            issues.append({"level": "error", "node_id": "_root",
+            issues.append({"level": "error", "rule": "S1", "node_id": "_root",
                            "message": "flow.nodes 必须是数组"})
+            return issues
+        if not nodes:
+            # R9/S5：空 flow 覆盖已有 tab = 静默清空线上内容，破坏性最强，必须硬拦。
+            issues.append({"level": "error", "rule": "S5", "node_id": "_root",
+                           "message": "空 flow（nodes 为空数组）：部署到已有 tab 会清空其全部"
+                                      "节点。若确要清空请显式走删除/回滚接口。"})
             return issues
 
         node_ids = set()
@@ -3727,7 +3768,7 @@ class Gateway:
                 issues.append({"level": "warning", "node_id": nid,
                                "message": f"[{ntype}] 缺少 id"})
             if not n.get("type"):
-                issues.append({"level": "error", "node_id": nid,
+                issues.append({"level": "error", "rule": "S2", "node_id": nid,
                                "message": "节点缺少 type 字段"})
             elif n.get("id"):
                 if n["id"] in node_ids:
@@ -3774,8 +3815,12 @@ class Gateway:
             # ── HA 节点校验 ──
             if ntype in ("api-call-service", "server-state-changed"):
                 if not n.get("server"):
-                    issues.append({"level": "error", "node_id": nid,
-                                   "message": f"[{ntype}] 缺少 server（HA 配置节点 id）"})
+                    # R9/S3：_inject_ha_server 只把 REPLACE_WITH_HA_SERVER 占位符换成真实 id，
+                    # 「压根没有 server 字段」不在其修补范围 → 部署后节点永久未配置，必须硬拦。
+                    issues.append({"level": "error", "rule": "S3", "node_id": nid,
+                                   "message": f"[{ntype}] 缺少 server（HA 配置节点 id）。"
+                                              f"请填真实 server id，或填占位符 "
+                                              f"REPLACE_WITH_HA_SERVER 由网关注入。"})
                 if ntype == "api-call-service":
                     if not n.get("action") and not n.get("domain"):
                         issues.append({"level": "error", "node_id": nid,
@@ -3785,12 +3830,13 @@ class Gateway:
             if ntype == "switch":
                 rules = n.get("rules")
                 if not rules:
-                    issues.append({"level": "error", "node_id": nid,
+                    issues.append({"level": "error", "rule": "S4", "node_id": nid,
                                    "message": "[switch] 缺少 rules"})
                 else:
                     outputs = len(n.get("wires", []))
                     if outputs != len(rules):
-                        issues.append({"level": "error", "node_id": nid,
+                        # R9/S4：分支与出线错位 → 整枝消息静默丢失，静态合法运行必错。
+                        issues.append({"level": "error", "rule": "S4", "node_id": nid,
                                        "message": f"[switch] wires({outputs}) 与 "
                                                 f"rules({len(rules)}) 数量不匹配"})
 
@@ -4139,12 +4185,14 @@ class Gateway:
                        (os.environ.get("AUTOFLLOW_WHITEBOX_BLOCK_ON_LINT_ERROR", "1") != "0"),
                    block_on_logic_error: bool =
                        (os.environ.get("AUTOFLLOW_WHITEBOX_BLOCK_ON_LOGIC_ERROR", "0") != "0"),
+                   block_on_schema_error: bool =
+                       (os.environ.get("AUTOFLLOW_WHITEBOX_BLOCK_ON_SCHEMA_ERROR", "1") != "0"),
                    require_e2e: Optional[bool] = None
                    ) -> Dict[str, Any]:
         """白盒部署：直接接受 Agent 产出的原始 Node-RED flow JSON，经校验后部署。
 
         流程：
-          1. Schema 校验（validate_flow_schema）— error 级别阻塞，warning 放行
+          1. Schema 校验（validate_flow_schema）— 致命项(S1..S5)硬拦，其余 error/warning 放行
           2. HA server 占位符替换（REPLACE_WITH_HA_SERVER → 真实 id）
           3. 冲突检测（同名非本流拒绝 / force 改名）
           4. 可选 vhass staging 闸门（run_gate=True 且有 HA 动作时）
@@ -4165,6 +4213,10 @@ class Gateway:
           - run_gate: 是否跑 vhass 闸门（有 HA 动作时建议开启）
           - block_on_lint_error: B3 可配置阻塞 —— 当 lint 出现 R13(孤儿 api-call-service)/
             R15(紧环) 等硬伤时阻止部署（默认开，env AUTOFLLOW_WHITEBOX_BLOCK_ON_LINT_ERROR=0 可关）
+          - block_on_schema_error: 【R9】schema 致命错误闸 —— 缺 server(S3)、switch
+            wires≠rules(S4)、空 flow(S5)、节点缺 type(S2)、结构非法(S1) 等「部署即坏」的
+            schema error 阻止部署（默认开，env AUTOFLLOW_WHITEBOX_BLOCK_ON_SCHEMA_ERROR=0 可关）。
+            非致命 schema error（缺顶层 id、http 缺 url、POST 无 body 等）仍只报告不拦。
           - block_on_logic_error: 【Phase B·B4】L2 逻辑可达性闸门 —— 当逻辑仿真发现「任何触发
             场景都触达不到的动作终点(L1)」时阻止部署。默认【关】(AUTOFLLOW_WHITEBOX_BLOCK_ON_LOGIC_ERROR
             缺省为 "0")：仅把 logic 段附在返回里报告，不拦部署（白箱 escape hatch，先把流跑起来看真实
@@ -4237,9 +4289,26 @@ class Gateway:
         errors = [v for v in validation if v["level"] == "error"]
         warnings = [v for v in validation if v["level"] == "warning"]
 
-        # 有 error 但不强制阻塞——记录但继续部署（让 NR/NR debug 告诉你更多细节）
-        if errors:
-            pass  # 不 return，记录后继续
+        # R9(#round4) iss_86d66844f7：此处**曾经**是 `if errors: pass  # 记录后继续`——
+        # 于是缺 server / switch wires≠rules / 空 flow 这类「部署即坏」的流照样落 NR，
+        # 上游自检还回 will_deploy_block=false 当绿灯。现改为：致命项(S1..S5)硬拦，
+        # 其余 error（缺顶层 id、http 缺 url 等）沿用旧的 fail-open 只记录不拦。
+        # dry-run 不早退，改为在预览里报 would_block_on_schema（与 lint 同策略）。
+        _schema_blocking = schema_blocking_issues(validation)
+        if _schema_blocking and block_on_schema_error and not dry_run:
+            _srules = ",".join(sorted({b.get("rule") for b in _schema_blocking}))
+            _slog(_tid, "deploy_raw.schema_block",
+                  elapsed=round(time.perf_counter() - _t0, 3),
+                  rules=_srules, blocking_count=len(_schema_blocking))
+            _record_fail()
+            return {
+                "ok": False, "stage": "schema_block",
+                "error": (f"Schema 致命错误 {len(_schema_blocking)} 项（{_srules}），已阻止部署："
+                          + "；".join(b.get("message", "") for b in _schema_blocking[:5])),
+                "validation": validation,
+                "schema_blocking": _schema_blocking,
+                "schema_blocking_rules": sorted({b.get("rule") for b in _schema_blocking}),
+            }
 
         # Step 2.5：静态 Flow Linter（A1）—— 抓「静态合法、运行必错」反模式（非阻塞）
         # 专拦本次 ArcFace 排障暴露的坑：switch otherwise 前置→死代码、
@@ -4491,11 +4560,17 @@ class Gateway:
                 except Exception:
                     live = None
             node_diff = _build_node_diff(live, flow)
-            _blocking_rules = sorted({b.get("rule") for b in _blocking})
+            # R9：dry-run 预告里把 schema 致命项与 lint 硬伤合并进 would_block_rules，
+            # 否则「预览说能部署、真部署被 schema_block 拦」又是一次自相矛盾。
+            _schema_rules = sorted({b.get("rule") for b in _schema_blocking})
+            _blocking_rules = sorted(
+                {b.get("rule") for b in _blocking} | set(_schema_rules))
+            _would_block_schema = bool(_schema_blocking) and block_on_schema_error
             _slog(_tid, "deploy_raw.dry_run", elapsed=round(time.perf_counter() - _t0, 3),
                   would="update" if live is not None else "create",
                   added=len(node_diff["added"]), removed=len(node_diff["removed"]),
-                  changed=len(node_diff["changed"]), would_block=bool(_blocking))
+                  changed=len(node_diff["changed"]),
+                  would_block=bool(_blocking) or _would_block_schema)
             return {
                 "ok": True,
                 "dry_run": True,
@@ -4513,6 +4588,8 @@ class Gateway:
                 "lint_error_count": sum(1 for v in lint_issues if v["level"] == "error"),
                 "lint_warning_count": sum(1 for v in lint_issues if v["level"] == "warning"),
                 "would_block_on_lint": bool(_blocking),
+                "would_block_on_schema": _would_block_schema,
+                "schema_blocking": _schema_blocking,
                 "would_block_rules": _blocking_rules,
                 "logic": _logic_block,
                 "would_block_on_logic": bool(_logic_err) and block_on_logic_error,
@@ -4813,10 +4890,14 @@ class Gateway:
         if not flow.get("label"):
             flow["label"] = f"{agent_id}-{datetime.now().strftime('%H%M%S')}"
 
-        # Step 2: Schema 校验（error 仅记录，fail-open）
+        # Step 2: Schema 校验（非致命 error 仅记录，fail-open；致命项见下方 R9）
         validation = self.validate_flow_schema(flow)
         errors = [v for v in validation if v["level"] == "error"]
         warnings = [v for v in validation if v["level"] == "warning"]
+        # R9(#round4)：schema 致命项（S1..S5）必须并入阻塞信号，否则提案回执会出现
+        # 「would_block_on_lint=false + node_gate_ok=true」的绿灯，而这条流真去 deploy_raw
+        # 会被 stage=schema_block 拦下——提案与部署两套口径，正是 A19 复现的自相矛盾。
+        _schema_blocking = schema_blocking_issues(validation)
 
         # Step 2.5: 静态 Flow Linter（A1）
         lint_issues = lint_flow(flow, b1_unreachable=True)
@@ -4826,6 +4907,7 @@ class Gateway:
         _LINT_BLOCK_RULES = {"R13", "R15", "R20", "R17", "R22", "R24", "R30", "R32", "R_SERVICE_PARAM"}
         _blocking = [v for v in lint_issues
                      if v.get("level") == "error" and v.get("rule") in _LINT_BLOCK_RULES]
+        _blocking = _schema_blocking + _blocking
 
         # 【Phase B · B4】L2 逻辑可达性闸门（fail-open，仅报告）
         try:
@@ -4883,6 +4965,8 @@ class Gateway:
                 "lint_error_count": sum(1 for v in lint_issues if v["level"] == "error"),
                 "lint_warning_count": sum(1 for v in lint_issues if v["level"] == "warning"),
                 "would_block_on_lint": bool(_blocking),
+                "would_block_on_schema": bool(_schema_blocking),   # R9
+                "schema_blocking": _schema_blocking,               # R9
                 "would_block_rules": sorted({b.get("rule") for b in _blocking}),
                 "logic": _logic_block,
                 "node_gate_ok": _node_gate_ok,
@@ -4906,6 +4990,7 @@ class Gateway:
             "lint_error_count": sum(1 for v in lint_issues if v["level"] == "error"),
             "lint_warning_count": sum(1 for v in lint_issues if v["level"] == "warning"),
             "blocking_rules": sorted({b.get("rule") for b in _blocking}),
+            "schema_blocking_rules": sorted({b.get("rule") for b in _schema_blocking}),  # R9
             "logic": _logic_block,
             "node_gate_ok": _node_gate_ok,
             "blocked": bool(_blocking),
@@ -4944,6 +5029,8 @@ class Gateway:
             "lint_error_count": sum(1 for v in lint_issues if v["level"] == "error"),
             "lint_warning_count": sum(1 for v in lint_issues if v["level"] == "warning"),
             "would_block_on_lint": bool(_blocking),
+            "would_block_on_schema": bool(_schema_blocking),   # R9
+            "schema_blocking": _schema_blocking,               # R9
             "blocking_rules": sorted({b.get("rule") for b in _blocking}),
             "logic": _logic_block,
             "node_gate_ok": _node_gate_ok,
@@ -7054,6 +7141,23 @@ class Gateway:
         立即返回决策记录；人类在 WebUI 工作区点选后由 resolve_decision 闭环。非阻塞。"""
         rec = self.decisions.create(question, options, source=source)
         did = rec["id"]
+        # R10(#round4) iss_fb16973875：A24 报「apply 回执 decision_id 与库错位一位」→
+        # 按回执 id 调 get_decision 必「决策不存在」，apply→get_decision 闭环静默断掉。
+        # 真码复盘未能复现（store 层 300 轮 create→get 零错位、id 同源无中间改写），
+        # 但**「复现不出」不等于「不会发生」**——这条闭环一旦错位是完全静默的：
+        # agent 会拿着一个永远查不到的 id 空等人类拍板。故加读回自检：回执 id 必须
+        # 能从库里查回来，查不回就把 ok 打成 False 并如实说明，绝不把死 id 当成功回执发出去。
+        verify = None
+        try:
+            verify = self.decisions.get(did)
+        except Exception as e:
+            return {"ok": False, "decision": rec, "decision_id": did,
+                    "error": f"决策已落库但读回自检异常：{e}；请勿按该 decision_id 轮询。"}
+        if not verify or verify.get("id") != did:
+            return {"ok": False, "decision": rec, "decision_id": did,
+                    "error": (f"决策 id 读回自检失败：回执 id={did}，库中读回="
+                              f"{(verify or {}).get('id')!r}。apply→get_decision 闭环会断，"
+                              f"请查 decision_store 落库路径，勿按此 id 轮询。")}
         opts_preview = "\n".join(f"{i+1}. {o}" for i, o in enumerate(rec["options"]))
         threading.Thread(
             target=self._bark_push,
@@ -7062,7 +7166,9 @@ class Gateway:
             kwargs={"group": "AutoFlow-决策"},
             daemon=True,
         ).start()
-        return {"ok": True, "decision": rec,
+        # decision_id 与 decision.id 同源（上面已读回自检），显式平铺一份便于调用方直取，
+        # 避免各处各自 `((dec or {}).get("decision") or {}).get("id")` 层层剥壳时取空。
+        return {"ok": True, "decision": rec, "decision_id": did,
                 "note": "决策已写入工作区；请在 WebUI 工作区选择，Bark 也已催办"}
 
     def list_decisions(self, status: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:

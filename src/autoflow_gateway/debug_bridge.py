@@ -149,6 +149,32 @@ class DebugBridge:
             except Exception:
                 pass
 
+    def retarget(self, nr_url: str) -> bool:
+        """运行期改指目标 NR（连接设置在 WebUI 被改过时调用）。返回是否真的换了地址。
+
+        R3(#round4) 同族：`ws_url` 原先只在 __init__ 算一次，用户在网关运行期间把
+        NR_URL 从 A 改到 B 后，桥仍死连 A —— 表现同样是 connected:false 恒真，
+        且**无任何提示**。这里换址后主动踹断当前 socket，让 _loop 的重连逻辑
+        用新地址重建（桥本就是无限重连模型，不需要额外线程）。
+        """
+        try:
+            new_ws = _http_url_to_ws(nr_url or "") + DEFAULT_WS_PATH
+        except Exception:
+            return False
+        if not nr_url or new_ws == self.ws_url:
+            return False
+        old = self.ws_url
+        self.ws_url = new_ws
+        self.nr_url = nr_url
+        logger.info("debug_bridge 目标切换：%s → %s（断开旧连接，等重连生效）", old, new_ws)
+        sock = self._sock
+        if sock is not None:
+            try:
+                sock.close()  # 触发 _connect_and_run 抛错 → _loop 用新 ws_url 重连
+            except Exception:
+                pass
+        return True
+
     # ───────────── 主循环 ─────────────
 
     def _loop(self) -> None:
@@ -230,6 +256,22 @@ class DebugBridge:
             logger.warning("debug_bridge 取 token 失败：%s", e)
             return None
 
+    def _open_handshake(self, host: str, port: int, path: str,
+                        token: Optional[str]) -> socket.socket:
+        """建 TCP + 发 ws upgrade + 校验 101。token=None 表示裸握手（不带 Bearer 头）。"""
+        sock = socket.create_connection((host, port), timeout=10)
+        sock.settimeout(10)
+        try:
+            sock.sendall(self._handshake_request(host, port, path, token))
+            self._read_http_response(sock)
+        except Exception:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            raise
+        return sock
+
     def _connect(self) -> socket.socket:
         u = urllib.parse.urlparse(self.ws_url)
         host = u.hostname or "localhost"
@@ -237,12 +279,33 @@ class DebugBridge:
         path = u.path or "/"
         if u.query:
             path += "?" + u.query
-        sock = socket.create_connection((host, port), timeout=10)
-        sock.settimeout(10)
         token = self._get_token()
-        sock.sendall(self._handshake_request(host, port, path, token))
-        self._read_http_response(sock)
-        # NR5 /comms 二次鉴权：ws 握手（Bearer 头）通过后，须先发 {"auth": <token>}
+        # R3(#round4) iss_da3b4a5aa7 —— 桥恒 connected:false 的真根因。
+        # NR 5.x 的 /comms upgrade handler **不接受 `Authorization` 头**：带 Bearer
+        # 握手会被服务端直接 destroy socket（连 HTTP 响应都不回，客户端只看到
+        # 「响应前连接已关闭」），于是 _loop 无限重连、缓冲恒空、debug_read 永远
+        # connected:false/count:0。实测（NR 5 @1990）：带 Bearer → 空关闭；
+        # 裸握手 → HTTP/1.1 101 Switching Protocols。
+        # NR 官方 editor 客户端本就是两段式：**裸 ws 握手 + 应用层 {"auth": token}**。
+        # 故默认裸握手；仅当裸握手失败时才回退「带 Bearer」重试一次，
+        # 兼容可能存在的反向代理 / 旧版把鉴权放在 HTTP 头的部署。
+        attempts: list = [None]
+        if token:
+            attempts.append(token)
+        sock = None
+        last_exc: Optional[Exception] = None
+        for hs_token in attempts:
+            try:
+                sock = self._open_handshake(host, port, path, hs_token)
+                if hs_token is not None:
+                    logger.info("debug_bridge 裸握手失败，已回退 Bearer 头握手成功。")
+                break
+            except Exception as e:
+                last_exc = e
+                sock = None
+        if sock is None:
+            raise last_exc or RuntimeError("comms：握手失败（无可用方式）")
+        # NR5 /comms 二次鉴权：ws 握手通过后，须先发 {"auth": <token>}
         # 应用消息，否则 NR 回 {"auth":"fail"} 并立即断开连接。
         if token:
             try:
