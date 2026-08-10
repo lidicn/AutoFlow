@@ -1209,11 +1209,23 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         # Bark 密钥改了之后，NR 里**已经生成过**的 bark_push 子流程仍持有旧值
         # （子流程 env 是生成时快照的）。这里如实提示，不擅自去改用户的 NR。
         touched = list(result.get("changed", [])) + list(result.get("cleared", []))
+        # R3(#round4) 同族：NR 地址改了要把 debug 回读桥一起搬过去，否则它继续死连
+        # 旧地址，debug_read 恒 connected:false —— 用户完全看不出是「桥没跟着搬」。
+        if "NR_URL" in touched:
+            try:
+                bridge = getattr(gw, "debug_bridge", None)
+                if bridge is not None and bridge.retarget(getattr(cfg, "nr_url", "")):
+                    payload.setdefault("notices", []).append(
+                        "NR 地址已变更，debug 回读桥已切到新地址（重连需数秒）。")
+            except Exception:
+                pass
         if any(k.startswith("BARK_") for k in touched):
-            payload["notices"] = [
+            # 注意用 append 而非直接赋值：同时改了 NR_URL 与 BARK_* 时，
+            # 直接赋值会把上面的桥重定向提示整条吞掉。
+            payload.setdefault("notices", []).append(
                 "Node-RED 中若已生成过 bark_push 子流程，它仍持有旧的 BARK_* 值。"
                 "需要同步时：在 Node-RED 里删除该子流程，网关下次部署会用新值自动重建。"
-            ]
+            )
         return _js(payload)
 
     async def connections_test(request: Request):

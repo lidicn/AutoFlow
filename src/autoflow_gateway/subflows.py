@@ -59,29 +59,51 @@ class SubflowSpec:
     # 例：demo_notify 是 link_out 编译路径的教学示例，注册但不预载。
     preload: bool = True
 
-    def resolve_args(self, raw: dict[str, str]) -> dict[str, Any]:
+    def resolve_args(self, raw: dict[str, str],
+                     dynamic: Optional[set] = None) -> dict[str, Any]:
         """合并默认值、类型转换、枚举校验，返回规范化入参。
 
         缺必填或枚举非法抛 ValueError（供引擎静态校验捕获）。
+
+        `dynamic`：值为【运行期表达式】的参数名集合（DSL 里用反引号包裹的
+        JSONata 入参，或 `${}` 插值出的运行期引用）。这类值编译期根本不知道，
+        对其做 int()/枚举校验只会产生假错误（`bark_badge=\\`payload.n\\`` 被判
+        「不是数字」），故整体跳过类型/枚举校验、原样透传给发射器。
         """
+        dyn = set(dynamic or ())
         out: dict[str, Any] = {}
         for pname, p in self.params.items():
             # WB24 NEW-F3：必填参数给了「空串」视为缺失（与 validate_args 一致），
             # 避免 anysearch_batch(keywords=) 这类「必填但空值」被当成已填而静默逃逸。
             if pname in raw and str(raw[pname]).strip() != "":
                 val = raw[pname]
+                if pname in dyn:
+                    out[pname] = val
+                    continue
                 if p.enum and val not in p.enum:
                     raise ValueError(
                         f"子流程 {self.name} 参数 {pname}='{val}' 非法，应为 {p.enum}"
                     )
-                out[pname] = _coerce(val, p.type)
+                try:
+                    out[pname] = _coerce(val, p.type)
+                except (ValueError, TypeError):
+                    # R1(#round4)：int/float 解析失败（如 `bark_badge=abc` / `=7.5`）
+                    # 必须给出带【参数名+合法示例+类型】的可读错误，而非裸
+                    # `int('abc')` 的 ValueError 栈（无 DSL 行号、无上下文）。
+                    # 该 ValueError 会被 _emit_subflow 捕获并转译为 C_SUBFLOW_ARG。
+                    raise ValueError(
+                        f"子流程 {self.name} 参数 {pname} 期望类型 {p.type}，"
+                        f"但收到 '{val}'（合法示例：{_coerce_example(p)}）。"
+                        f"请检查 {pname} 的值。"
+                    )
             elif p.required:
                 raise ValueError(f"子流程 {self.name} 缺少必填参数：{pname}")
             elif p.default is not None:
                 out[pname] = p.default
         return out
 
-    def validate_args(self, raw: dict[str, str], strict: bool = False) -> None:
+    def validate_args(self, raw: dict[str, str], strict: bool = False,
+                      dynamic: Optional[set] = None) -> None:
         """编译期校验调用方入参。strict=True 时未知参数也报错（managed 子流程用，
         用于捕获拼写错误）；imported 子流程 schema 为 best-effort 推断，宽松不报未知参数。
         缺必填 / 枚举非法 /（strict 时）未知参数 → 抛 ValueError（msg 含可读原因）。
@@ -90,8 +112,13 @@ class SubflowSpec:
         此前「值存在即算填了」导致空必填静默放行，与 history 系列（缺参被拦）校验覆盖不一致。
         现统一：必填 + 空串 → 报「缺少必填参数」。
         """
+        dyn = set(dynamic or ())
         for pname, p in self.params.items():
             if pname in raw and str(raw[pname]).strip() != "":
+                # 运行期表达式（反引号 JSONata）/ 尚未展开的 `${}` 模板：
+                # 编译期无从判定其最终值，跳过枚举校验（否则必然假报错）。
+                if pname in dyn or "${" in str(raw[pname]):
+                    continue
                 if p.enum and raw[pname] not in p.enum:
                     raise ValueError(
                         f"子流程 {self.name} 参数 {pname}='{raw[pname]}' 非法，应为 {p.enum}")
@@ -113,6 +140,19 @@ def _coerce(val: str, t: str) -> Any:
     if t == "bool":
         return val.strip().lower() in ("1", "true", "yes", "是")
     return val
+
+
+def _coerce_example(p: "Param") -> str:
+    """R1(#round4)：给类型解析失败一个可读的「合法示例」提示。"""
+    if p.enum:
+        return " / ".join(p.enum)
+    if p.type == "int":
+        return "42"
+    if p.type == "float":
+        return "3.14"
+    if p.type == "bool":
+        return "true / false"
+    return "文本"
 
 
 # ── 子流程库 ──────────────────────────────────────────────────────────────

@@ -325,6 +325,78 @@ def _check_jsonata(expr: str) -> Tuple[bool, str]:
     return True, ""
 
 
+# ── R37（round4 R7）：link-out 请求侧错挂「取返回值/提取」节点 ────────────
+def _lint_link_out_request_side(nodes: List[Dict[str, Any]],
+                                nodes_by_id: Dict[str, Any]) -> List[Dict[str, str]]:
+    """R37(#round4 R7) iss_516bc5d816（报告 A16）：异步 link-out 的**请求侧**挂了取值节点。
+
+    `link out` 是 fire-and-forget：消息投递到目标 `link in` 就结束，Node-RED
+    **没有**把结果送回调用点的通道（回送必须用 `link call` + `link out(mode=return)`）。
+    所以下面这种接线是断链：
+
+        change(设 msg.payload = 入参) ──┬─→ link out(→ 子流程入口)
+                                        └─→ change(取返回值 / 提取字段)
+
+    右下那个节点并不在回执侧：它和 link out 同时收到**刚被入参覆写的那条 msg**，
+    读 `payload.*` 只会拿到自己刚写进去的入参（或 undefined）。运行期不报错、
+    不中断，纯静默取错值——正是最难排查的一类。
+
+    判据收紧到能确证「请求侧」的形状：上游 change 写了 msg.payload（= 设入参），
+    且同一输出口既连 link out 又连另一个读 payload 的 change。warning 级不阻断
+    ——手搓流里「发出去顺带记一笔」是合法写法，不能硬拦。
+
+    注：编译器侧已在 `_emit_body` 修正为副链编排，不再产出该形状；本规则是给
+    手搓 / 白箱 deploy_raw / 历史提案兜底。
+    """
+    out: List[Dict[str, str]] = []
+    for n in nodes:
+        if n.get("type") != "change":
+            continue
+        # 上游必须是「设入参」：写了 msg.payload 或 msg.payload.<k>
+        if not any(r.get("t") == "set" and r.get("pt", "msg") == "msg"
+                   and str(r.get("p") or "").split(".")[0] == "payload"
+                   for r in (n.get("rules") or [])):
+            continue
+        for port in (n.get("wires") or []):
+            targets = [t for t in (port or []) if t]
+            link_outs = [t for t in targets
+                         if (nodes_by_id.get(t) or {}).get("type") == "link out"]
+            if not link_outs:
+                continue
+            for t in targets:
+                if t in link_outs:
+                    continue
+                d = nodes_by_id.get(t) or {}
+                if d.get("type") != "change":
+                    continue
+                reads = [r for r in (d.get("rules") or [])
+                         if r.get("t") == "set"
+                         and r.get("tot") in ("jsonata", "msg")
+                         and "payload" in str(r.get("to") or "")]
+                if not reads:
+                    continue
+                lo_name = (nodes_by_id.get(link_outs[0]) or {}).get("name") or link_outs[0]
+                out.append({
+                    "level": "warning", "rule": "R37", "node_id": t,
+                    "node_type": "change",
+                    "message": (
+                        f"change 节点『{d.get('name') or t}』挂在 link-out 调用的"
+                        f"**请求侧**（与 `link out`「{lo_name}」同挂在设入参节点 "
+                        f"`{n.get('name') or n.get('id')}` 的同一输出口）。"
+                        f"link out 是 fire-and-forget，Node-RED 没有把结果送回调用点的"
+                        f"回执通道，本节点收到的是**刚被入参覆写的那条 msg**，"
+                        f"读 `payload.*` 只会拿到自己刚写进去的入参或 undefined —— "
+                        f"运行期不报错，纯静默取错值。"
+                        f"若需要返回值，请改用请求/响应型调用（`link call` + 目标流以 "
+                        f"`link out(mode=return)` 回送，或直接用 http request / 子流程实例）；"
+                        f"若这里本就只是发完顺带记一笔，请把它挪到 link out 之前、"
+                        f"或改读与返回值无关的字段以消除歧义。"
+                        f" —— 取值表达式 `{reads[0].get('to')}`"
+                    ),
+                })
+    return out
+
+
 # ── 主 lint ──
 def lint_flow(flow: Dict[str, Any], b1_unreachable: bool = False) -> List[Dict[str, str]]:
     """对 flow JSON（{nodes:[...]}）做静态 lint，返回 issue 列表。
@@ -390,6 +462,8 @@ def lint_flow(flow: Dict[str, Any], b1_unreachable: bool = False) -> List[Dict[s
     issues.extend(_lint_key_empty_params(nodes))
     # R33：整条流无 effectful 节点（纯 stub / pass-through）→ warning（fail-open，不阻塞）
     issues.extend(_lint_noop_flow(nodes))
+    # R37（round4 R7）：link-out 请求侧错挂「取返回值/提取」节点（无回执 → 静默取错值）
+    issues.extend(_lint_link_out_request_side(nodes, nodes_by_id))
     # B1（R14）：不可达节点 / 死代码（正向全图可达性）。默认关闭（见 b1_unreachable 说明）。
     if b1_unreachable:
         issues.extend(_lint_unreachable_nodes(nodes, fwd, idset))
@@ -452,6 +526,23 @@ def _lint_switch(n: Dict[str, Any], nid: str) -> List[Dict[str, str]]:
                         f"导致整条链路中断。请修正括号配平 / 引号闭合。"
                     ),
                 })
+    # R35（round4 R6）：常量字面条件分支（分支: true / 分支: false）。
+    # 裸布尔字面量作为分支条件 → 该分支恒真/恒假，动作永不可达（或恒执行、冗余），
+    # 作者无提示。warning 级（与 R30 区分：R30 是语法错误 error）。
+    for i, r in enumerate(rules):
+        if r.get("t") in ("jsonata", "jsonata_exp") and r.get("v", "").strip() in ("true", "false"):
+            const = r["v"].strip()
+            out.append({
+                "level": "warning",
+                "rule": "R35",
+                "node_id": nid,
+                "node_type": "switch",
+                "message": (
+                    f"switch 第 {i + 1} 条分支的条件是常量字面量 `{const}`，"
+                    f"{'该分支恒为真（其后分支永不触发，逻辑冗余）' if const == 'true' else '该分支恒为假（其中动作永不可达）'}。"
+                    f"请确认是否误写；若需无条件执行请用「动作」直接写，删掉该空分支。"
+                ),
+            })
     # 找到 otherwise(else) 规则的位置
     else_indices = [i for i, r in enumerate(rules) if (r.get("t") == "else")]
     if not else_indices:
@@ -644,6 +735,24 @@ def _strip_single_quotes(s: str) -> str:
 def _lint_change_jsonata_pitfalls(n: Dict[str, Any], nid: str) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
     for r in (n.get("rules") or []):
+        # R36（round4 R8 / A28）：自赋值空规则 `msg.X = msg.X`。
+        # 典型来源：http_api 子流程的 extract 恰好等于落点（payload.reply=payload.reply），
+        # 或手写/白箱 deploy_raw 复制粘贴留下的空转规则。它不改变任何数据，
+        # 却让链路看着「有处理」，排障时极具误导性。
+        if (r.get("t") == "set" and r.get("pt", "msg") == "msg"
+                and str(r.get("p") or "").strip()
+                and str(r.get("p") or "").strip() == str(r.get("to") or "").strip()
+                and r.get("tot") in ("jsonata", "msg")):
+            out.append({
+                "level": "warning", "rule": "R36", "node_id": nid,
+                "node_type": "change",
+                "message": (
+                    f"change 节点存在**自赋值空规则** `msg.{r.get('p')} = msg.{r.get('to')}`："
+                    f"目标属性与赋值表达式完全相同，运行时不改变任何数据（纯空转节点）。"
+                    f"这类节点常来自「取返回值」模板与实际落点重合，或复制粘贴残留。"
+                    f"请删除该规则；若本意是改名/搬移字段，请把 to 改成真正的源路径。"
+                ),
+            })
         if r.get("tot") != "jsonata":
             continue
         # p（目标字段）与 to（赋值表达式）都检查

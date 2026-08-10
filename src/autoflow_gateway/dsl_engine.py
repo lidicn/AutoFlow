@@ -953,7 +953,8 @@ def _parse_subflow(s: str, line: int) -> SubflowCall:
                 args[pname] = positionals[idx]
     # 参数契约校验（编译期）：managed 严格（未知参数也报错，捕获拼写错误），imported 宽松。
     try:
-        spec.validate_args(args, strict=(getattr(spec, "source", "managed") == "managed"))
+        spec.validate_args(args, strict=(getattr(spec, "source", "managed") == "managed"),
+                           dynamic=jsonata_args)
     except ValueError as e:
         raise DSLError(f"子流程 {name} 调用参数错误：{e}",
                        line, code=C_SUBFLOW_ARG)
@@ -1222,6 +1223,10 @@ class Issue:
     level: str   # "error" | "warning"
     message: str
     line: Optional[int] = None
+    # R1(#round4)：错误码。validate() 聚合出的错误此前一律被 compile() 打成
+    # C_MULTI_ERROR（丢失具体码与行号），调用方（MCP 工具/WebUI）无法按码分流。
+    # 单条带码错误现在会原样抛出该码 + 行号。
+    code: Optional[str] = None
 
 
 # ── WB24 静默放行收口：编译期条件/实体预检助手 ─────────────────────────────
@@ -1299,6 +1304,59 @@ def _unresolved_name_issue(name: str, where: str) -> Optional[Issue]:
                  f"或先在实体映射登记该友好名后重试）")
 
 
+def _lint_extract(st: "Extract", prev_api_subflow: Optional[str],
+                  prev_ff_subflow: Optional[str] = None) -> list:
+    """R8(#round4) iss_6748217860：`提取:` 的编译期体检。
+
+    两类静默失败：
+      1. 自赋值 `提取: payload.reply = payload.reply` —— 编译出一个不改变任何数据的
+         空转 change 规则（A28 同族），作者以为「提取了」其实什么也没发生；
+      2. 字段名写错 `提取: x = payload.resp`（实际是 `.reply`）—— JSONata 取不到就是
+         undefined，静默写入空值，lint/闸门全过。
+    没有实体返回值 schema 可查，所以只在**能确定上游落点**时提示（http_api 子流程
+    的返回值规范落在 msg.payload.reply），其余情况不猜、不报。均为 warning，不阻断。"""
+    out: list = []
+    name = (st.name or "").strip()
+    expr = (st.expr or "").strip()
+    norm_expr = expr[4:] if expr.startswith("msg.") else expr
+    if name and name == norm_expr:
+        out.append(Issue(
+            "warning",
+            f"提取: 『{name} = {expr}』是自赋值——目标字段与来源表达式是同一路径，"
+            f"编译出的 change 规则不改变任何数据（空转节点）。"
+            f"若本意是改名，请把右侧改成真正的来源路径（如 {name} = payload.result.{name}）；"
+            f"若只是想让字段「存在」，请删掉这行 [C_EXTRACT_SELF_ASSIGN]",
+            line=getattr(st, "line", None)))
+    if prev_api_subflow:
+        m = re.fullmatch(r"payload\.(\w+)", norm_expr)
+        if m and m.group(1) != "reply":
+            out.append(Issue(
+                "warning",
+                f"提取: 『{name} = {expr}』紧跟在子流程 {prev_api_subflow} 之后，"
+                f"但该子流程的返回值按网关约定落在 **msg.payload.reply**，"
+                f"payload.{m.group(1)} 很可能取不到（JSONata 读不到就是 undefined，"
+                f"会静默写入空值）。请确认字段名，或改成 payload.reply "
+                f"[C_EXTRACT_FIELD_SUSPECT]",
+                line=getattr(st, "line", None)))
+    # R7(#round4) iss_516bc5d816（报告 A16）：紧跟在 link-out 型子流程后面的 `提取:`。
+    # link_out 是 fire-and-forget —— 网关只把入参写进 msg.payload 再发一个 link out
+    # 到目标 tab 的 link in，Node-RED 侧**不存在**把结果送回调用点的回执通道
+    # （回送需要 link call + link out(mode=return)，本项目的 link_out 能力都不是）。
+    # 所以这里的「提取」永远取不到子流程返回值，属静默空转，必须显式告警。
+    if prev_ff_subflow:
+        out.append(Issue(
+            "warning",
+            f"提取: 『{name} = {expr}』紧跟在子流程 {prev_ff_subflow} 之后，但 "
+            f"{prev_ff_subflow} 是 **link-out 型 fire-and-forget 调用**：网关只把入参"
+            f"发到下游入口，Node-RED 没有任何把结果送回调用点的回执通道，"
+            f"这里取不到它的返回值。编译器已把该调用编成【副链】（不污染主链 msg），"
+            f"因此本次提取读到的是**调用前的上下文**而非子流程结果。"
+            f"若确实需要返回值，请改用返回值型能力（http_api 或子流程实例，"
+            f"返回值按约定落在 msg.payload.reply）[C_SUBFLOW_NO_REPLY]",
+            line=getattr(st, "line", None)))
+    return out
+
+
 def validate(scene: Scene) -> list[Issue]:
     issues: list[Issue] = []
     if not scene.triggers:
@@ -1346,16 +1404,35 @@ def validate(scene: Scene) -> list[Issue]:
     # 仅当同一 field 被 ≥2 个不同实体使用时报错（同实体同字段只是冗余，不损坏）。
     read_fields_seen: dict[str, list[str]] = {}
     def walk(steps: list):
+        prev_api_subflow: Optional[str] = None  # 上一步是 http_api 子流程时记其名
+        # R7(#round4)：上一步是 link_out（fire-and-forget，无回执）子流程时记其名
+        prev_ff_subflow: Optional[str] = None
         for st in steps:
+            if isinstance(st, Extract):
+                issues.extend(_lint_extract(st, prev_api_subflow, prev_ff_subflow))
+                continue  # 提取 不改变「上一步是否 http_api 子流程」的判定
+            prev_api_subflow = None
+            prev_ff_subflow = None
+            if isinstance(st, SubflowCall):
+                _sp = get_subflow(st.name)
+                _ctype = (getattr(_sp, "call", {}) or {}).get("type") if _sp else None
+                if _ctype == "http_api":
+                    prev_api_subflow = st.name
+                elif _ctype == "link_out":
+                    prev_ff_subflow = st.name
             if isinstance(st, SubflowCall):
                 spec = get_subflow(st.name)
                 if not spec:
                     issues.append(Issue("error", f"未注册子流程：{st.name}（建议：用 autoflow_dsl_help 查看已注册子流程）"))
                     continue
                 try:
-                    spec.resolve_args(st.raw_args)
+                    spec.resolve_args(st.raw_args, dynamic=getattr(st, "jsonata_args", None))
                 except ValueError as e:
-                    issues.append(Issue("error", str(e)))
+                    # R1(#round4)：带上行号 + C_SUBFLOW_ARG 码，让 `bark_badge=abc`
+                    # 这类类型错误在编译期给出可定位、可分流的错误（而非 C_MULTI_ERROR）。
+                    issues.append(Issue("error", str(e),
+                                        line=getattr(st, "line", None),
+                                        code=C_SUBFLOW_ARG))
             elif isinstance(st, Switch):
                 for b in st.branches:
                     # WB24-N5 收口：仅对走 jsonata 兜底的分支条件做语法预检
@@ -1530,10 +1607,148 @@ class _Emitter:
         return None
 
 
+# ── R2/R5(#round4)：`${...}` 模板插值管线 ────────────────────────────────
+# 背景 iss_e8768ca640(A8) / iss_18c853bbce(A10)：文档示范
+# ``调用子流程: xxx(提示=`阈值 ${阈值}`)``，但编译器完全不认 `${}`：
+#   - 反引号值被整体当 JSONata → `阈值 ${阈值}` 是非法 JSONata，运行态报错；
+#   - 裸值被当死字面量 → 编译产物里残留字面 `${阈值}`。
+# 两条路径都是「编译通过、lint 全过、值是错的」的静默失败。
+#
+# 统一规则（JS 模板字符串直觉，反引号 + ${} 本来就是 JS 模板字面量语法）：
+#   * 值中出现 `${` → 整个值按【文本模板】处理，反引号只是包裹符（不再当 JSONata 表达式）；
+#   * 值中没有 `${` → 保持原行为（反引号=JSONata 表达式，裸值=字面量），零回归。
+# `${name}` 的解析顺序（越早解析越好，能常量折叠就折叠）：
+#   1. name 带 payload./msg./flow. 前缀 → 运行期引用，原样；
+#   2. name 是场景变量（`变量:` 声明，编译期常量）→ 直接字面替换其值；
+#   3. name 是 取值 字段 → 运行期引用 payload.<name>；
+#   4. 都不是 → 编译期 C_SUBFLOW_ARG 报错（禁止静默塞空串）。
+_INTERP_RE = re.compile(r"\$\{\s*([^{}]*?)\s*\}")
+
+
+def _jsonata_str_literal(s: str) -> str:
+    """纯文本片段 → JSONata 字符串字面量。
+
+    用**单引号**：Node-RED 的 JSONata 约定字符串字面量单引号（flow_linter R9
+    对双引号报警），且双引号在 change 节点 `to` 的 JSON 序列化里还要再转义一层。"""
+    return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _resolve_interp_ref(name: str, flow_vars: dict, read_fields: set,
+                        *, where: str, line: Optional[int]) -> tuple:
+    """解析 `${name}`，返回 ("const", 字面值) 或 ("expr", 运行期引用路径)。"""
+    if not name:
+        raise DSLError(f"{where} 中出现空插值 `${{}}`（建议：写成 ${{变量名}}）",
+                       line, code=C_SUBFLOW_ARG)
+    if name.startswith(("payload.", "msg.", "flow.", "global.")):
+        return ("expr", name)
+    if name in flow_vars:
+        # 场景变量是编译期常量（只有 `设置变量` 节点写一次，运行期无人改写），
+        # 直接折叠成字面值：产物更简单，也不依赖 flow 上下文时序。
+        lit, _tot = _flow_var_to_tot(str(flow_vars[name]))
+        return ("const", lit)
+    if name in read_fields:
+        # 取值 字段落点是 msg.payload.<field>（见 _emit_read_state / WB25-NEW-2）
+        return ("expr", "payload." + name)
+    known_vars = "、".join(sorted(flow_vars)) or "（无）"
+    known_fields = "、".join(sorted(read_fields)) or "（无）"
+    raise DSLError(
+        f"{where} 引用了未定义的插值变量 `${{{name}}}`。"
+        f"已声明的场景变量：{known_vars}；已声明的 取值 字段：{known_fields}。"
+        f"（建议：先用『变量: {name}=<值>』声明，或用『取值: {name} = <实体>.<字段>』读取；"
+        f"若要引用消息字段请写全路径，如 ${{payload.{name}}}）",
+        line, code=C_SUBFLOW_ARG)
+
+
+def _interp_value(raw: str, flow_vars: dict, read_fields: set,
+                  *, where: str, line: Optional[int]) -> tuple:
+    """把含 `${}` 的模板值编译掉。返回 (新值, 是否运行期动态)。
+
+    - 全部片段可编译期折叠 → 返回普通字符串，dynamic=False；
+    - 含运行期引用 → 返回 JSONata 拼接表达式，dynamic=True；
+    - 整个值就是单个运行期引用（如 `${payload.n}`）→ 返回裸引用（不拼接），
+      这样 int/num 型参数才不会被 `&` 强制转成字符串。
+    """
+    parts: list = []  # [(kind, text)]，kind ∈ {"lit", "expr"}
+    pos = 0
+    dynamic = False
+    for m in _INTERP_RE.finditer(raw):
+        if m.start() > pos:
+            parts.append(("lit", raw[pos:m.start()]))
+        kind, val = _resolve_interp_ref(m.group(1), flow_vars, read_fields,
+                                        where=where, line=line)
+        parts.append(("lit", val) if kind == "const" else ("expr", val))
+        dynamic = dynamic or (kind == "expr")
+        pos = m.end()
+    if pos < len(raw):
+        parts.append(("lit", raw[pos:]))
+    if not dynamic:
+        return "".join(t for _k, t in parts), False
+    # 合并相邻字面片段（常量折叠后常出现 lit+lit），产物更短更可读
+    merged: list = []
+    for k, t in parts:
+        if k == "lit" and merged and merged[-1][0] == "lit":
+            merged[-1] = ("lit", merged[-1][1] + t)
+        else:
+            merged.append((k, t))
+    merged = [(k, t) for k, t in merged if not (k == "lit" and t == "")]
+    if len(merged) == 1 and merged[0][0] == "expr":
+        return merged[0][1], True
+    return " & ".join(_jsonata_str_literal(t) if k == "lit" else f"({t})"
+                      for k, t in merged), True
+
+
+def _apply_interpolation(scene: Scene) -> None:
+    """在 validate 之前把所有子流程字符串入参里的 `${}` 编译掉（就地改写 scene）。
+
+    必须早于 validate：`bark_badge=${阈值}`（阈值=7）若不先折叠，会被 int 类型
+    校验判成「非数字」误报。幂等：折叠后值里已无 `${}`，重复调用无副作用。"""
+    flow_vars = dict(scene.variables or {})
+    read_fields = _collect_read_fields(scene)
+
+    def _do(st: SubflowCall):
+        for k, v in list(st.raw_args.items()):
+            if not isinstance(v, str) or "${" not in v:
+                continue
+            new_v, dynamic = _interp_value(
+                v, flow_vars, read_fields,
+                where=f"子流程 {st.name} 参数 {k}", line=getattr(st, "line", None))
+            st.raw_args[k] = new_v
+            # 含 ${} 的值一律按文本模板处理：全常量→普通字符串（必须移出
+            # jsonata_args，否则 "阈值 30" 会被当 JSONata 求值而报错）；
+            # 含运行期引用→JSONata 拼接表达式。
+            if dynamic:
+                st.jsonata_args.add(k)
+            else:
+                st.jsonata_args.discard(k)
+
+    def walk(steps):
+        for st in steps:
+            if isinstance(st, SubflowCall):
+                _do(st)
+            elif isinstance(st, Switch):
+                for b in st.branches:
+                    walk(b.body)
+                walk(st.else_body)
+            elif isinstance(st, (CurrentState, TimeRange)):
+                walk(getattr(st, "body", []))
+                walk(getattr(st, "else_body", []))
+            elif isinstance(st, Parallel):
+                walk(st.children)
+
+    walk(scene.body)
+
+
 def compile(scene: Scene, target: str = "staging") -> dict:
+    # R2/R5(#round4)：`${var}` 插值必须在 validate 之前完成——否则
+    # `bark_badge=${阈值}` 会先被类型校验判成「非数字」而误报。
+    _apply_interpolation(scene)
     issues = validate(scene)
     errors = [i for i in issues if i.level == "error"]
     if errors:
+        # R1(#round4)：单条带码错误保留原码 + 行号（此前一律降级成 C_MULTI_ERROR，
+        # 调用方拿不到 C_SUBFLOW_ARG 之类的具体码，也拿不到出错行）。
+        if len(errors) == 1 and errors[0].code:
+            raise DSLError(errors[0].message, errors[0].line, code=errors[0].code)
         raise DSLError("；".join(e.message for e in errors), code=C_MULTI_ERROR)
 
     flow_id = _slug(scene.name)
@@ -1932,6 +2147,9 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200):
     last = None
     head = None
     sources = list(sources)
+    # R4(#round4)：记录「喂给 last 那一步的上游 id」。switch 之后的并行块要回挂到
+    # 这里，而不是挂在 switch 的输出上（详见下方注释）。
+    last_upstream: list = []
     pending_extract: Optional[str] = None  # 当前正在累积的「提取」change 节点 id
     for st in steps:
         if isinstance(st, Parallel):
@@ -1940,6 +2158,13 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200):
             # 上游 = sources（本段首节点时）或 last（接在串行链之后时）。
             # 并行块本身不推进串行链：块后同级步骤仍从同一上游扇出（而非接并行块尾节点）。
             upstream = list(sources) if sources else ([last] if last else [])
+            # R4(#round4) iss_a2ee55d8c8：switch 节点【没有直通输出】——它的 output0
+            # 就是第一条分支。旧实现对 `分支:` 之后的同级 `并行:` 直接 em.connect(switch, 子节点)，
+            # 而 connect() 一律写 wires[0] → 并行动作被编译进「第一个分支」的 wires，
+            # 语义从「无论条件都并行」退化成「仅首分支命中才执行」（静默、lint 全过）。
+            # 正解：回挂到喂给 switch 的同一上游，使并行路径与 switch 平级、独立起线。
+            if (not sources) and last and last_upstream and _is_fanout_node(em, last):
+                upstream = list(last_upstream)
             for child in st.children:
                 child_head, _ = _emit_step(em, child, x=x)
                 cid = child_head
@@ -1964,9 +2189,11 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200):
                 if sources:
                     for s in sources:
                         em.connect(s, pending_extract)
+                    last_upstream = list(sources)
                     sources = []
                 elif last:
                     em.connect(last, pending_extract)
+                    last_upstream = [last]
                 last = pending_extract
             em._find(pending_extract)["rules"].append(
                 {"t": "set", "p": st.name, "pt": "msg",
@@ -1980,14 +2207,57 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200):
         nid = head_id
         if head is None:
             head = nid
+        # R7(#round4) iss_516bc5d816（报告 A16）：link-out 型子流程是 fire-and-forget，
+        # 编译产物是 `change(设 msg.payload=入参) → link out`，msg.payload 已被入参整体
+        # 覆写，而 NR 没有任何把结果送回调用点的回执通道。旧实现把它当普通线性步骤
+        # （tail=设参 change），于是后续 `提取:`/续接节点被串在**请求侧**：既等不到子流程
+        # 结果，读到的还是自己刚写进去的入参 —— 静默取错值，lint/闸门全过。
+        # 正解：按「副链」编排（复用 并行块 的模型）——请求链从当前上游分叉出去，主链
+        # 不被它推进，后续步骤仍从**调用前的上游**起线，拿到未被污染的 msg。
+        # 需要返回值请改用 http_api / 子流程实例（返回值落 payload.reply）；
+        # 「link-out 之后紧跟 提取:」由 validate() 给出 C_SUBFLOW_NO_REPLY 警告。
+        fire_and_forget = _is_fire_and_forget_call(st)
         if sources:
             for s in sources:
                 em.connect(s, nid)
-            sources = []
+            last_upstream = list(sources)
+            if not fire_and_forget:
+                sources = []
         elif last:
             em.connect(last, nid)
-        last = tail_id
+            last_upstream = [last]
+        else:
+            last_upstream = []
+        if not fire_and_forget:
+            last = tail_id
     return head, last
+
+
+def _is_fanout_node(em: "_Emitter", nid: str) -> bool:
+    """R4(#round4)：判断节点是否是「条件分叉」节点（无直通输出）。
+
+    switch 的 wires[0] 语义是「第一条规则命中」而非「直通」，所以任何需要
+    *无条件* 执行的后继（并行块）都不能挂在它身上。"""
+    nd = em._find(nid)
+    return bool(nd) and nd.get("type") == "switch"
+
+
+def _is_fire_and_forget_call(st) -> bool:
+    """R7(#round4)：该步骤是否是「无回执」的异步子流程调用（link_out 型）。
+
+    link_out 编译成 `change(设入参) → link out`：消息发到目标 tab 的 `link in`
+    就结束了，Node-RED 侧**没有**把结果送回调用点的通道（回送要靠
+    `link call` + `link out(mode=return)`，本项目 4 个 link_out 能力都不是——
+    出口 link out 要么指向 TTS 下游、要么为空）。
+    所以它在主链上等价于一次「副作用」，不产生可续接的返回值，必须编成副链，
+    否则后续步骤会挂到被入参覆写的请求侧（详见 _emit_body 中的 R7 注释）。"""
+    if not isinstance(st, SubflowCall):
+        return False
+    try:
+        spec = get_subflow(st.name)
+    except Exception:
+        return False
+    return bool(spec) and ((getattr(spec, "call", None) or {}).get("type") == "link_out")
 
 
 def _emit_step(em: _Emitter, st: Step, x: int = 200):
@@ -2211,7 +2481,7 @@ def _emit_action(em: _Emitter, st: Action) -> str:
 def _emit_subflow(em: _Emitter, st: SubflowCall) -> str:
     spec: SubflowSpec = get_subflow(st.name)
     try:
-        args = spec.resolve_args(st.raw_args)
+        args = spec.resolve_args(st.raw_args, dynamic=getattr(st, "jsonata_args", None))
     except ValueError as e:
         raise DSLError(f"子流程 {st.name} 参数解析失败：{e}",
                        getattr(st, "line", None), code=C_SUBFLOW_ARG)
@@ -2270,8 +2540,13 @@ def _emit_subflow(em: _Emitter, st: SubflowCall) -> str:
                       method=call.get("method", "POST"),
                       ret="obj", paytoqs="ignore", url=call["url"], wires=[[]])
         em.connect(cid, http)
-        extract = call.get("extract")
-        if extract:
+        extract = (call.get("extract") or "").strip()
+        # R8(#round4) iss_6748217860 / A28：extract 恰好等于落点 `payload.reply` 时，
+        # 生成的 change 规则是 `msg.payload.reply = msg.payload.reply` —— 纯自赋值空
+        # 节点（http 节点 ret=obj 已把响应体放进 msg.payload）。它不改变任何数据，
+        # 只是在每条 llm_* 链路中间插一个看着「有处理」实则空转的节点，既污染产物
+        # 又误导排障。这里直接不发射。
+        if extract and extract != "payload.reply":
             ext = em.add("change", name=f"取 {st.name} 返回值",
                          rules=[{"t": "set", "p": "payload.reply", "pt": "msg",
                                  "to": extract, "tot": "jsonata"}])
@@ -2393,6 +2668,22 @@ def _flow_var_to_tot(v: str):
     return s, "str"
 
 
+# 标识符改写时必须整体跳过的片段：mustache 模板 与 引号字符串字面量。
+# 字符串字面量里的中文是【正文】，把 '阈值 30' 改成 'flow.阈值 30' 会直接改烂用户文案
+# （R2/R5#round4 引入模板插值后必现；此前无引号字面量所以没暴露）。
+_PROTECTED_SEG_RE = re.compile(
+    r"(\{\{.*?\}\}|'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\")")
+
+
+def _split_protected(expr: str) -> list:
+    """按「受保护片段」切分表达式，受保护片段原样保留在结果里。"""
+    return _PROTECTED_SEG_RE.split(expr)
+
+
+def _is_protected_seg(seg: str) -> bool:
+    return bool(seg) and (seg.startswith("{{") or seg[0] in "'\"")
+
+
 def _bind_flow_vars(expr: str, var_names):
     """把 JSONata 表达式里的【已声明场景变量名】绑定到 flow 上下文（flow.<name>）。
 
@@ -2405,14 +2696,16 @@ def _bind_flow_vars(expr: str, var_names):
     - 已带 flow./msg./$ 前缀的标识符不重复改写（负向后顾 `[^.\\w$一-鿿]`）；
     - 词尾边界 `[^一-鿿\\w]` 防止「阈值」误吞进「阈值XX」这类更长标识符；
     - mustache {{...}} 整体跳过（变量绑定只在 JSONata 语义层，不碰模板占位符）；
+    - **引号字符串字面量整体跳过**（R2/R5#round4）：`'阈值 30'` 里的「阈值」是正文
+      不是标识符，改写成 `'flow.阈值 30'` 会把用户文案改烂；
     - 按变量名长度降序处理，避免短名误吞长名前缀。幂等（flow.X 内 X 不被二次改写）。"""
     if not expr or not var_names:
         return expr
-    parts = re.split(r"(\{\{.*?\}\})", expr)
+    parts = _split_protected(expr)
     names = sorted(var_names, key=len, reverse=True)
     out = []
     for seg in parts:
-        if seg.startswith("{{") and seg.endswith("}}"):
+        if _is_protected_seg(seg):
             out.append(seg)
             continue
         s = seg
@@ -2433,14 +2726,15 @@ def _bind_read_fields(expr: str, field_names) -> str:
     此处把开关规则里的裸字段名改写为 payload.X，使其与 取值 的落点对齐。
     安全边界（同 _bind_flow_vars）：只改写【取值过】的字段名；已带 payload./msg./flow./$ 前缀或
     {{...}} 模板的标识符不重复改写（负向后顾 `[^.\\w$一-鿿]`）；词尾边界 `[^一-鿿\\w]` 防长标识符
-    误吞；mustache {{...}} 整体跳过；按字段名长度降序处理，避免短名误吞长名前缀；幂等。"""
+    误吞；mustache {{...}} 与引号字符串字面量整体跳过；按字段名长度降序处理，避免短名误吞长名
+    前缀；幂等。"""
     if not expr or not field_names:
         return expr
-    parts = re.split(r"(\{\{.*?\}\})", expr)
+    parts = _split_protected(expr)
     names = sorted(field_names, key=len, reverse=True)
     out = []
     for seg in parts:
-        if seg.startswith("{{") and seg.endswith("}}"):
+        if _is_protected_seg(seg):
             out.append(seg)
             continue
         s = seg
