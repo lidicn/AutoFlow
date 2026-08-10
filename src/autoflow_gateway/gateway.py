@@ -453,15 +453,43 @@ def _vg_eval_jsonata_expr(expr, msg):
         return (val not in (None, False, 0, "0", "", "off", "unknown", "unavailable"), True)
     return (False, False)
 
-def _vg_eval_switch(node, msg, warnings=None):
-    """返回 switch 命中输出的索引列表（checkall=true 语义：可多输出）。"""
+def _vg_eval_switch(node, msg, warnings=None, dead_rules=None, report=None):
+    """返回 switch 命中输出的索引列表（checkall=true 语义：可多输出）。
+
+    dead_rules：`{switch_id: {规则下标: [未定义字段]}}`（来自 flow_linter.R31 静态判定）。
+    命中其中的规则一律按**不命中**处理——见 G3 注释。
+    report：可选 dict，回填 {"dead": [...], "conservative": [...]} 供闸门归因。
+    """
     prop = node.get("property", "payload")
     rules = node.get("rules", []) or []
     val = _vg_resolve_path(msg, prop)
+    node_dead = (dead_rules or {}).get(node.get("id") or "", {}) or {}
+    nlabel = node.get("name") or node.get("id") or "switch"
     taken = []
     matched = False
     for i, rule in enumerate(rules):
         t = rule.get("t")
+        # ── G3（报告 A30 闸门侧）：编译器已判「恒假/不可达」的分支，闸门不得保守视为命中 ──
+        # 旧行为：`分支: 状态.光照 < night_start` 引用未声明字段 → 本地无法求值 →
+        # 一律「保守视为命中」→ passed=true，与编译器 R31「条件恒假、动作永不执行」
+        # 的结论**直接矛盾**，把恒假分支 bug 掩盖成闸门放行。
+        # 新行为：尊重编译器静态判定——undefined 字段在运行态 JSONata 求值即 undefined，
+        # NR switch 该规则本就不命中，闸门必须如实反映（有 else 则走 else）。
+        # 只有「编译器未判恒假、仅运行期不可本地求值」才保留保守命中 + warn。
+        if t not in ("else", "otherwise") and i in node_dead:
+            toks = "、".join(node_dead[i])
+            if report is not None:
+                report.setdefault("dead", []).append(
+                    {"node_id": node.get("id"), "node_name": node.get("name"),
+                     "rule_index": i, "undefined_fields": list(node_dead[i]),
+                     "expr": rule.get("v", "")})
+            if warnings is not None:
+                warnings.append(
+                    f"switch「{nlabel}」第 {i + 1} 条分支引用未定义字段「{toks}」"
+                    f"（编译器 R31 已判条件恒假）：闸门按【不命中】处理，其 THEN 体动作"
+                    f"不在重放/断言范围；依赖该分支的期望项记为 N/A（不算通过）。"
+                    f"请修正 取值:/变量: 声明与分支引用的字段名。")
+            continue
         if t == "eq":
             if _vg_val_eq(val, rule.get("v"), rule.get("vt")):
                 taken.append(i)
@@ -488,6 +516,10 @@ def _vg_eval_switch(node, msg, warnings=None):
                 # 由调用方经 warnings 记录，避免误杀结构正确的 DSL。
                 taken.append(i)
                 matched = True
+                if report is not None:
+                    report.setdefault("conservative", []).append(
+                        {"node_id": node.get("id"), "rule_index": i,
+                         "expr": rule.get("v", "")})
                 if warnings is not None:
                     warnings.append(
                         f"switch 规则含无法本地求值的 JSONata「{rule.get('v','')}」，"
@@ -685,13 +717,90 @@ def _sub_name_match(want, actual) -> bool:
     return w == a or w in a
 
 
-def _vg_evaluate_active_intents(flow, world, virtual_time=None, warnings=None):
+def _replay_zero_policy() -> str:
+    """「重放归零」处置策略（G2 / 报告 A15）。
+
+    fail_closed（默认）：闸门无法本地判定条件（unevaluable JSONata）或分支被判恒假，
+      导致本步 **0 个 HA 意图 + 0 个外部调用** 被重放时，不得报「验证通过」——
+      0 重放意味着**什么都没验证**，静默 pass 就是假过。
+    warn_only：只给显式告警、保留放行（可用性优先）。
+
+    这是 `WORKORDER_DEV_c4_replay_semantics.md`（未触发/unevaluable 分支统一语义）
+    的**对接 hook**：终裁下来后只改这里的默认值/取值，不动闸门主体。
+    """
+    v = (os.environ.get("AUTOFLOW_REPLAY_ZERO_POLICY") or "").strip().lower()
+    return v if v in ("fail_closed", "warn_only") else "fail_closed"
+
+
+def _vg_dead_switch_rules(flow):
+    """从编译产物静态提取「恒假分支」索引：`{switch_id: {规则下标: [未定义字段]}}`。
+
+    直接复用编译器 lint 的 R31 判定（flow_linter.collect_undefined_field_refs），
+    保证**闸门结论与编译器结论一致**（G3）。取不到就返回空 dict（fail-open，
+    退回旧的保守命中行为，不因 linter 异常把正常 flow 拦死）。
+    """
+    try:
+        from .flow_linter import collect_undefined_field_refs
+        return collect_undefined_field_refs(flow.get("nodes", []) or []) or {}
+    except Exception:
+        return {}
+
+
+def _vg_dead_branch_reach(flow, dead_rules):
+    """恒假分支下游可达的「本应执行却永不执行」的动作面。
+
+    返回 (entity_ids, subflow_names)：供闸门把依赖这些动作的 expected 标 N/A，
+    而不是笼统报「状态不对」——让 agent 一眼看出是分支写错、不是设备没响应。
+    """
+    ents, subs = set(), set()
+    if not dead_rules:
+        return ents, subs
+    nodes = {n["id"]: n for n in flow.get("nodes", []) if n.get("id")}
+    wires = {}
+    for n in flow.get("nodes", []):
+        w = n.get("wires") or []
+        wires[n.get("id")] = [list(o) if isinstance(o, (list, tuple)) else [o] for o in w]
+
+    def _walk(nid, seen):
+        if nid in seen:
+            return
+        seen.add(nid)
+        nd = nodes.get(nid)
+        if nd is None:
+            return
+        if nd.get("type") == "api-call-service":
+            try:
+                _d, _s, targets, _data = _ha_node_call(nd)
+                ents.update(t for t in targets if t)
+            except Exception:
+                pass
+        elif _vg_is_external_call(nd.get("type")):
+            subs.add(nd.get("name") or nd.get("type") or "subflow")
+        for outs in wires.get(nid, []) or []:
+            for tgt in outs:
+                _walk(tgt, seen)
+
+    for sid, rules in dead_rules.items():
+        ow = wires.get(sid, []) or []
+        for i in rules:
+            for tgt in (ow[i] if i < len(ow) else []):
+                _walk(tgt, set())
+    return ents, subs
+
+
+def _vg_evaluate_active_intents(flow, world, virtual_time=None, warnings=None,
+                                dead_rules=None, report=None):
     """分支感知：返回当前世界态下应执行的 api-call-service 节点 id 集合。
 
     从每个触发的触发器出发，沿 wires 传播 msg；遇 switch 评估规则选定输出分支、
     遇 api-current-state 条件门控按世界态决定通行/走否则、遇 time-range-switch 按虚拟时间
     决定窗口内/外。最终 api-call-service 节点若从触发源经「通行路径」可达即视为激活。
+
+    dead_rules 缺省自动从 flow 静态推导（G3），保证任何调用方都不会退回
+    「undefined 字段分支被保守视为命中」的假过行为。
     """
+    if dead_rules is None:
+        dead_rules = _vg_dead_switch_rules(flow)
     nodes = {n["id"]: n for n in flow.get("nodes", [])}
     out_wires = {}
     for n in flow.get("nodes", []):
@@ -752,7 +861,7 @@ def _vg_evaluate_active_intents(flow, world, virtual_time=None, warnings=None):
                 _trace(tgt, msg, seen)
             return
         if t == "switch":
-            for oi in _vg_eval_switch(node, msg, warnings):
+            for oi in _vg_eval_switch(node, msg, warnings, dead_rules, report):
                 for tgt in (outs[oi] if oi < len(outs) else []):
                     _trace(tgt, msg)
             return
@@ -5427,6 +5536,18 @@ class Gateway:
             for nd in flow.get("nodes", [])
             if _vg_is_external_call(nd.get("type"))
         ]
+        # 【G3】编译器 R31 判定的恒假分支（引用未声明字段）+ 其下游永不执行的动作面。
+        dead_rules = _vg_dead_switch_rules(flow)
+        dead_ents, dead_subs = _vg_dead_branch_reach(flow, dead_rules)
+        dead_branches = [
+            {"node_id": sid, "rule_index": i, "undefined_fields": toks}
+            for sid, rules in dead_rules.items() for i, toks in rules.items()
+        ]
+        # 【G2】flow 是否**声明**了任何会产生效果的节点：有声明却 0 重放 = 什么都没验证。
+        has_effect_nodes = any(
+            nd.get("type") == "api-call-service" or _vg_is_external_call(nd.get("type"))
+            for nd in flow.get("nodes", []))
+        replay_zero_steps = []
         for step in steps:
             # 2a) 应用本步世界事件（多步场景逐步推进现实态）
             for eid, st in (step.get("world") or {}).items():
@@ -5435,9 +5556,11 @@ class Gateway:
                 except Exception:
                     pass
             vt = step.get("virtual_time", virtual_time)
+            step_report = {}
             # 2b) 评估当前世界态下应执行的 api-call-service（分支感知）
             if branch_aware:
-                active = _vg_evaluate_active_intents(flow, _world, vt, warnings)
+                active = _vg_evaluate_active_intents(
+                    flow, _world, vt, warnings, dead_rules, step_report)
             else:
                 # 非分支感知：所有 HA 动作 + 所有子流程/link out 都算「会执行」，
                 # 否则 external_calls 恒空，A12 的子流程断言会全体误判 FAIL。
@@ -5483,10 +5606,24 @@ class Gateway:
                                           "（entity_id 拼错 / 设备未接入 / 目录未同步）")
                     if unmodeled:
                         item["unmodeled_service"] = unmodeled
+                    # 【G3】期望依赖的动作挂在编译器判定的恒假分支下 → 明确标 N/A，
+                    # 不是「设备没响应」，而是「这条分支根本不会执行」。仍算未通过
+                    # （fail-closed：N/A ≠ pass），但归因直指分支字段写错。
+                    if not ok and eid in dead_ents:
+                        item["na"] = True
+                        item["dead_branch"] = True
+                        item["reason"] = (
+                            (item.get("reason") + "；") if item.get("reason") else ""
+                        ) + ("该期望依赖的动作挂在【恒假分支】下（分支引用未声明字段，"
+                             "编译器 R31 已告警）→ 永不执行，后置条件无法达成 → 记 N/A")
                     assertions.append(item)
                     if not ok:
                         fail = {"entity_id": eid, "expected": want, "actual": got}
                         if rec is None:
+                            fail["reason"] = item["reason"]
+                        if item.get("dead_branch"):
+                            fail["na"] = True
+                            fail["dead_branch"] = True
                             fail["reason"] = item["reason"]
                         if unmodeled:
                             fail["unmodeled_service"] = unmodeled
@@ -5499,20 +5636,32 @@ class Gateway:
                     hit = next((c for c in external if _sub_name_match(want_sub, c)), None)
                     declared = any(_sub_name_match(want_sub, d) for d in declared_subflows)
                     ok = hit is not None
+                    _na = (not ok) and any(_sub_name_match(want_sub, d) for d in dead_subs)
                     if ok:
                         why = f"已调用（{hit}）"
+                    elif _na:
+                        why = ("该子流程挂在【恒假分支】下（分支引用未声明字段，"
+                               "编译器 R31 已告警）→ 永不被调用 → 记 N/A")
                     elif declared:
                         why = ("flow 中存在该子流程节点，但本步世界态下不可达"
                                "（死分支 / 条件未命中 / 未接线）")
                     else:
                         why = (f"flow 中没有任何 link out / 子流程实例匹配「{want_sub}」；"
                                f"已声明的外部调用：{declared_subflows or '无'}")
-                    assertions.append({"kind": "subflow", "subflow": want_sub,
-                                       "entity_id": None, "expected": f"调用 {want_sub}",
-                                       "actual": hit or "未调用", "ok": ok, "reason": why})
+                    _a = {"kind": "subflow", "subflow": want_sub,
+                          "entity_id": None, "expected": f"调用 {want_sub}",
+                          "actual": hit or "未调用", "ok": ok, "reason": why}
+                    if _na:
+                        _a["na"] = True
+                        _a["dead_branch"] = True
+                    assertions.append(_a)
                     if not ok:
-                        failures.append({"subflow": want_sub, "expected": f"调用 {want_sub}",
-                                         "actual": "未调用", "reason": why})
+                        _f = {"subflow": want_sub, "expected": f"调用 {want_sub}",
+                              "actual": "未调用", "reason": why}
+                        if _na:
+                            _f["na"] = True
+                            _f["dead_branch"] = True
+                        failures.append(_f)
                 else:
                     # 【A12·fail-closed】识别不了的期望项一律判失败，绝不静默放行。
                     why = ("无法识别的期望项：需含 {entity_id, state} 或 {subflow}，"
@@ -5521,12 +5670,30 @@ class Gateway:
                                        "expected": cond, "actual": None,
                                        "ok": False, "reason": why})
                     failures.append({"expected": cond, "actual": None, "reason": why})
+            # 2c-bis)【G2 / 报告 A15】重放归零检测：flow 明明声明了动作，本步却
+            # 一个 HA 意图、一个外部调用都没重放 → 闸门**什么都没验证**。
+            # 若归零可归因于「闸门无法本地求值的 JSONata」或「编译器判定的恒假分支」，
+            # 就绝不能报「验证通过」——那正是 A15 的假过路径。
+            _cause = []
+            if step_report.get("dead"):
+                _cause.append("恒假分支（R31 未定义字段）")
+            if step_report.get("conservative"):
+                _cause.append("无法本地求值的 JSONata")
+            _zero = has_effect_nodes and not replayed and not external and bool(_cause)
+            if _zero:
+                replay_zero_steps.append(len(step_results))
+                warnings.append(
+                    "【重放归零】本步 0 个 HA 意图 + 0 个外部调用被重放，"
+                    "原因：" + "、".join(_cause) +
+                    "。闸门实际未验证任何行为，不构成『通过』。"
+                    "请补 否则: 分支 / 改用闸门可求值的条件 / 修正分支字段名。")
             step_results.append({
                 "world": step.get("world", {}),
                 "replayed_services": replayed,
                 "external_calls": external,
                 "assertions": assertions,
                 "failures": failures,
+                "replay_zero": _zero,
             })
 
         # 2e) A14：未建模服务导致「后置状态压根没被真实改动」，必须显式告警而非静默
@@ -5536,23 +5703,36 @@ class Gateway:
                 "以下服务 vhass 未建模真实副作用，其后置状态【未被验证】："
                 + "、".join(_unmodeled))
 
+        # 2f)【G2】重放归零的最终处置：默认 fail-closed（0 重放 ≠ 验证通过）。
+        #     策略经 _replay_zero_policy() 可切换，对接 c4_replay_semantics 终裁。
+        _rz_policy = _replay_zero_policy()
+        _rz_block = bool(replay_zero_steps) and _rz_policy == "fail_closed"
+        if replay_zero_steps and _rz_policy == "warn_only":
+            warnings.append(
+                "重放归零按 warn_only 策略保留放行（AUTOFLOW_REPLAY_ZERO_POLICY）："
+                "该结论**未经行为验证**，请人工确认。")
+
         # 3) 汇总返回（单步与旧结构兼容；多步额外给 steps）
         if scenario:
-            all_pass = all(not s["failures"] for s in step_results)
+            all_pass = all(not s["failures"] for s in step_results) and not _rz_block
             return {
                 "passed": all_pass,
                 "verdict": "放行" if all_pass else "拦截",
                 "steps": step_results,
                 "step_count": len(step_results),
                 "warnings": warnings,
+                "dead_branches": dead_branches,
+                "replay_zero_steps": replay_zero_steps,
+                "replay_zero_policy": _rz_policy,
                 "entity_count": len(store.entities),
             }
         sr = step_results[0]
-        passed = len(sr["failures"]) == 0
+        passed = len(sr["failures"]) == 0 and not _rz_block
         verdict = "放行" if passed else "拦截"
         reasons = []
         for a in sr["assertions"]:
-            mark = "[通过]" if a["ok"] else "[未过]"
+            # G3：恒假分支导致的未过标 [N/A]（不是设备没响应，是分支永不执行）
+            mark = "[通过]" if a["ok"] else ("[N/A]" if a.get("na") else "[未过]")
             # A12：断言项现在有 state / subflow / unknown 三种，标签不能只认 entity_id
             label = a.get("entity_id") or a.get("subflow") or "期望项"
             line = f"{mark} {label} 期望={a['expected']} 实测={a['actual']}"
@@ -5568,6 +5748,8 @@ class Gateway:
         )
         for w in warnings:
             reasons.append(f"[警告] {w}")
+        if _rz_block:
+            reasons.append("[拦截] 重放归零：闸门未验证任何行为，按 fail-closed 处置")
         return {
             "passed": passed,
             "verdict": verdict,
@@ -5577,6 +5759,9 @@ class Gateway:
             "external_calls": sr["external_calls"],
             "assertions": sr["assertions"],
             "failures": sr["failures"],
+            "dead_branches": dead_branches,
+            "replay_zero": bool(replay_zero_steps),
+            "replay_zero_policy": _rz_policy,
             "entity_count": len(store.entities),
         }
 

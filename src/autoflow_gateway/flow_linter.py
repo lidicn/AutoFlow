@@ -601,42 +601,81 @@ def _collect_defined_fields(nodes: List[Dict[str, Any]]) -> set:
         if n.get("type") == "api-current-state":
             for op in (n.get("outputProperties") or []):
                 p = op.get("property") or ""
-                if p.startswith("payload.") and p != "payload.state":
-                    defined.add(p[len("payload."):])
+                if p.startswith("payload."):
+                    if p != "payload.state":
+                        defined.add(p[len("payload."):])
+                elif p and p != "payload" and "." not in p:
+                    # 手写/白箱 flow 常直接写 msg.<字段>（不带 payload. 前缀），
+                    # 同样是**已声明**。漏收会让 R31 误报——而闸门(G3)现在会据此
+                    # 把分支判为恒假，误报代价从「多一条 warning」升级成
+                    # 「本来正确的分支被判永不执行」，故必须收全。
+                    defined.add(p)
         elif n.get("type") == "change":
             for r in (n.get("rules") or []):
-                if r.get("pt") == "flow" and r.get("p"):
-                    defined.add(r["p"])
+                p = r.get("p")
+                if not p:
+                    continue
+                if r.get("pt") == "flow":
+                    defined.add(p)
+                elif r.get("pt") in (None, "", "msg"):
+                    if p.startswith("payload."):
+                        defined.add(p[len("payload."):])
+                    elif p != "payload" and "." not in p:
+                        defined.add(p)
     return defined
 
 
-def _lint_undefined_field_ref(nodes: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+def collect_undefined_field_refs(
+        nodes: List[Dict[str, Any]]) -> Dict[str, Dict[int, List[str]]]:
+    """R31 的**结构化**索引：`{switch节点id: {规则下标: [未定义字段名, ...]}}`。
+
+    与 `_lint_undefined_field_ref`（每节点只报一条、面向人读）不同，本函数**逐规则**
+    列全，供**闸门**消费：闸门需要知道「具体是第几条规则恒假」，才能在重放时把该
+    分支判为**不命中**（而不是对无法本地求值的 JSONata 一律保守视为命中）。
+
+    语义依据：`分支: 状态.光照 < 22` 里 `状态.光照` 从未被 `取值:`/`变量:` 声明 →
+    运行态 JSONata 求值得 undefined → NR switch 该规则**不命中** → THEN 体永不执行。
+    这是**静态可判定**的恒假，闸门必须与编译器结论一致（G3 / 报告 A30 闸门侧）。
+    """
     defined = _collect_defined_fields(nodes)
-    out: List[Dict[str, str]] = []
+    idx: Dict[str, Dict[int, List[str]]] = {}
     for n in nodes:
         if n.get("type") != "switch":
             continue
         nid = n.get("id") or "?"
         for i, r in enumerate(n.get("rules") or []):
+            if (r.get("t") or "") in ("else", "otherwise"):
+                continue  # else 规则不是条件，编译器也给它带 vt=jsonata
             vt = r.get("vt") or r.get("t")
             if vt not in ("jsonata", "jsonata_exp"):
                 continue
             expr = r.get("v") or ""
+            toks: List[str] = []
             for m in _FIELD_TOKEN_RE.finditer(expr):
                 tok = m.group(1)
-                if tok in _JSONATA_KEYWORDS or tok in defined:
+                if tok in _JSONATA_KEYWORDS or tok in defined or tok in toks:
                     continue
-                out.append({
-                    "level": "warning", "rule": "R31", "node_id": nid,
-                    "node_type": "switch",
-                    "message": (
-                        f"switch 第 {i + 1} 条分支引用了未定义的字段 `{tok}`"
-                        f"（取值/变量 均未声明该名）。运行态该字段为 undefined → 条件恒假、"
-                        f"动作永不执行。请确认 取值: 字段名 与 分支 引用一致，"
-                        f"或显式写成 payload.{tok}。"
-                    ),
-                })
-                break  # 单节点报一次足够
+                toks.append(tok)
+            if toks:
+                idx.setdefault(nid, {})[i] = toks
+    return idx
+
+
+def _lint_undefined_field_ref(nodes: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    for nid, rules in collect_undefined_field_refs(nodes).items():
+        i = min(rules)          # 单节点报一次足够：取下标最小的那条
+        tok = rules[i][0]
+        out.append({
+            "level": "warning", "rule": "R31", "node_id": nid,
+            "node_type": "switch",
+            "message": (
+                f"switch 第 {i + 1} 条分支引用了未定义的字段 `{tok}`"
+                f"（取值/变量 均未声明该名）。运行态该字段为 undefined → 条件恒假、"
+                f"动作永不执行。请确认 取值: 字段名 与 分支 引用一致，"
+                f"或显式写成 payload.{tok}。"
+            ),
+        })
     return out
 
 
