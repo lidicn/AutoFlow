@@ -1346,12 +1346,13 @@ def autoflow_apply(mode: str, correction_json: str, flow_id: str = "",
       B  ：{"domain":"light","service":"turn_on","data":{"entity_id":"light.study"},"reason":"..."}
       reason 强烈建议写（会原样呈现给人类审批，写不清楚容易被拒）。
 
-    ★两阶段安全模型（改 flow 是高风险，没有例外）：
-      1) 先调 autoflow_apply(mode="C", correction_json=..., flow_id=...)（auto_approve 默认 False）
-         → 网关先落 apply 前快照做回滚点，再把请示推给人类，返回
-           {pending:true, decision_id, trace_id, snapshot_path}；此时**系统未被改动**。
-      2) 人类在 WebUI 工作区批准后，用**同一个 trace_id** + auto_approve=True 再调一次
-         → 才真正写回，返回 {applied:true, ...}。回滚点复用，不会丢。
+    ★自愈闭环（Self-Healing Loop）安全模型（改 flow 是高风险的，但有界自动写回）：
+      - 默认**自动写回**：autoflow_apply 调一次即落 apply 前快照做回滚点、直接 modify_flow 写回，
+        不进人审闸（否则 agent 永远没法自己调试已部署 flow）。
+      - 有界失效保护（三次机会）：per-(agent, flow) 滑动窗口失败预算（自愈重试次数，WebUI 可配，
+        默认 3），同一 (agent, flow) 连续失败达上限即停止并转报告/人工
+        （stage=selfheal_budget_exhausted），防自动修复死循环；中间一次成功即清零计数。
+      - `auto_approve` 参数**已废弃**：本闭环恒自动写回，保留签名仅为调用方兼容。
       mode=B 属低风险，本层直接放行给 HA 写服务确认闸（返回 pending_id，人批准即执行）。
 
     出错/告警：
@@ -1381,8 +1382,8 @@ def autoflow_apply_rollback(trace_id: str, auto_approve: bool = False) -> str:
     """【apply 闭环·回滚】把某次 apply（trace_id）改动的 flow 还原到 apply 前的快照。
 
     - trace_id 来自 autoflow_apply 的返回值（两阶段全程同一个）。
-    - 与 apply 对称：还原本身也是改 flow → 默认先进人审闸，返回 {pending:true, decision_id}；
-      批准后 auto_approve=True 重调才真正还原，返回 {restored:true}。
+    - 与 apply 对称：还原本身也是改 flow → 默认自动执行，计入同一 (agent, flow) 自愈预算；
+      预算耗尽即停止（stage=selfheal_budget_exhausted，fail-safe 防死循环）。
     - 只还原「有回滚点」的 apply：mode=B（写 HA 服务）不改 flow，无回滚点，会明确报错。
     - 空快照拒绝写回（绝不用空 flow 覆盖线上）。
     返回 {ok, restored, pending, flow_id, snapshot_path, decision_id?, error?}。"""
@@ -1419,7 +1420,7 @@ def autoflow_apply_state_from_debug(flow_id: str = "", node_id: str = "", since:
                                     limit: int = 50, entity_id: str = "", state: str = "",
                                     reason: str = "", auto_approve: bool = False,
                                     trace_id: str = "") -> str:
-    """【apply 闭环 B 段胶水·入口】把 debug 回读帧映射成「实体+目标状态」并写回 HA。
+    """【自愈闭环 B 段胶水·入口】把 debug 回读帧映射成「实体+目标状态」并写回 HA。
 
     这是 inject 触发(autoflow_trigger_inject) → debug 回读(autoflow_debug_read) → 本工具
     （B 段胶水）→ apply_flow(mode="B") 落状态 的最后一环。适用于「观测到某实体该是 on、

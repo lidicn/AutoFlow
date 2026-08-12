@@ -1,13 +1,14 @@
-"""Test apply_flow / apply_rollback（WB1-F / #694）：apply 闭环编排核心。
+"""Test apply_flow / apply_rollback（WB1-F / #694）：自愈闭环（Self-Healing Loop）编排核心。
 
 覆盖铁律：
-  - mode A/C（改 flow，高风险）：未批准 **只请示不落地**（pending + decision_id + 回滚点），
-    批准（auto_approve=True）才走 modify_flow 写回；
+  - mode A/C（改 flow，高风险）：**默认自动写回**（不进人审闸），先落回滚点再 modify_flow；
+    受 per-(agent, flow) 滑动窗口失败预算（自愈重试次数，默认 3）有界保护，耗尽即停止
+    （stage=selfheal_budget_exhausted）并转报告/人工，防自动修复死循环；中间一次成功即清零计数；
   - mode B（落状态，低风险）：本层 audit auto-pass，透传 commit_ha_service（其自带确认闸），
-    全程不碰 flow；
+    全程不碰 flow，不计入自愈预算；
   - #607：目标 tab 禁用态 → tab_disabled + 显式告警（不阻塞）；
-  - 回滚：apply_rollback(trace_id) 从 apply 前快照还原，同样过决策闸，拒绝用空 flow 覆盖线上；
-  - 审计：同一 trace_id 两阶段（pending → approved）复用同一回滚点，轨迹可追。
+  - 回滚：apply_rollback(trace_id) 从 apply 前快照还原，默认自动执行、计入同一自愈预算；
+  - 审计：同一 trace_id 复用同一回滚点，轨迹可追。
 """
 import json
 import os
@@ -104,29 +105,25 @@ def test_mode_a_requires_flow_id(gw, stub):
     assert r["ok"] is False and "flow_id" in r["error"]
 
 
-# ───────────── A/C 段：决策闸两阶段 ─────────────
+# ───────────── A/C 段：自愈闭环自动写回 ─────────────
 
-def test_mode_a_unapproved_only_requests_decision(gw, stub):
+def test_mode_a_applies_without_approval(gw, stub):
+    """自愈闭环：不传 auto_approve 也直接写回（无闸），返回 applied/pending=False。"""
     r = gw.apply_flow("f_apply", {"dsl": "场景: 修正版", "reason": "观测到灯没亮"},
                       mode="A", agent_id="wb1")
     assert r["ok"] is True
-    assert r["pending"] is True and r["applied"] is False
-    assert r["decision_id"] == "dec-1"
-    assert r["stage"] == "decision_gate" and r["risk"] == "high"
+    assert r["applied"] is True and r["pending"] is False
+    assert r["stage"] == "modify_flow" and r["gate"] == "selfheal_auto_write" and r["risk"] == "high"
     assert r["snapshot_path"] and os.path.exists(r["snapshot_path"])
-    # 关键：未批准时**一个字节都不能写回**
-    assert stub["modify"] == []
-    assert len(stub["decision"]) == 1
-    q = stub["decision"][0]["question"]
-    assert "观测到灯没亮" in q and r["trace_id"] in q
-    assert stub["decision"][0]["source"] == "wb1"
+    assert len(stub["modify"]) == 1            # 默认即写回
+    assert stub["decision"] == []              # 不再进人审闸
 
 
 def test_mode_a_approved_applies(gw, stub):
     r = gw.apply_flow("f_apply", {"dsl": "场景: 修正版", "reason": "r"},
                       mode="A", agent_id="wb1", auto_approve=True)
     assert r["ok"] is True and r["applied"] is True and r["pending"] is False
-    assert r["stage"] == "modify_flow" and r["gate"] == "approved"
+    assert r["stage"] == "modify_flow" and r["gate"] == "selfheal_auto_write"
     assert len(stub["modify"]) == 1
     assert stub["modify"][0]["dsl"] == "场景: 修正版"
     assert stub["decision"] == []          # 已批准不再重复请示
@@ -200,7 +197,8 @@ def test_mode_b_commit_failure_surfaces(gw, stub, monkeypatch):
 
 # ───────────── 审计轨迹 + 两阶段复用回滚点 ─────────────
 
-def test_trace_persists_two_phases_same_rollback_point(gw, stub):
+def test_trace_persists_same_trace_id_reuses_rollback_point(gw, stub):
+    """自愈闭环：同一 trace_id 两次 apply 复用同一回滚点（不再有 pending 阶段，默认即写回）。"""
     p1 = gw.apply_flow("f_apply", {"dsl": "场景: v2", "reason": "r"}, mode="A")
     tid, snap = p1["trace_id"], p1["snapshot_path"]
     p2 = gw.apply_flow("f_apply", {"dsl": "场景: v2", "reason": "r"}, mode="A",
@@ -209,7 +207,7 @@ def test_trace_persists_two_phases_same_rollback_point(gw, stub):
     tr = gwmod._read_apply_trace(tid)
     assert tr is not None
     assert len(tr["events"]) == 2
-    assert tr["events"][0]["pending"] is True and tr["events"][1]["applied"] is True
+    assert tr["events"][0]["applied"] is True and tr["events"][1]["applied"] is True
     # 顶层回滚点取首个非空 → 仍指向 apply 前那一份
     assert tr["snapshot_path"] == snap
     assert tr["flow_id"] == "f_apply"
@@ -222,20 +220,16 @@ def test_rollback_unknown_trace(gw, stub):
     assert r["ok"] is False and "找不到" in r["error"]
 
 
-def test_rollback_requires_decision_then_restores(gw, stub):
+def test_rollback_restores_directly(gw, stub):
+    """自愈闭环：apply_rollback 默认自动还原（无闸），写回快照里的原始节点。"""
     a = gw.apply_flow("f_apply", {"node_patches": [{"match": {"id": "n2"},
                                                     "set": {"name": "v2"}}],
                                   "reason": "热补丁"},
                       mode="C", auto_approve=True)
     tid = a["trace_id"]
-    # 第一步：只请示，不还原
-    r1 = gw.apply_rollback(tid, agent_id="wb1")
-    assert r1["ok"] is True and r1["pending"] is True and r1["restored"] is False
-    assert r1["decision_id"]
-    assert stub["deploy"] == []
-    # 第二步：批准后真还原，写回的是快照里的原始节点
-    r2 = gw.apply_rollback(tid, agent_id="wb1", auto_approve=True)
-    assert r2["ok"] is True and r2["restored"] is True
+    r = gw.apply_rollback(tid, agent_id="wb1")
+    assert r["ok"] is True and r["restored"] is True and r["pending"] is False
+    assert r["stage"] == "restored"
     assert len(stub["deploy"]) == 1
     dep = stub["deploy"][0]
     assert dep["flow_id"] == "f_apply" and dep["force"] is True
@@ -278,13 +272,84 @@ def test_mode_c_patch_nomatch_surfaces_failclosed(gw, stub, monkeypatch):
     assert stub["deploy"] == [] and stub["modify"] == []
 
 
-def test_apply_pending_recorded_in_trace(gw, stub):
-    """审计完整性：未批准阶段即写入 trace（pending:true），供 autoflow_get_trace 独立复核。"""
+def test_apply_recorded_in_trace(gw, stub):
+    """审计完整性：apply 默认即写回，trace 记录 applied 事件，供 autoflow_get_trace 独立复核。"""
     r = gw.apply_flow("f_apply", {"dsl": "场景: v2", "reason": "r"}, mode="A")
     tr = gwmod._read_apply_trace(r["trace_id"])
     assert tr is not None
-    assert tr["events"][0]["pending"] is True
-    assert tr["events"][0]["applied"] is False
+    assert tr["events"][0]["applied"] is True
+    assert tr["events"][0]["pending"] is False
+
+
+# ───────────── 自愈闭环：滑动窗口失败预算（selfheal_budget）─────────────
+
+def _write_selfheal_budget(gw, tmp_path, val):
+    """把自愈重试次数写进 feature_flags.json（模拟 WebUI 落盘），重定向 data_dir 避免污染仓库。"""
+    monkeypatch_dir = str(tmp_path / "gwdata")
+    gw.cfg.data_dir = monkeypatch_dir
+    p = gw.cfg.feature_flags_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump({"selfheal_budget": val}, f)
+
+
+def test_selfheal_budget_exhausted_then_blocked(gw, stub, tmp_path, monkeypatch):
+    """连续 N 次写回失败 → 第 N+1 次被拒 stage=selfheal_budget_exhausted，且不再调 modify_flow。"""
+    _write_selfheal_budget(gw, tmp_path, 3)
+    modify_calls = []
+    def _fail(*a, **k):
+        modify_calls.append(1)
+        return {"ok": False, "stage": "node_gate", "error": "未注册节点类型"}
+    monkeypatch.setattr(gw, "modify_flow", _fail)
+    for _ in range(3):
+        r = gw.apply_flow("f_apply", {"node_patches": [{"match": {"id": "n2"}, "set": {}}]},
+                          mode="C", agent_id="wb1")
+        assert r["ok"] is False and r["applied"] is False
+    assert len(modify_calls) == 3
+    r4 = gw.apply_flow("f_apply", {"node_patches": [{"match": {"id": "n2"}, "set": {}}]},
+                       mode="C", agent_id="wb1")
+    assert r4["ok"] is False and r4["applied"] is False
+    assert r4["stage"] == "selfheal_budget_exhausted"
+    assert r4.get("retry_budget") == 3
+    assert r4.get("failed_attempts_in_window") == 3
+    assert len(modify_calls) == 3          # 第 4 次被拒，未写回
+
+
+def test_selfheal_budget_reset_on_success(gw, stub, tmp_path, monkeypatch):
+    """中间一次成功 → 计数清零，后续失败不被立即耗尽（有界但非永久封锁）。"""
+    _write_selfheal_budget(gw, tmp_path, 2)
+    seq = {"n": 0}
+    def _seq(*a, **k):
+        seq["n"] += 1
+        if seq["n"] == 2:
+            return {"ok": True, "flow_id": "f_apply", "changed_nodes": 1}
+        return {"ok": False, "stage": "node_gate", "error": "x"}
+    monkeypatch.setattr(gw, "modify_flow", _seq)
+    assert gw.apply_flow("f_apply", {"node_patches": [{"match": {"id": "n2"}, "set": {}}]},
+                         mode="C", agent_id="wb1")["ok"] is False   # 失败1
+    assert gw.apply_flow("f_apply", {"node_patches": [{"match": {"id": "n2"}, "set": {}}]},
+                         mode="C", agent_id="wb1")["ok"] is True    # 成功→清零
+    assert gw.apply_flow("f_apply", {"node_patches": [{"match": {"id": "n2"}, "set": {}}]},
+                         mode="C", agent_id="wb1")["ok"] is False   # 失败2
+    assert gw.apply_flow("f_apply", {"node_patches": [{"match": {"id": "n2"}, "set": {}}]},
+                         mode="C", agent_id="wb1")["ok"] is False   # 失败3
+    r5 = gw.apply_flow("f_apply", {"node_patches": [{"match": {"id": "n2"}, "set": {}}]},
+                       mode="C", agent_id="wb1")
+    assert r5["stage"] == "selfheal_budget_exhausted"   # 累计3次失败 >= 2 → 第5次被拒
+
+
+def test_selfheal_budget_zero_disables_retry(gw, stub, tmp_path, monkeypatch):
+    """selfheal_budget=0：一次失败即停（等同纯人审时代行为但无闸）。"""
+    _write_selfheal_budget(gw, tmp_path, 0)
+    modify_calls = []
+    def _fail(*a, **k):
+        modify_calls.append(1)
+        return {"ok": False, "stage": "node_gate", "error": "x"}
+    monkeypatch.setattr(gw, "modify_flow", _fail)
+    r = gw.apply_flow("f_apply", {"node_patches": [{"match": {"id": "n2"}, "set": {}}]},
+                      mode="C", agent_id="wb1")
+    assert r["stage"] == "selfheal_budget_exhausted"
+    assert len(modify_calls) == 0          # 0=禁用自主重试，连一次都不试
 
 
 def _write_empty(tmp_path):

@@ -1536,6 +1536,30 @@ async function refreshEvalMonitor() {
   else stopEvalPoll();
 }
 
+// ── 自愈闭环：重试次数（WebUI 可配，0=禁用自主重试，1~20=单 (agent, flow) 滑动窗口内最多自主重试）──
+$("#shBtn").onclick = async () => {
+  let cur = 3;
+  try { const c = await api("GET", "/config"); cur = (c.data && c.data.selfheal_budget) || 3; } catch {}
+  modal("自愈重试次数（自愈闭环）",
+    `<p class="desc">agent 自主触发 → 回读 → 修正已部署 flow 时，同一 (agent, flow) 在 10 分钟窗口内最多重试 N 次；耗尽即停止并转报告，防止自动修复死循环。<br>
+     • <b>0</b>：不自主重试（一次失败即停，等同纯人审时代行为但无闸）。<br>
+     • <b>1~20</b>：单 (agent, flow) 滑动窗口内最多自主重试次数（默认 3）。<br>
+     改完<b>即时生效，无需重启网关</b>。</p>
+     <div class="field"><label>自愈重试次数</label>
+       <input type="number" id="shInput" min="0" max="20" value="${cur}" style="width:90px">
+     </div>
+     <button class="btn primary" id="sh-save">保存</button>`);
+  $("#sh-save").onclick = async () => {
+    const n = parseInt($("#shInput").value, 10);
+    if (Number.isNaN(n) || n < 0 || n > 20) {
+      return toast("自愈重试次数必须是 0~20 之间的整数");
+    }
+    const r = await api("PUT", "/settings", { selfheal_budget: n });
+    if (r.data?.ok) { closeModal(); toast(`自愈重试次数已设为 ${n}（即时生效，无需重启）`); }
+    else toast("保存失败: " + (r.data?.error || r.status));
+  };
+};
+
 $("#modalClose").onclick = closeModal;
 $("#modalMask").onclick = (e) => { if (e.target.id === "modalMask") closeModal(); };
 $$(".navitem").forEach((b) => (b.onclick = () => setTab(b.dataset.tab)));
