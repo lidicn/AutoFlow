@@ -6,6 +6,6 @@ params: sensor, light, room, brightness
 ---
 场景: {{room}}人体感应开灯
 触发: {{sensor}} 有人
-动作: light.turn_on({{light}}, brightness={{brightness|100}})
+动作: light.turn_on({{light}}, brightness_pct={{brightness|80}})
 预期:
   {{light}} = on
