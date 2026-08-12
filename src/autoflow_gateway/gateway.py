@@ -3520,7 +3520,7 @@ class Gateway:
         _e2e = None  # 默认未运行；仅当 require_e2e 开启且非 dry_run 才赋值（避免成功返回 NameError）
         if require_e2e and not dry_run:
             try:
-                _e2e = self.run_e2e_trace_raw(flow, target=target, live=False)
+                _e2e = self.run_e2e_trace_raw(flow, target=target, live=False, allow_prod=allow_prod)
             except Exception as _ee:
                 _slog(_tid, "deploy_proposal.e2e_gate_err",
                       elapsed=round(time.perf_counter() - _t0, 3), error=str(_ee)[:200])
@@ -4314,7 +4314,8 @@ class Gateway:
                        (os.environ.get("AUTOFLLOW_WHITEBOX_BLOCK_ON_LOGIC_ERROR", "0") != "0"),
                    block_on_schema_error: bool =
                        (os.environ.get("AUTOFLLOW_WHITEBOX_BLOCK_ON_SCHEMA_ERROR", "1") != "0"),
-                   require_e2e: Optional[bool] = None
+                   require_e2e: Optional[bool] = None,
+                   allow_prod: bool = False
                    ) -> Dict[str, Any]:
         """白盒部署：直接接受 Agent 产出的原始 Node-RED flow JSON，经校验后部署。
 
@@ -4644,7 +4645,7 @@ class Gateway:
         _e2e = None  # 默认未运行；仅当 require_e2e 开启且非 dry_run 才赋值（避免成功返回 NameError）
         if _require_e2e and not dry_run:
             try:
-                _e2e = self.run_e2e_trace_raw(flow, target=target, live=False)
+                _e2e = self.run_e2e_trace_raw(flow, target=target, live=False, allow_prod=allow_prod)
             except Exception as _ee:
                 _slog(_tid, "deploy_raw.e2e_gate_err",
                       elapsed=round(time.perf_counter() - _t0, 3), error=str(_ee)[:200])
@@ -4750,7 +4751,8 @@ class Gateway:
 
         # Step 8: 部署到 NR
         try:
-            result = self.nr.create_or_update_flow(fid, flow, force=True)
+            result = self.nr.create_or_update_flow(fid, flow, force=True,
+                                                   allow_prod=allow_prod)
         except Exception as e:
             _log_raw_deploy(agent_id, flabel, "DEPLOY_FAIL", f"NR error: {e}", validation)
             _record_fail()
@@ -4851,7 +4853,7 @@ class Gateway:
 
     def verify_flow(self, flow_json: Dict, agent_id: str = "verify",
                     run_gate: bool = True, require_e2e: bool = False,
-                    target: str = "staging") -> Dict[str, Any]:
+                    target: str = "staging", allow_prod: bool = False) -> Dict[str, Any]:
         """白盒质量验证（只读，绝不部署）：跑与 deploy_raw 同源的质量闸，但不写 NR / 不登记 catalog。
 
         用途：agent / WB2 在部署前或回归时，按需校验一份 flow 的质量（schema + lint + 可选 vhass
@@ -4945,7 +4947,7 @@ class Gateway:
         _e2e = None
         if require_e2e:
             try:
-                _e2e = self.run_e2e_trace_raw(flow, target=target, live=False)
+                _e2e = self.run_e2e_trace_raw(flow, target=target, live=False, allow_prod=allow_prod)
             except Exception as _ee:
                 _e2e = {"e2e": False, "verdict": "拦截", "error": f"E2E 验证异常：{_ee}"}
 
@@ -5099,6 +5101,22 @@ class Gateway:
                 "node_gate_ok": _node_gate_ok,
                 "blocked": bool(_blocking),
                 "flow": _flow_preview,
+                "_trace_id": _tid,
+            }
+
+        # A19：致命 schema 错误（S1..S5）必须阻断落提案——坏流不得静默进提案；
+        # lint/logic 仍走 fail-open 供人审（仅结构性错误在更前已拦）。
+        if _schema_blocking:
+            _slog(_tid, "propose_raw.schema_block", schema_blocking=_schema_blocking,
+                  elapsed=round(time.perf_counter() - _t0, 3))
+            return {
+                "ok": False, "stage": "schema_block",
+                "error": "flow 含致命 schema 错误，已拒绝落提案",
+                "schema_blocking": _schema_blocking,
+                "lint_error_count": sum(1 for v in lint_issues if v["level"] == "error"),
+                "lint_warning_count": sum(1 for v in lint_issues if v["level"] == "warning"),
+                "would_block_rules": sorted({b.get("rule") for b in _blocking}),
+                "logic": _logic_block, "node_gate_ok": _node_gate_ok,
                 "_trace_id": _tid,
             }
 
@@ -5712,12 +5730,25 @@ class Gateway:
                 "重放归零按 warn_only 策略保留放行（AUTOFLOW_REPLAY_ZERO_POLICY）："
                 "该结论**未经行为验证**，请人工确认。")
 
+        # A22：存在「被跳过/未建模/重放归零 warn_only」的验证层时，即便断言全过也不算充分验证，
+        # verdict 降级为「未充分验证」（而非「放行」），消除「零验证报 pass」假象。
+        _unverified = (
+            (has_ha_actions and bool(gate.get("skipped"))) or
+            bool(_unmodeled) or
+            (bool(replay_zero_steps) and _rz_policy == "warn_only")
+        )
+        if _unverified:
+            warnings.append("验证存在未覆盖层（闸跳过/未建模服务/重放归零 warn_only），"
+                            "结论未充分验证，请勿视同已通过。")
+
         # 3) 汇总返回（单步与旧结构兼容；多步额外给 steps）
         if scenario:
             all_pass = all(not s["failures"] for s in step_results) and not _rz_block
+            _verdict = "拦截" if not all_pass else ("未充分验证" if _unverified else "放行")
             return {
                 "passed": all_pass,
-                "verdict": "放行" if all_pass else "拦截",
+                "fully_verified": (not _unverified) and all_pass,
+                "verdict": _verdict,
                 "steps": step_results,
                 "step_count": len(step_results),
                 "warnings": warnings,
@@ -5728,7 +5759,7 @@ class Gateway:
             }
         sr = step_results[0]
         passed = len(sr["failures"]) == 0 and not _rz_block
-        verdict = "放行" if passed else "拦截"
+        verdict = "拦截" if not passed else ("未充分验证" if _unverified else "放行")
         reasons = []
         for a in sr["assertions"]:
             # G3：恒假分支导致的未过标 [N/A]（不是设备没响应，是分支永不执行）
@@ -5752,6 +5783,7 @@ class Gateway:
             reasons.append("[拦截] 重放归零：闸门未验证任何行为，按 fail-closed 处置")
         return {
             "passed": passed,
+            "fully_verified": (not _unverified) and passed,
             "verdict": verdict,
             "reasons": reasons,
             "warnings": warnings,
@@ -6009,7 +6041,7 @@ class Gateway:
             },
         }
 
-    def _safe_delete(self, flow_id: str) -> None:
+    def _safe_delete(self, flow_id: str, allow_prod: bool = False) -> None:
         """删除 e2e-trace 临时部署的 flow。
 
         旧实现 `except Exception: pass` 会静默吞掉删除失败，导致 e2e-trace
@@ -6018,7 +6050,7 @@ class Gateway:
         """
         for attempt in (1, 2):
             try:
-                self.nr.delete_flow(flow_id, force=True)
+                self.nr.delete_flow(flow_id, force=True, allow_prod=allow_prod)
                 return
             except Exception as e:  # noqa: BLE001 — NR 删除异常类型不定，统一兜底
                 if attempt == 1:
@@ -6089,7 +6121,8 @@ class Gateway:
                        expected_path: Optional[List] = None,
                        expected_postconditions: Optional[List[Dict]] = None,
                        target: str = "staging",
-                       live: bool = False) -> Dict[str, Any]:
+                       live: bool = False,
+                       allow_prod: bool = False) -> Dict[str, Any]:
         """P5 · 端到端执行追踪：把 DSL 编译产物**真实部署到 1990**并触发，
         用插桩（tap + catch）抓取信息流实际跑到的每个环节，与期望路径比对，
         产出**断点报告**——明确流程跑到哪个环节、在哪里断、报错是什么。
@@ -6150,7 +6183,7 @@ class Gateway:
         _nodes, inject_ids = self._e2e_prepare_flow(inst)
         # 4) 部署（失败由 NRRollbackError 兜底，这里捕获并产出拦截报告）
         try:
-            dep = self.nr.create_or_update_flow(fid, inst, force=True)
+            dep = self.nr.create_or_update_flow(fid, inst, force=True, allow_prod=allow_prod)
             real_fid = dep.get("id") or fid
         except Exception as e:
             return self._e2e_result("拦截", stage="deploy", flow_id=fid,
@@ -6169,7 +6202,7 @@ class Gateway:
                 # fake/测试环境由 nr 层从入口节点模拟执行）
                 self.nr.inject_flow(real_fid)
         except Exception as e:
-            self._safe_delete(real_fid)
+            self._safe_delete(real_fid, allow_prod=allow_prod)
             return self._e2e_result("拦截", stage="inject", flow_id=real_fid,
                                      error=f"触发失败：{e}",
                                      reasons=[f"inject 触发失败：{e}"])
@@ -6212,7 +6245,7 @@ class Gateway:
             if not post["ok"]:
                 report["verdict"] = "断点"
         # 9) 回滚插桩副本 + 清 trace（context 清理走 DELETE，见 nr_client.delete_context）
-        self._safe_delete(real_fid)
+        self._safe_delete(real_fid, allow_prod=allow_prod)
         try:
             self.nr.delete_context("global", trace_key)
         except Exception:
@@ -6444,7 +6477,8 @@ class Gateway:
 
     def run_e2e_trace_raw(self, flow_json, expected_path=None,
                           expected_postconditions=None, target="staging",
-                          live=False, trigger=None) -> Dict[str, Any]:
+                          live=False, trigger=None,
+                          allow_prod: bool = False) -> Dict[str, Any]:
         """C1 · 白箱 L3 运行时追踪：直接吃**原始 NR flow**（不经 DSL 编译），
         真实部署到 1990 并触发，用插桩抓取实际执行轨迹，与期望路径比对 → 断点报告。
 
@@ -6504,7 +6538,7 @@ class Gateway:
 
         # 5) 部署
         try:
-            dep = self.nr.create_or_update_flow(fid, inst, force=True)
+            dep = self.nr.create_or_update_flow(fid, inst, force=True, allow_prod=allow_prod)
             real_fid = dep.get("id") or fid
         except Exception as e:
             return self._e2e_result("拦截", "deploy", flow_id=fid,
@@ -6518,7 +6552,7 @@ class Gateway:
                 self.nr.trigger_inject(iid)
                 triggered.append(iid)
         except Exception as e:
-            self._safe_delete(real_fid)
+            self._safe_delete(real_fid, allow_prod=allow_prod)
             return self._e2e_result("拦截", "inject", flow_id=real_fid,
                                     error=f"触发失败：{e}",
                                     reasons=[f"inject 触发失败：{e}"])
@@ -6577,7 +6611,7 @@ class Gateway:
                     f"postconditions 校验异常：{e}")
 
         # 10) 回滚 + 清理
-        self._safe_delete(real_fid)
+        self._safe_delete(real_fid, allow_prod=allow_prod)
         try:
             self.nr.delete_context("global", trace_key)
         except Exception:

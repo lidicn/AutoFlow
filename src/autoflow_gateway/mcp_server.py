@@ -208,6 +208,9 @@ async def autoflow_propose_dsl(dsl: str, expected_postconditions_json: str = "[]
       )
     - dsl：语义 DSL 文本（场景/触发/动作/调用子流程/分支/否则/延时/并行）。语法与子流程清单调 autoflow_dsl_help()。
     - expected_postconditions_json：JSON 数组；元素为 {"entity_id","state"} 或 {"subflow":"<名>"}。
+    - resolved_entities_json：差异式实体白名单，接受三种形式之一：① 字符串数组
+      '["light.x","switch.y"]'；② 对象数组 '[{"entity_id":"light.x"}, ...]'；③ 不传或 "[]"
+      （仅依赖 DSL 内实体引用 + 闸门强制校验）。闸门只放行白名单内实体，引用白名单外实体直接判 FAIL。
     - 注意：实体一律用 autoflow_resolve_entity 返回的真实 entity_id；引用目录外的实体闸门直接判 FAIL。
     - agent_id 由已认证身份自动注入；提案进入 raw，等待人类在 WebUI 审核升格。
     - 返回 {ok, proposal_id, scene_name, gate:{passed,replayed_services,assertions}, flow}。
@@ -1040,7 +1043,8 @@ def autoflow_validate_flow(flow_json: str) -> str:
 @mcp_admin.tool()
 @mcp.tool()
 def autoflow_verify_flow(flow_json: str, run_gate: bool = True,
-                        require_e2e: bool = False, target: str = "staging") -> str:
+                        require_e2e: bool = False, target: str = "staging",
+                        allow_prod: bool = False) -> str:
     """【白箱质量验证·只读·绝不部署】按需跑与 deploy_raw 同源的质量闸，但不写 NR / 不登记 catalog。
 
     用法：
@@ -1048,7 +1052,8 @@ def autoflow_verify_flow(flow_json: str, run_gate: bool = True,
         flow_json='{"id":"my-flow","label":"测试","nodes":[...]}',
         run_gate=True,            # 是否跑 vhass staging 闸（含 HA 动作时）
         require_e2e=False,        # 是否跑 e2e 实机追踪（落 staging + 回滚，默认关）
-        target="staging"
+        target="staging",
+        allow_prod=False          # e2e 需临时写 prod 实例时必须显式 True（见下方说明）
       )
       —— 也可传节点数组字符串 '[{...},{...}]'（自动包成 {nodes:[...]}）。务必是字符串。
 
@@ -1072,7 +1077,11 @@ def autoflow_verify_flow(flow_json: str, run_gate: bool = True,
 
     ⚠️ 仅原生手写/管理员身份可经 /mcp-white（或 /mcp-admin）调用；黑箱身份不可见。
     ⚠️ 与 autoflow_validate_flow 区别：本工具额外跑 vhass / e2e / 结构金丝雀，给出统一
-        deploy 前质量 verdict；validate_flow 只做静态 schema+lint+logic 仿真。"""
+        deploy 前质量 verdict；validate_flow 只做静态 schema+lint+logic 仿真。
+    ⚠️ allow_prod（A20）：require_e2e=True 时 e2e 会往 NR 实例临时写插桩副本再回滚。
+        若目标 NR 实例被判定为 prod（AUTOFLLOW_ENV=prod 或 NR_PROD=1，与端口无关），
+        默认会被 prod 写护栏拦下并报 NRGuardError。需要在该实例上跑 e2e 时，
+        显式传 allow_prod=True 表示知情放行；默认 False，prod 锁保持生效。"""
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
@@ -1093,7 +1102,8 @@ def autoflow_verify_flow(flow_json: str, run_gate: bool = True,
     except (json.JSONDecodeError, TypeError, ValueError) as e:
         return _js({"ok": False, "error": f"flow_json 非法 JSON: {e}"})
     res = _gw().verify_flow(data, agent_id=aid, run_gate=run_gate,
-                            require_e2e=require_e2e, target=target)
+                            require_e2e=require_e2e, target=target,
+                            allow_prod=allow_prod)
     return _js(res)
 
 @mcp_admin.tool()
@@ -1201,7 +1211,8 @@ def autoflow_run_e2e_trace(dsl: str = "", flow_json: str = "",
                            expected_path_json: str = "",
                            expected_postconditions_json: str = "",
                            trigger_json: str = "",
-                           live: bool = False) -> str:
+                           live: bool = False,
+                           allow_prod: bool = False) -> str:
     """【原生手写 L3 运行时追踪】把 flow **真实部署到 NR** 并触发，用插桩抓取实际执行轨迹，
     与期望路径比对 → 断点报告（明确跑到哪、在哪断、报错是什么）。
 
@@ -1223,6 +1234,10 @@ def autoflow_run_e2e_trace(dsl: str = "", flow_json: str = "",
       - expected_postconditions_json：可选，HA 副作用后置校验（需 live HA，软失败不阻断）。
       - trigger_json：可选，合成触发事件 {"entity_id","state","old_state"}（state 入口替换用）。
       - live：是否真实 HA 模式（影响后置校验语义），默认 False。
+      - allow_prod（A20）：追踪必须往 NR 实例临时写插桩副本再回滚。若该实例被判定为
+        prod（AUTOFLLOW_ENV=prod 或 NR_PROD=1，与端口无关），默认被 prod 写护栏拦下
+        （NRGuardError）。需要在该实例上追踪时显式传 allow_prod=True 知情放行；
+        默认 False，prod 锁保持生效。
 
     返回：{e2e, flow_id, verdict(通过/断点/拦截), reasons, report, trace, triggered, entity_warnings}
       —— 直接消费 report.breakpoint 即知「在哪断、为什么」。
@@ -1265,6 +1280,7 @@ def autoflow_run_e2e_trace(dsl: str = "", flow_json: str = "",
                 expected_postconditions=exp_post,
                 live=live,
                 trigger=trig,
+                allow_prod=allow_prod,
             )
         elif dsl:
             result = gw.run_e2e_trace(
@@ -1272,6 +1288,7 @@ def autoflow_run_e2e_trace(dsl: str = "", flow_json: str = "",
                 expected_path=exp_path,
                 expected_postconditions=exp_post,
                 live=live,
+                allow_prod=allow_prod,
             )
         else:
             return _js({"ok": False, "error": "必须提供 flow_json 或 dsl 之一。"})

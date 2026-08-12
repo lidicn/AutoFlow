@@ -117,6 +117,21 @@ def main(argv=None):
     na.add_argument("--body", default="")
     na.add_argument("--tags", default="")
 
+    # ── 白箱运维旁路（复用 gateway/NR 契约，供人类调试/排障，不依赖 MCP agent）──
+    gf = sub.add_parser("get-flow", help="只读：取回已部署 flow 的完整节点图 + 来源标记")
+    gf.add_argument("--id", required=True, help="NR flow id（如 57be9a8f1fca2bcd）")
+    lf = sub.add_parser("list-flows", help="列出 NR 已部署 flows/tabs（含 label/id/节点数）")
+    lf.add_argument("--only", default="all", choices=["all", "deployed"],
+                    help="deployed=仅列带部署标记的（剔除 stale）")
+    inj = sub.add_parser("inject", help="触发 flow 内 inject 节点（调试用，非部署）")
+    inj.add_argument("--flow-id", required=True)
+    inj.add_argument("--node-id", default="", help="指定单个 inject 节点；缺省触发 flow 内全部 inject")
+    inj.add_argument("--allow-prod", action="store_true",
+                     help="目标 NR 被判定为 prod 时仍需显式开启（默认拒绝触发 prod）")
+    dl = sub.add_parser("decisions-list", help="列出决策（verify/deploy 产物）")
+    dl.add_argument("--status")
+    dl.add_argument("--limit", type=int, default=50)
+
     args = p.parse_args(argv)
     gw = Gateway()
 
@@ -208,6 +223,36 @@ def main(argv=None):
     elif args.cmd == "mock-api":
         from . import mock_docker_api
         mock_docker_api.main(args.rest)
+
+    elif args.cmd == "get-flow":
+        _out(gw.get_flow(args.id))
+    elif args.cmd == "list-flows":
+        try:
+            flows = gw.nr.list_flows()
+        except Exception as e:
+            _out({"ok": False, "error": f"list_flows 失败: {e}"}); return
+        items = flows if isinstance(flows, list) else flows.get("flows", [])
+        if args.only == "deployed":
+            items = [f for f in items if f.get("deployed")]
+        _out({"ok": True, "count": len(items), "flows": [
+            {"id": f.get("id"), "label": f.get("label"),
+             "node_count": len(f.get("nodes", []))} for f in items]})
+    elif args.cmd == "inject":
+        if getattr(gw.nr, "is_prod", lambda: False)() and not args.allow_prod:
+            _out({"ok": False, "error": "目标 NR 为 prod 实例，触发需显式 --allow-prod",
+                  "hint": "inject 会真实触发自动化，请在非 prod 或知情下使用。"})
+            return
+        try:
+            if args.node_id:
+                rc = gw.nr.trigger_inject(args.node_id)
+                _out({"ok": True, "node_id": args.node_id, "http_status": rc})
+            else:
+                gw.nr.inject_flow(args.flow_id)
+                _out({"ok": True, "flow_id": args.flow_id, "triggered": "all_inject_nodes"})
+        except Exception as e:
+            _out({"ok": False, "error": f"inject 失败: {e}"})
+    elif args.cmd == "decisions-list":
+        _out({"ok": True, "decisions": gw.list_decisions(status=args.status, limit=args.limit)})
 
 
 if __name__ == "__main__":
