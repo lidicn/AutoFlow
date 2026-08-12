@@ -6524,7 +6524,7 @@ class Gateway:
             return self._e2e_result(
                 "拦截", "trigger",
                 error="flow 无 inject 且无可转换的事件入口节点",
-                reasons=["staging 环境 vhass 暂不支持 HA websocket 事件推送"
+                reasons=[f"{target} 环境 vhass 暂不支持 HA websocket 事件推送"
                          "（P3 已知缺口），state 触发器无法在无副作用前提下被真实点燃。"
                          "请改用 inject 触发器，或在 trigger 参数里提供合成触发事件。"])
 
@@ -6916,7 +6916,7 @@ class Gateway:
                  f"回滚点：{snap or '⚠ 快照失败·无回滚点'}\n"
                  f"trace_id={trace_id}")
             dec = self.request_decision(q, ["批准应用", "拒绝"], source=agent_id)
-            did = ((dec or {}).get("decision") or {}).get("id")
+            did = (dec or {}).get("decision_id") or ((dec or {}).get("decision") or {}).get("id")
             audit.update(ok=True, pending=True, applied=False,
                          stage="decision_gate", decision_id=did, risk="high",
                          gate="request_decision",
@@ -7072,7 +7072,7 @@ class Gateway:
                  f"trace_id={trace_id}\n快照：{snap_path}\n"
                  f"原修正理由：{tr.get('reason') or '（无）'}")
             dec = self.request_decision(q, ["批准回滚", "拒绝"], source=agent_id)
-            did = ((dec or {}).get("decision") or {}).get("id")
+            did = (dec or {}).get("decision_id") or ((dec or {}).get("decision") or {}).get("id")
             out.update(ok=True, pending=True, stage="decision_gate", decision_id=did,
                        note="已进人审闸；批准后以 auto_approve=True 重调 apply_rollback 执行。")
             return out
@@ -7384,6 +7384,17 @@ class Gateway:
         # 但**「复现不出」不等于「不会发生」**——这条闭环一旦错位是完全静默的：
         # agent 会拿着一个永远查不到的 id 空等人类拍板。故加读回自检：回执 id 必须
         # 能从库里查回来，查不回就把 ok 打成 False 并如实说明，绝不把死 id 当成功回执发出去。
+        # ── A24(#round5) 根因排查结论（iss_fb16973875 续）──
+        # 穷举全仓库「dec_」id 去向后确认：唯一生成点是 decision_store.create 的
+        #   did = "dec_" + uuid.uuid4().hex[:12]（L81），落库与回查均走同一 did（_row_to_dict 仅
+        #   做 json.loads(options)，不改 id）。request_decision 回执 decision_id = did = rec["id"] =
+        #   DB 行 id，三处同一来源、无中间改写/截断。调用方（mcp.autoflow_request_decision 取
+        #   res["decision"]["id"]、apply_flow/apply_rollback 已从嵌套剥壳改为优先取 res["decision_id"]）
+        #   均派生自同一 id，脆弱剥壳最多取 None 不会「一位之差」。故原始「dec_83d…3aea vs dec_83d…7aea」
+        #   一位之差无法在当前代码任何路径复现——判定为历史传输/显示偶发，非代码缺陷。
+        # 处置：不静默关单——保留上方 R4 读回自检为最终 fail-safe（任何未来错位都会被它拦成
+        #   ok=False 而非发死 id），并新增 tests/test_decision_id_consistency.py 把「复现不出」固化为
+        #   可执行守护（错位注入→ok:False + 300 轮 create→get→回执 id 一致性）。
         verify = None
         try:
             verify = self.decisions.get(did)

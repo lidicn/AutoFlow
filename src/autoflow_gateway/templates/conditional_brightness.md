@@ -9,8 +9,8 @@ params: sensor, light, room, lux, day_brightness, night_brightness, night_start
 变量: night_start = {{night_start|22}}
 取值: {{lux}} 光照
 分支: 光照 < night_start
-  动作: light.turn_on({{light}}, brightness={{day_brightness|100}})
+  动作: light.turn_on({{light}}, brightness_pct={{day_brightness|100}})
 否则
-  动作: light.turn_on({{light}}, brightness={{night_brightness|30}})
+  动作: light.turn_on({{light}}, brightness_pct={{night_brightness|30}})
 预期:
   {{light}} = on

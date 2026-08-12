@@ -6,7 +6,7 @@ params: sensor, light, room, text, brightness
 ---
 场景: {{room}}入户播报
 触发: {{sensor}} 有人
-动作: light.turn_on({{light}}, brightness={{brightness|100}})
+动作: light.turn_on({{light}}, brightness_pct={{brightness|80}})
 调用子流程: demo_notify(text={{text}}, room={{room}}, level=一般)
 预期:
   {{light}} = on
