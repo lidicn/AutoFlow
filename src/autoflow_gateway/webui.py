@@ -24,7 +24,7 @@ from starlette.responses import JSONResponse, FileResponse
 from starlette.staticfiles import StaticFiles
 from starlette.requests import Request
 
-from .config import get_config, is_task_pool_enabled, is_raw_node_escape_enabled, is_submit_gate_enabled, set_feature_flag, get_deploy_policy, set_deploy_policy
+from .config import get_config, is_task_pool_enabled, is_raw_node_escape_enabled, is_submit_gate_enabled, set_feature_flag, get_deploy_policy, set_deploy_policy, load_feature_flags
 from .gateway import Gateway
 from .identity import AgentStore
 from .proposals import ProposalStore
@@ -192,6 +192,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             "task_pool_enabled": is_task_pool_enabled(cfg),
             "raw_node_escape_enabled": is_raw_node_escape_enabled(cfg),
             "deploy_policy": get_deploy_policy(cfg),
+            "selfheal_budget": load_feature_flags(cfg).get("selfheal_budget", 3),
         })
 
     async def settings_update(request: Request):
@@ -220,11 +221,22 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                 set_deploy_policy(cfg, dp)
             except ValueError as e:
                 return _js({"ok": False, "error": str(e)}, 400)
+        # 自愈闭环：自愈重试次数（0=禁用自主重试；1~20=单 (agent, flow) 滑动窗口内最多自主重试）
+        sb = b.get("selfheal_budget")
+        if sb is not None:
+            try:
+                sb = int(sb)
+            except (TypeError, ValueError):
+                return _js({"ok": False, "error": "selfheal_budget 必须是整数"}, 400)
+            if sb < 0 or sb > 20:
+                return _js({"ok": False, "error": "selfheal_budget 必须在 0~20 之间（0=禁用自主重试）"}, 400)
+            set_feature_flag(cfg, "selfheal_budget", sb)
         return _js({"ok": True,
                     "task_pool_enabled": is_task_pool_enabled(cfg),
                     "raw_node_escape_enabled": is_raw_node_escape_enabled(cfg),
                     "submit_run_gate": is_submit_gate_enabled(cfg),
-                    "deploy_policy": get_deploy_policy(cfg)})
+                    "deploy_policy": get_deploy_policy(cfg),
+                    "selfheal_budget": load_feature_flags(cfg).get("selfheal_budget", 3)})
 
     # ── 诊断查看器（P4-C，只读）──
     async def diagnostics_view(request: Request):

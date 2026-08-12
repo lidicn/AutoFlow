@@ -20,7 +20,7 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 import logging
 
-from .config import get_config, is_raw_node_escape_enabled, get_deploy_policy
+from .config import get_config, is_raw_node_escape_enabled, get_deploy_policy, load_feature_flags
 from .state import SharedState
 from .defense import DefenseLayer, DefenseError
 from .confirm import ConfirmationGate, PendingOp, ConfirmationError
@@ -6817,12 +6817,15 @@ class Gateway:
           mode B（落状态）  ：{"domain": "light", "service": "turn_on",
                                 "data": {"entity_id": "light.x"}, "reason": "..."}
 
-        安全模型（铁律）：
-          - A/C 改 flow = 高风险 → 默认 auto_approve=False 时**不执行**，先 snapshot 落回滚点、
-            再 request_decision 进人审闸，返回 {pending: True, decision_id, trace_id, snapshot_path}；
-            人类在 WebUI 批准后，调用方以**相同 trace_id + auto_approve=True** 重调本方法才真正写回。
+        安全模型（铁律·自愈闭环 Self-Healing Loop）：
+          - A/C 改 flow = 高风险 → **默认自动写回**（不再进人审闸）：先 snapshot 落回滚点，
+            再做 per-(agent, flow) 滑动窗口失败预算检查（自愈重试次数，WebUI 可配，默认 3），
+            通过后直接 modify_flow 写回；预算耗尽即停止并转报告/人工
+            （stage=selfheal_budget_exhausted），防止自动修复死循环。
+          - 回滚点快照**保留**（作为安全网，不是闸），apply_rollback 随时可还原到写回前状态。
+          - `auto_approve` 参数**已废弃**：apply 闭环恒自动写回，保留签名仅为 MCP 调用方兼容。
           - B 落状态 = 低风险 → 本层 audit auto-pass（不额外加闸），直接透传 commit_ha_service
-            （它自身已进确认闸，不存在裸写 HA）。
+            （它自身已进确认闸，不存在裸写 HA）；B 段不计入自愈预算。
           - #607：目标 tab 处于禁用态时**显式告警**（tab_disabled=True + warnings），
             提醒调用方别拿空回读当证据乱改；告警不阻塞（禁用 tab 上做热补丁本身是合法运维动作）。
 
@@ -6906,31 +6909,26 @@ class Gateway:
             audit["warnings"].append(
                 "快照落盘失败：本次 apply 无回滚点，apply_rollback 将不可用。")
 
-        # 决策闸：未获批准一律只请示、不落地
-        if not auto_approve:
-            how = ("整条 DSL 重编译" if dsl
-                   else f"{len(node_patches or [])} 条节点补丁（外科式局部改）")
-            q = (f"【apply {mode} 段·改 flow 请示】flow「{label}」({flow_id})\n"
-                 f"修正理由：{reason or '（agent 未提供）'}\n"
-                 f"改动方式：{how}\n"
-                 f"回滚点：{snap or '⚠ 快照失败·无回滚点'}\n"
-                 f"trace_id={trace_id}")
-            dec = self.request_decision(q, ["批准应用", "拒绝"], source=agent_id)
-            did = (dec or {}).get("decision_id") or ((dec or {}).get("decision") or {}).get("id")
-            audit.update(ok=True, pending=True, applied=False,
-                         stage="decision_gate", decision_id=did, risk="high",
-                         gate="request_decision",
-                         note=("已进人审闸：请在 WebUI 工作区选择；批准后以相同 trace_id + "
-                               "auto_approve=True 重调 apply_flow 才会真正写回（回滚点复用）。"))
+        # 自愈闭环（Self-Healing Loop）：默认自动写回已部署 flow，不进人审闸；
+        # 以 per-(agent, flow) 滑动窗口失败预算做有界失效保护（fail-safe，防死循环）。
+        _allowed, _info = self._selfheal_budget_check(agent_id, flow_id)
+        if not _allowed:
+            audit.update(ok=False, applied=False, pending=False,
+                         stage="selfheal_budget_exhausted",
+                         error=_info.get("error"),
+                         retry_budget=_info.get("retry_budget"),
+                         failed_attempts_in_window=_info.get("failed_attempts_in_window"),
+                         gate="selfheal_budget", risk="high")
             _write_apply_trace(audit)
             return audit
 
-        # 已获批准 → 走既有外科式改流链路（含节点注册表闸门 + 部署）
+        # 走既有外科式改流链路（含节点注册表闸门 + 部署）
         res = self.modify_flow(flow_id, dsl=dsl, node_patches=node_patches,
                                agent_id=agent_id)
         ok = bool(res.get("ok"))
+        self._selfheal_budget_record(agent_id, flow_id, ok)
         audit.update(ok=ok, applied=ok, pending=False, stage="modify_flow",
-                     result=res, gate="approved", risk="high")
+                     result=res, gate="selfheal_auto_write", risk="high")
         if not ok:
             audit["error"] = res.get("error") or "modify_flow 失败"
         else:
@@ -7032,15 +7030,15 @@ class Gateway:
 
     def apply_rollback(self, trace_id: str, agent_id: str = "unknown-agent",
                        auto_approve: bool = False) -> Dict[str, Any]:
-        """把某次 apply（trace_id）改动的 flow 还原到 apply 前的快照。
+        """把某次 apply（trace_id）改动的 flow 还原到 apply 前的快照（自愈闭环·回滚）。
 
         - 从 data/apply_traces/<trace_id>.json 找回 flow_id 与 snapshot_path；
-        - 还原同样是「改 flow」＝高风险：默认进 request_decision 闸，
-          auto_approve=True 才执行（与 apply_flow 对称，不留后门）；
+        - 还原同样是「改 flow」＝高风险，**默认自动执行**（与 apply_flow 对称、计入同一
+          (agent, flow) 自愈预算），预算耗尽即停止（stage=selfheal_budget_exhausted，fail-safe 防死循环）；
         - 执行路径复用 modify_flow 的部署链路（节点注册表闸门 + create_or_update_flow(force)），
           **不走 deploy_raw**：还原的是曾经在线的已知良好状态，不该被新增 lint 规则二次拦下。
 
-        返回 {ok, restored, pending, trace_id, flow_id, snapshot_path, decision_id?, error?}。"""
+        返回 {ok, restored, pending, trace_id, flow_id, snapshot_path, error?}。"""
         out: Dict[str, Any] = {"ok": False, "restored": False, "pending": False,
                                "trace_id": trace_id, "agent_id": agent_id, "warnings": []}
         tr = _read_apply_trace(trace_id)
@@ -7067,14 +7065,14 @@ class Gateway:
             out.update(stage="load_snapshot", error="快照内无节点，拒绝用空 flow 覆盖线上")
             return out
         label = flow.get("label") or flow_id
-        if not auto_approve:
-            q = (f"【apply 回滚请示】把 flow「{label}」({flow_id}) 还原到 apply 前快照\n"
-                 f"trace_id={trace_id}\n快照：{snap_path}\n"
-                 f"原修正理由：{tr.get('reason') or '（无）'}")
-            dec = self.request_decision(q, ["批准回滚", "拒绝"], source=agent_id)
-            did = (dec or {}).get("decision_id") or ((dec or {}).get("decision") or {}).get("id")
-            out.update(ok=True, pending=True, stage="decision_gate", decision_id=did,
-                       note="已进人审闸；批准后以 auto_approve=True 重调 apply_rollback 执行。")
+        # 自愈闭环：回滚同样默认自动执行、计入同一 (agent, flow) 自愈预算（fail-safe 防死循环）
+        _allowed, _info = self._selfheal_budget_check(agent_id, flow_id)
+        if not _allowed:
+            out.update(ok=False, restored=False, pending=False,
+                       stage="selfheal_budget_exhausted",
+                       error=_info.get("error"),
+                       retry_budget=_info.get("retry_budget"),
+                       failed_attempts_in_window=_info.get("failed_attempts_in_window"))
             return out
         target = dict(flow)
         target["id"] = flow_id
@@ -7087,7 +7085,9 @@ class Gateway:
             res = self.nr.create_or_update_flow(flow_id, target, force=True)
         except Exception as e:
             out.update(stage="deploy", error=f"还原部署失败：{e}")
+            self._selfheal_budget_record(agent_id, flow_id, False)
             return out
+        self._selfheal_budget_record(agent_id, flow_id, True)
         out.update(ok=True, restored=True, stage="restored",
                    node_count=len(target.get("nodes", [])),
                    result=res if isinstance(res, dict) else {"raw": str(res)},
@@ -7097,6 +7097,52 @@ class Gateway:
                             "agent_id": agent_id, "stage": "restored",
                             "snapshot_path": snap_path})
         return out
+
+    # ── 自愈闭环（Self-Healing Loop）滑动窗口失败预算 ──
+    # WebUI 可配 feature_flags.selfheal_budget（默认 3），env AUTOFLLOW_SELFHEAL_BUDGET 回退；
+    # 窗口 AUTOFLLOW_SELFHEAL_WINDOW_MIN（默认 10 分钟）。0=禁用自主重试（一次失败即停）。
+    # 与 deploy_raw 的 retry_budget 同源思想，仅作用域换成 apply/rollback、默认值 3。
+    def _selfheal_budget_check(self, agent_id: str, flow_id: str):
+        """per-(agent, flow) 滑动窗口失败预算检查。
+
+        返回 (allowed, info)：allowed=True 可继续写回；allowed=False 时 info 含 error /
+        retry_budget / failed_attempts_in_window，调用方据此返回 stage=selfheal_budget_exhausted。
+        """
+        _budget = None
+        try:
+            _budget = int(load_feature_flags(self.cfg).get("selfheal_budget"))
+        except (TypeError, ValueError, AttributeError):
+            _budget = None
+        if _budget is None:
+            _budget = int(os.environ.get("AUTOFLLOW_SELFHEAL_BUDGET", "3"))
+        _window = float(os.environ.get("AUTOFLLOW_SELFHEAL_WINDOW_MIN", "10")) * 60
+        if not hasattr(self, "_apply_selfheal_budget"):
+            self._apply_selfheal_budget = {}
+        _hist = self._apply_selfheal_budget.setdefault((agent_id, flow_id), [])
+        _now = time.time()
+        _hist[:] = [t for t in _hist if _now - t < _window]  # 滑动窗口裁剪
+        # 语义：attempts allowed = selfheal_budget（budget=0 ⇒ 禁用自主重试，任何写回都被拦）。
+        if len(_hist) >= _budget:
+            return False, {
+                "error": (
+                    f"自愈重试预算耗尽：agent `{agent_id}` 在 {_window/60:.0f} 分钟内对 flow "
+                    f"`{flow_id}` 已有 {len(_hist)} 次自主修复失败（上限 {_budget}）。"
+                    f"疑似自动修复死循环，已停止并转报告/人工。请人工介入检查 flow，"
+                    f"或在 WebUI 调高自愈重试次数（selfheal_budget）。"
+                ),
+                "retry_budget": _budget,
+                "failed_attempts_in_window": len(_hist),
+            }
+        return True, {}
+
+    def _selfheal_budget_record(self, agent_id: str, flow_id: str, ok: bool) -> None:
+        """写回结果记预算：成功清空该 (agent, flow) 计数（避免误伤后续正常修复），失败追加时间戳。"""
+        if not hasattr(self, "_apply_selfheal_budget"):
+            self._apply_selfheal_budget = {}
+        if ok:
+            self._apply_selfheal_budget.pop((agent_id, flow_id), None)
+        else:
+            self._apply_selfheal_budget.setdefault((agent_id, flow_id), []).append(time.time())
 
     def get_apply_trace(self, trace_id: str) -> Dict[str, Any]:
         """按 trace_id 读回某次 apply 的完整审计轨迹（data/apply_traces/<trace_id>.json）。
