@@ -15,9 +15,9 @@
 | 文档完备度 | ★★★★☆ README/ARCHITECTURE/HANDOFF/WHITEBOX 齐全，交接信息密度高 |
 | 测试覆盖 | ★★★★☆ 117 个测试文件（含取回归位的 2 个 LLM 测试）+ 离线硬门槛；全量 `run_tests.py` 基线 = **2 个既有 red**（`test_verify_flow`、`test_vhass`，均为 `ceb1218` 基线既有、与 B/C 无关），其余全绿、含 27 个 LLM 测试 |
 | **git 健康度** | ✅ **已收敛**（2026-08-14 执行）：`main = ceb1218`，child of `f9dcb0f`，`git ls-remote` 网络回读确认；本地 `.git` ref 解析有 overlay drop 缺陷，已用 SHA 直指绕过 |
-| 接手风险 | 中等，git 已收敛并 push（main=`ec47078`）；P0/P1 已落地。集中在：待裁决语义 + 2 个基线既有 red（verify_flow/vhass，待另立工单） + ACP 落地 |
+| 接手风险 | 低-中，git 已收敛并多轮 push（main=`2b11be9`）；P0/P1 已落地；阶段1 ACP 测试补回 + P-2 门禁修复 + README 脱敏已 push。集中在：待裁决语义 + 2 个基线既有 red（verify_flow/vhass，待另立工单） + 阶段2 NAS 实测部署 |
 
-**一句话**：业务代码可放心继续开发；git 收敛已落地（`E:\NAS\autoflow` 成唯一定源），下一步是取回归位的 2 个 LLM 测试文件、做 P0 agent 身份注入、P1 输入 UI，并推进 ACP/LLM 收尾。
+**一句话**：业务代码可放心继续开发；git 收敛已落地（`E:\NAS\autoflow` 成唯一定源），P0/P1 与阶段1 ACP 测试补回均已 push；下一步是 NAS 实测部署（阶段2）与待裁决语义 c4_replay_semantics。
 
 ---
 
@@ -168,7 +168,7 @@ python -m pytest tests/test_gateway.py -q   # 单文件
 | P1 | 聊天输入框改底部居中固定条、无滚动条（仿 MiMo 截图） | 同上 §2 | ✅ **已实现并 push**（2026-08-14，`ec47078`）：`app.js` 结构 + textarea 自动增高、`style.css` `#view-llm_agent`/`.chat-input-bar` |
 | P1 | **取回归位 2 个缺失 LLM 测试文件**（archive 内已修好，非损坏）：`tests/test_llm_client.py`、`tests/test_llm_webui_agent.py` 在 `E:\NAS\autoflow` 缺失，仅存于 `E:/autoflow_scatter_archive_20260814/af_recov_llmwebui/tests/`。取回归位 + 本地 pytest 验证即全绿 | `handoff/HANDOFF_DEV_llm_ui_pool_test_apply.md` §2 | ✅ 已取回归位+验证（27 passed） |
 | P1 | deepseek2api ↔ AutoFlow 内置 LLM 对接（tools 格式） | `handoff/INTEGRATION_deepseek2api_autoflow_llm.md`（转交对方开发者） | 转交中 |
-| P1 | ACP 对应 WebUI 前端 + LLM 对接落地 | 分支 `dev/acp-integration` (@ e8b3e63) **不在 GitHub**，仅存 recovery 仓 `E:/autoflow_scatter_archive_20260814/af_recov*/` | 待落地 |
+| P1 | ACP 对应 WebUI 前端 + LLM 对接落地 | 分支 `dev/acp-integration` (@ e8b3e63) **不在 GitHub**，仅存 recovery 仓 `E:/autoflow_scatter_archive_20260814/af_acp/` | 阶段1 ✅ **已 push**（`2b11be9`）：ACP 生产代码已在 NAS 活树（随收敛进 main），本步仅补回缺失测试 + 契约对齐 + P-2 门禁修复 + README 脱敏；**完整 ACP WebUI 前端可视化仍待做**（阶段2） |
 | P2 | `_mask_secret` 把后端名也遮成乱码（cosmetic） | 建议名字走 esc 不 mask | 可选 |
 | P2 | A23/A24/A26 修复 | 分支 `dev/round5-cheap-fixes` (@ 1a92435) | 推进中 |
 
@@ -235,10 +235,11 @@ python -m pytest tests/test_gateway.py -q   # 单文件
 7. ✅ **LLM 助手 agent 身份注入**（P0）：已实现并 push（`ec47078`）—— `webui.py` 注入 `__builtin_llm_assistant__` + executor 注入 `current_agent`，修「未识别 agent」。闭环 `WORKORDER_DEV_llm_agent_identity_and_chat_input.md` §1。
 8. ✅ **聊天输入框 UI**（P1）：已实现并 push（`ec47078`）—— 底部居中固定条、无滚动条、textarea 自动增高。
 
-### 阶段 2 — ACP / LLM 落地
-9. **ACP WebUI 前端 + LLM 对接**：推进 `dev/acp-integration`，把 `/acp` 开关、令牌管理、委派可视化做完整。
-10. **deepseek2api 对接**：tools 格式对齐，转交对方开发者后做联调验收。
-11. **A23/A24/A26**（dev/round5-cheap-fixes）：按 `--no-ff` 合并，`push` 后刷新 tracking refs。
+### 阶段 2 — ACP 落地 + NAS 实测（进行中）
+9. **ACP 阶段1 已 push**（`2b11be9`）：ACP 生产代码随 NAS 活树已进 main（`webui.py`/`mcp_server.py`/`identity.py`/`acp_client.py` 均含 `e8b3e63` 等效实现）；本步仅补回缺失测试（`test_acp_server.py` 12+1skip、`test_acp_protocol_and_tokens.py` 18 passed）、契约对齐（`test_mcp_server_merge` 40/27）、P-2 门禁修复（`test_no_secrets` worktree 健壮）、README 内网 IP 脱敏 + `HANDOFF_*` 移出 tracked。**完整 ACP WebUI 前端可视化（委派链路图、令牌生命周期 UI）仍待做。**
+10. **NAS 实测部署**（生产动作，需签收）：`autoflow-nas-deploy` 同步 E:/NAS → `192.168.2.200:/vol1/1000/docker/autoflow/src/autoflow_gateway` + `docker compose restart` 验收；A9 双向联调（autoflow ↔ memory-worker）需 memory-worker 实例。
+11. **deepseek2api 对接**：tools 格式对齐，转交对方开发者后做联调验收。
+12. **A23/A24/A26**（dev/round5-cheap-fixes）：按 `--no-ff` 合并，`push` 后刷新 tracking refs。
 
 ### 阶段 3 — 稳健性（按需）
 12. **提交门控加固常态化**：WIP 备份 + `gc.auto=0` + `fsck` 校验 + pre-commit hook（沙箱 git 写已证实不可靠，所有写操作走真实终端）。
@@ -249,12 +250,14 @@ python -m pytest tests/test_gateway.py -q   # 单文件
 
 ## 10. 接手第一步 CheckList
 
-- [x] 真实终端执行 git 收敛（SHA 直指绕过坏 ref → commit → push），`git ls-remote origin main` 确认远程权威（main=ceb1218）
-- [ ] 取回 dev/round5-cheap-fixes（GitHub 已有）、dev/acp-integration（自 recovery 仓 `E:/autoflow_scatter_archive_20260814/af_recov*/` 导入）
-- [ ] 清理 `*.bak-*` / `src_backup_*` 残留目录；归档旧坏 git 副本 `E:\autoflow`
+- [x] 真实终端执行 git 收敛（SHA 直指绕过坏 ref → commit → push），`git ls-remote origin main` 确认远程权威（main=2b11be9，2026-08-14）
 - [x] 取回归位 2 个 LLM 测试文件（recovery 仓 → tests/），本地 pytest 27 passed 全绿，已随 `ec47078` 提交并 push 到 `origin main`（2026-08-14）
 - [x] P0 agent 身份注入 + P1 底部居中输入 UI 已实现并 push（`ec47078`，2026-08-14）
+- [x] 阶段1 ACP 测试补回 + P-2 门禁修复 + README 脱敏，已 push（`2b11be9`，2026-08-14）：ACP 服务端/协议/令牌测试 30+1skip passed、`test_mcp_server_merge` 对齐 40/27、`test_no_secrets` worktree 健壮、内网 IP 脱敏 + `HANDOFF_*` 移出 tracked
+- [ ] 清理 `*.bak-*` / `src_backup_*` 残留目录；归档旧坏 git 副本 `E:\autoflow`（建议另择机）
+- [ ] NAS 实测部署（生产动作，需签收）：`autoflow-nas-deploy` 同步 + restart 验收 + A9 双向联调
 - [ ] 修复 2 个基线既有 red（`test_verify_flow`、`test_vhass`，`ceb1218` 基线即有、与 B/C 无关）— 建议另立工单
+- [ ] 裁决 c4_replay_semantics：默认维持 `fail_closed`（建议），写入决策记录
 - [ ] 拍板 c4_replay_semantics（建议维持 fail_closed）
 - [ ] 阅读 `handoff/` 下 P0/P1 工单原文（D:/Documents/HAOS/AutoFlow/handoff/）
 - [ ] 确认 NAS prod 活树为最新真相，避免被旧 git 覆盖
