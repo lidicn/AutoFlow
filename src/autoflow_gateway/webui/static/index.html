@@ -35,6 +35,10 @@
       <button class="navitem" data-tab="diagnostics"><span class="ic">🩺</span>诊断</button>
       <button class="navitem" data-tab="notes"><span class="ic">📝</span>笔记</button>
       <button class="navitem" data-tab="settings"><span class="ic">⚙️</span>设置</button>
+      <button class="navitem" data-tab="help"><span class="ic">📖</span>帮助</button>
+      <button class="navitem" data-tab="acp_tokens"><span class="ic">🤝</span>ACP 令牌</button>
+      <button class="navitem" data-tab="llm_settings"><span class="ic">🧠</span>LLM 设置</button>
+      <button class="navitem" data-tab="llm_agent"><span class="ic">💬</span>LLM 助手</button>
     </nav>
 
     <main class="content" id="content">
@@ -48,6 +52,246 @@
       <section class="view" id="view-diagnostics" hidden></section>
       <section class="view" id="view-notes" hidden></section>
       <section class="view" id="view-settings" hidden></section>
+      <section class="view" id="view-help" hidden>
+        <div class="view-head"><h2>📖 使用手册</h2><span class="sub">AutoFlow 网关 · 完整产品使用指南</span></div>
+
+      <div class="help-layout">
+        <aside class="toc-sidebar card">
+          <h3>目录</h3>
+          <ol class="toc">
+            <li><a href="#h-intro">产品是什么</a></li>
+            <li><a href="#h-mcp">配置 MCP（把 agent 接进来）</a></li>
+            <li><a href="#h-write">用 agent 编写 flow</a></li>
+            <li><a href="#h-review">在网关审核 / 撤销 agent 写的 flow</a></li>
+            <li><a href="#h-gate">安全闸是什么、怎么用</a></li>
+            <li><a href="#h-selfheal">flow 跑不通？跟 agent 沟通 + 自愈闭环</a></li>
+            <li><a href="#h-inject">inject 节点在自愈闭环里是必须的吗？（重点答疑）</a></li>
+            <li><a href="#h-extra">补充：身份码安全 / 顶部开关 / 子流程 / 审计</a></li>
+            <li><a href="#h-faq">常见问题 FAQ</a></li>
+          </ol>
+        </aside>
+        <div class="help-content">
+
+        <!-- 0 引言 -->
+        <div class="card" id="h-intro">
+          <h3>产品是什么</h3>
+          <p class="desc">AutoFlow 网关是一座「桥」：它让你用自然语言指挥 AI agent 去编写并部署 Home Assistant / Node-RED 的自动化 flow，同时用 <b>安全闸</b> 和 <b>人工审核</b> 守住真实电器的安全边界。核心闭环是：</p>
+          <div class="desc" style="line-height:1.9">
+            <b>① 配置 MCP</b> 把 agent 接入网关 →
+            <b>② agent 编写 flow</b>（DSL 或原生 flow）→
+            <b>③ 网关审核 / 部署</b>（闸门 + 你点「部署到 NR」）→
+            <b>④ 真跑不通时，你跟 agent 沟通，让它走自愈闭环</b>自动修。
+          </div>
+          <p class="desc">本手册依次讲清这四步，以及兜底的安全机制。建议第一次使用前通读，之后可按目录跳读。</p>
+        </div>
+
+        <!-- 一 MCP 配置 -->
+        <div class="card" id="h-mcp">
+          <h3>一、配置 MCP（把 agent 接进来）</h3>
+          <p class="desc">MCP（Model Context Protocol）是 agent 与网关对话的协议。每个 agent 拿到一张「身份识别码」后，在它的 MCP 客户端里填好地址和令牌即可连上。</p>
+
+          <h4>步骤</h4>
+          <ol class="desc">
+            <li>打开左侧 <b>Agents</b> 面板，填 <b>名称</b>（如 <code>deepseek++</code>）、<b>权限级别</b>（tier）、<b>身份模式</b>（mode），点「生成身份识别码」。</li>
+            <li>弹窗里会显示一次性身份码与连接信息，<b>请立即复制保存</b>（身份码仅显示这一次）。</li>
+            <li>在你的 agent / MCP 客户端里按下方配置填写。</li>
+          </ol>
+
+          <h4>连接配置</h4>
+          <div class="code-box">服务器地址（端点，依身份模式而定）：
+  黑箱（仅 DSL）：   http://&lt;网关host&gt;:8000/mcp
+  白箱（可自由部署）：http://&lt;网关host&gt;:8000/mcp-white
+  双箱（先白后黑）：  http://&lt;网关host&gt;:8000/mcp-white
+  管理员（运维）：    http://&lt;网关host&gt;:8000/mcp-admin
+
+请求头：
+  Authorization: Bearer &lt;身份识别码&gt;</div>
+
+          <h4>身份模式（mode）怎么选</h4>
+          <table class="tbl">
+            <thead><tr><th>模式</th><th>能做什么</th><th>何时用</th></tr></thead>
+            <tbody>
+              <tr><td>黑箱 black</td><td>只提交 DSL，由编译器生成 flow，<b>禁止</b> Function 节点</td><td>常规场景自动化，最安全</td></tr>
+              <tr><td>白箱 white</td><td>可直接写 raw flow（含原生节点）并部署</td><td>需要原生节点 / 逃生舱场景</td></tr>
+              <tr><td>双箱 dual</td><td>先白箱后黑箱，连 /mcp-white</td><td>想灵活但保留 DSL 回落</td></tr>
+              <tr><td>管理员 admin</td><td>运维专用，连 /mcp-admin</td><td>网关维护，普通 agent 不用</td></tr>
+            </tbody>
+          </table>
+
+          <h4>权限级别（tier）</h4>
+          <div class="desc">
+            <span class="badge tier-staging">staging</span> 练手 / 虚拟 HA，随便试；
+            <span class="badge tier-prod">prod</span> 真实环境，动真设备；
+            <span class="badge tier-sandbox">sandbox</span> 受限沙箱。
+          </div>
+          <p class="desc">连不上时先核对：① 地址端口对不对（默认 8000）；② 身份码是否完整、有无多余空格；③ 该 agent 是否被「吊销」（吊销后连接会被拒）。</p>
+        </div>
+
+        <!-- 二 编写 flow -->
+        <div class="card" id="h-write">
+          <h3>二、用 agent 编写 flow</h3>
+          <p class="desc">接入后，你用大白话给 agent 下指令（如「书房 PC 开机时，把书房显示器挂灯调到 60% 暖光」），agent 通过 MCP 工具把场景提交给网关。提交物分两类：</p>
+          <table class="tbl">
+            <thead><tr><th>提交物</th><th>来源</th><th>网关判定</th><th>含义</th></tr></thead>
+            <tbody>
+              <tr><td>DSL 场景</td><td>编译器编译</td><td><span class="badge ok">编译产物·可信</span></td><td>自动生成，无 Function 节点，可自动部署</td></tr>
+              <tr><td>原生 raw flow</td><td>agent 手写</td><td><span class="badge st-candidate">手写·需审</span></td><td>含原生节点，部署前必须人工审核</td></tr>
+            </tbody>
+          </table>
+          <p class="desc">agent 提交后，场景会出现在 <b>提案</b> 面板：</p>
+          <ul class="desc">
+            <li>能看到 <b>闸门结果</b>：<span class="badge ok">闸门 PASS</span> 或 <span class="badge danger">闸门 FAIL</span>；</li>
+            <li>能看到 <b>闸门断言</b>（✅/❌ 逐条列出期望状态）；</li>
+            <li>能看到 <b>静态检查</b>（原生 flow 的 lint error/warning、硬伤、逻辑不可达）；</li>
+            <li>可信 DSL 标「可信·可自动部署」，原生 flow 标「需人工审核」。</li>
+          </ul>
+          <p class="desc">你不必看懂 DSL 细节——看闸门 PASS/FAIL 和断言就够了。FAIL 时把页面上的报错原文转给 agent，让它改。</p>
+        </div>
+
+        <!-- 三 审核/撤销 -->
+        <div class="card" id="h-review">
+          <h3>三、在网关审核 / 撤销 agent 写的 flow</h3>
+
+          <h4>1）提案面板（部署前把关）</h4>
+          <p class="desc">在 <b>提案</b> 面板对每个场景做决定：</p>
+          <ul class="desc">
+            <li><b>部署到 NR</b>：闸门通过且你认可，点它把 flow 落到 Node-RED（可信 DSL 可一键；原生 raw 需你确认无误后部署）。</li>
+            <li><b>拒绝</b>：明显不对，打回给 agent 重做。</li>
+            <li><b>归档 / 删除</b>：暂时搁置或彻底移除提案。</li>
+            <li><b>注册子流程</b>：若是子流程类提案，点它写 NR 子流程实例 + 登记注册表，之后 agent 可经 MCP 调用。</li>
+          </ul>
+
+          <h4>2）已部署面板（部署后撤回）</h4>
+          <p class="desc">部署成功后，flow 出现在 <b>已部署</b> 面板，你可：</p>
+          <ul class="desc">
+            <li><b>▶ 触发</b>：手动点火验证 flow 是否真跑通（等价于点一次 inject）。</li>
+            <li><b>撤回</b>：安全移除该 flow。<b>只删网关自己写入的节点，保留你在该 tab 里自己的节点。</b></li>
+          </ul>
+          <p class="desc">撤回有两种结果，会弹 toast 提示：</p>
+          <ul class="desc">
+            <li><span class="badge ok">trimmed_tab</span>：tab 里还有你自己的节点，只移除网关节点、保留你的节点；</li>
+            <li><span class="badge ok">deleted_tab</span>：整个 tab 都是网关部署的，整 tab 删除。</li>
+          </ul>
+          <p class="desc" style="color:#c0392b">若出现 <span class="badge stale">注册表漂移</span>：网关账本记着已部署，但 Node-RED 里已无该 flow_id（可能你手动删过 / 换了 NR 实例）。此时撤回只清账本、不碰 NR，属正常现象。</p>
+        </div>
+
+        <!-- 四 安全闸 -->
+        <div class="card" id="h-gate">
+          <h3>四、安全闸是什么、怎么用</h3>
+          <p class="desc"><b>安全闸 = 真实设备保护机制。</b>网关能控制真实电器，误操作有现实后果（设备损坏、能耗、安全隐患）。安全闸让你预先声明「哪些设备 agent 不能乱动」，在 agent 的部署/操作触及这些设备时强制拦截或留痕。</p>
+
+          <h4>使用步骤</h4>
+          <ol class="desc">
+            <li>打开 <b>安全闸</b> 面板，点「<b>导入全部设备</b>」：从 Home Assistant / Node-RED 拉取全屋实体目录（仅显式触发，不会随测试自动跑）。</li>
+            <li>在「添加保护」搜索框输入设备名 / 区域（如「书房灯」「客厅」「office」），点选设备加入保护。</li>
+            <li>给规则选 <b>保护等级</b>：</li>
+          </ol>
+          <table class="tbl">
+            <thead><tr><th>等级</th><th>行为</th><th>适用</th></tr></thead>
+            <tbody>
+              <tr><td><span class="badge tier-0">Tier-0 需确认</span></td><td>agent 触及即<b>暂停等人工确认</b></td><td>高价值 / 危险设备（空调、总闸、门锁）</td></tr>
+              <tr><td><span class="badge tier-1">Tier-1 放行</span></td><td>放行但<b>记审计日志</b></td><td>低风险常调设备（夜灯、风扇）</td></tr>
+            </tbody>
+          </table>
+          <p class="desc">原则：宁可先 Tier-0 把所有重要设备圈起来，再按需放宽到 Tier-1。去人审（自愈闭环）后，<b>审计日志是你唯一可追溯来源</b>，请在「设置 → 审计日志」里定期回看。</p>
+        </div>
+
+        <!-- 五 跑不通+自愈 -->
+        <div class="card" id="h-selfheal">
+          <h3>五、flow 跑不通？跟 agent 沟通 + 自愈闭环</h3>
+
+          <h4>第一步：你自己先验证</h4>
+          <ul class="desc">
+            <li>到 <b>已部署</b> 面板点 <b>▶ 触发</b> 手动点火；</li>
+            <li>到 <b>诊断</b> 面板做 <b>debug 回看</b>，看 flow 真实输出（红色报错 / 空输出 / 节点数异常都算「没跑通」）；</li>
+            <li>把看到的报错原文（debug 文本、断言失败项、异常节点）发给 agent。</li>
+          </ul>
+
+          <h4>第二步：让 agent 走自愈闭环</h4>
+          <p class="desc">你只需对 agent 说「这个 flow 跑不通，走自愈闭环修一下」。agent 会按下面循环自动调试：</p>
+          <div class="desc" style="line-height:1.9">
+            <b>inject 点火</b> → <b>debug 回读</b> 网关旁路订阅的 NR 输出 → <b>分析报错</b> → <b>apply 修正</b> flow → 再点火验证 → 直到跑通。
+          </div>
+          <p class="desc">为防止 agent 陷入「修了又错、错了又修」的死循环，网关有 <b>自愈预算</b>：</p>
+          <ul class="desc">
+            <li>默认 <b>最多 3 次</b>自动修正尝试（按 <code>(agent, flow)</code> 计失败次数）；</li>
+            <li>顶部 <b>♻️ 按钮</b>可改这个上限；设为 <b>0 即关闭自愈闭环</b>（此时任何修正都回到人工审核）；</li>
+            <li>预算用尽仍失败，agent 会如实告诉你「已超重试上限，需你人工介入」，而不是偷偷假装成功。</li>
+          </ul>
+          <p class="desc"><b>关键认知：</b>自愈预算是「纯失败次数计数」——它跟 flow 里有没有 inject 节点<b>无关</b>。有没有 inject 只影响「能不能自动点火验证」，不影响预算这道安全闸门本身。</p>
+        </div>
+
+        <!-- 六 inject 答疑 -->
+        <div class="card" id="h-inject">
+          <h3>六、inject 节点在自愈闭环里是必须的吗？（重点答疑）</h3>
+          <p class="desc"><b>结论：不是必须。</b>下面分两层讲清。</p>
+
+          <h4>1）自愈预算本身不依赖 inject</h4>
+          <p class="desc">网关的失败计数保护（<code>_selfheal_budget_check</code>）是按 <code>(agent, flow)</code> 的失败次数计数的，完全不关心 flow 里有没有 inject 节点。所以即便没有 inject，预算机制照常生效，agent 也不会无限循环。</p>
+
+          <h4>2）没有 inject 时，触发这一步会怎样</h4>
+          <p class="desc">自愈闭环的「点火」入口在发现 flow 没有 inject 节点时，<b>不会报错</b>，而是返回：</p>
+          <div class="code-box">{ "ok": true, "triggered": [], "warning": "该 flow 没有 inject 节点，无触发目标" }</div>
+          <p class="desc">即 <code>triggered</code> 为空、带一句警告。此时自愈闭环「分析 / 修正 / 验证」链条里，<b>「自动点火验证」这一步没有目标</b>。agent 应当这样处置（按推荐顺序）：</p>
+          <ol class="desc">
+            <li><b>补一个 inject 节点</b>：最常见的修法，让 flow 可被自动点火；</li>
+            <li><b>改用 flow 已有的其他触发器</b>：如 HA 状态变化事件、HTTP in、websocket 等——这些触发同样会产生 debug 帧；</li>
+            <li><b>如实告知你</b>：若实在无法自动验证，agent 应说「该 flow 没有可自动触发的入口，请你手动触发，或我给它加一个 inject」，<b>而不是假装跑通</b>。</li>
+          </ol>
+          <p class="desc">而 <b>debug 回读</b>（<code>autoflow_debug_read</code>）读的是网关旁路订阅的 NR debug 事件流，对「任何产生的 debug 帧」都有效、与触发源无关——所以只要 flow 真被触发过（不管谁触发的），agent 都能读到输出去做修正。</p>
+          <div class="desc" style="background:var(--bg-soft);border-left:3px solid var(--accent);padding:8px 12px;margin-top:8px">
+            <b>一句话总结：</b>inject 不是自愈闭环的「开关」，只是「自动点火的便捷入口」。没有它，预算保护照常、debug 回读照常，只是 agent 得先解决「怎么触发这个 flow」才能自动验证——要么加 inject，要么用别的触发器，要么请你手动触发。
+          </div>
+        </div>
+
+        <!-- 七 补充 -->
+        <div class="card" id="h-extra">
+          <h3>七、补充：身份码安全 / 顶部开关 / 子流程 / 审计</h3>
+
+          <h4>身份码安全</h4>
+          <ul class="desc">
+            <li>身份码<b>仅生成时显示一次</b>，请妥善保存；</li>
+            <li><b>重置身份码</b>：旧码立即失效，生成新码（仍只显示一次）；</li>
+            <li><b>吊销</b>：agent 无法再连网关（记录保留可恢复）；<b>删除</b>：彻底移除、不可恢复；</li>
+            <li>怀疑泄露 → 直接「重置身份码」即可废掉旧码。</li>
+          </ul>
+
+          <h4>顶部开关（topbar）</h4>
+          <table class="tbl">
+            <thead><tr><th>按钮</th><th>作用</th></tr></thead>
+            <tbody>
+              <tr><td>🔑</td><td>设置 WebUI 访问令牌</td></tr>
+              <tr><td>🧪</td><td>DSL 验证任务池开关（关闭后 agent 的 DSL 调用被拒）</td></tr>
+              <tr><td>🧬 逃逸</td><td>原生节点逃逸开关（中风险逃生舱，可随时关）</td></tr>
+              <tr><td>⚖</td><td>部署策略（compiler_auto 下编译产物标「可信」可自动部署，raw 仍须人审）</td></tr>
+              <tr><td>♻️</td><td>自愈闭环最大重试次数（默认 3，0 = 关闭）</td></tr>
+            </tbody>
+          </table>
+
+          <h4>子流程提案</h4>
+          <p class="desc">agent 可提交「子流程」类提案。你在提案面板点 <b>注册子流程</b> 后：写 NR 子流程实例 + 登记子流程注册表，之后 agent 即可经 MCP 调用该子流程（如历史查询、Bark 推送等通用能力）。</p>
+
+          <h4>审计日志</h4>
+          <p class="desc">在 <b>设置 → 审计日志</b> 查看所有部署 / 应用修正的留痕。去人审（自愈闭环）后，这是唯一可追溯来源，建议定期回看。</p>
+        </div>
+
+        <!-- 八 FAQ -->
+        <div class="card" id="h-faq">
+          <h3>八、常见问题 FAQ</h3>
+          <ul class="desc">
+            <li><b>agent 连不上网关？</b> 核对端点地址（黑/白箱别填反）、身份码完整无空格、该 agent 未被吊销。</li>
+            <li><b>提案显示「需人工审核」但我想自动化？</b> 那是原生 raw flow（含原生节点），按设计必须人审；改用 DSL 场景可走「可信·自动部署」。</li>
+            <li><b>撤回会误删我自己的节点吗？</b> 不会。只删网关写入的节点，你的节点保留（见 trimmed_tab / deleted_tab 提示）。</li>
+            <li><b>自愈闭环一直修不好？</b> 预算（默认 3）用尽后 agent 会交回人工；你也可把 ♻️ 调到更大，或自己看 debug 把报错发给 agent。</li>
+            <li><b>flow 没有 inject 还能自愈吗？</b> 能，预算照常；只是 agent 需先解决「怎么触发」——加 inject、用别的触发器、或请你手动触发（详见第六章）。</li>
+          </ul>
+          <p class="desc" style="margin-top:10px">仍有疑问？把现象贴给 agent，或在「笔记」里记下待办，下次让 agent 帮你查。</p>
+        </div>
+        </div>
+      </section>
+      <section class="view" id="view-acp_tokens" hidden></section>
+      <section class="view" id="view-llm_settings" hidden></section>
+      <section class="view" id="view-llm_agent" hidden></section>
     </main>
 
     <!-- 移动端底部导航 -->
@@ -62,6 +306,10 @@
       <button class="navitem" data-tab="diagnostics"><span class="ic">🩺</span>诊断</button>
       <button class="navitem" data-tab="notes"><span class="ic">📝</span>笔记</button>
       <button class="navitem" data-tab="settings"><span class="ic">⚙️</span>设置</button>
+      <button class="navitem" data-tab="help"><span class="ic">📖</span>帮助</button>
+      <button class="navitem" data-tab="acp_tokens"><span class="ic">🤝</span>ACP 令牌</button>
+      <button class="navitem" data-tab="llm_settings"><span class="ic">🧠</span>LLM 设置</button>
+      <button class="navitem" data-tab="llm_agent"><span class="ic">💬</span>LLM 助手</button>
     </nav>
   </div>
 

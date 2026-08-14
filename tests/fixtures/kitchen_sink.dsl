@@ -12,7 +12,7 @@
 提取: 温度 = payload.temperature
 时间段: 07:00-23:00
 动作: light.turn_on(light.hall)
-调用子流程: demo_notify(text=猫, room=书房)
+调用子流程: llm_doubao_image(prompt=`猫`)
 提取: 图片链接 = payload.reply
 并行:
     动作: light.turn_on(light.kitchen)

@@ -11,12 +11,13 @@ AutoFlow Gateway — WebUI 后端（人类控制面）
 MCP 身份闸另由 mcp_server 的 ASGI 中间件独立强制（两者互不替代）。
 """
 import os
+import json
 import asyncio
 import secrets
 import hmac
 import re
 import tempfile
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
@@ -24,23 +25,16 @@ from starlette.responses import JSONResponse, FileResponse
 from starlette.staticfiles import StaticFiles
 from starlette.requests import Request
 
-from .config import get_config, is_task_pool_enabled, is_raw_node_escape_enabled, is_submit_gate_enabled, set_feature_flag, get_deploy_policy, set_deploy_policy, load_feature_flags, is_acp_enabled, load_llm_config, save_llm_config
+from .config import get_config, is_task_pool_enabled, is_raw_node_escape_enabled, is_submit_gate_enabled, set_feature_flag, get_deploy_policy, set_deploy_policy
 from .gateway import Gateway
-from .identity import AgentStore, AcpTokenStore
-# llm_client 含 `import httpx` —— 惰性导入（见 build_webui_asgi 启动处与 autoflow_ask_llm），
-# 避免 httpx 未安装时网关启动期 ImportError 全功能宕机（ACP 属小众，不应绑架 boot）。
+from .identity import AgentStore
 from .proposals import ProposalStore
 from .notes import NoteStore
 from .device_guard import DeviceGuardStore
 from .audit import AuditStore
 from .subflows import introspect_nr_subflow, validate_subflow_registration
 from .api_config_store import ApiConfigStore
-from .api_specs import (
-    SYSTEM_PLACEHOLDERS,
-    ApiSpec,
-    get_api_spec,
-    resolve_system_placeholders,
-)
+from .api_specs import get_api_spec
 from . import connections
 
 # 人工抽查（spotcheck）与评测工作台（eval）已从网关剥离，迁移至 archive/agent-loop-migration/（C4）。
@@ -161,22 +155,6 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     _bootstrap_webui_token(cfg)   # 首跑无令牌时自动生成，确保能从外部 IP 进 WebUI 填连接设置
     gw = gateway or Gateway(cfg)
     agents = AgentStore(cfg)
-    acp_tokens = AcpTokenStore(cfg)  # ACP：kind=acp 令牌（acp_ 前缀），与 af_/WebUI JWT 三套隔离
-    # LLM 钩子：惰性建路由单例（按 env 配置多后端），未配置也不崩。
-    # 惰性导入 llm_client：httpx 缺失时仅警告，不致命（ACP 关闭/未装 httpx 网关照常启动）。
-    try:
-        from .llm_client import get_llm_router
-        get_llm_router(cfg)
-    except Exception as e:  # ImportError(httpx 缺失) / 其它 —— 仅 LLM 不可用，不影响网关其余
-        import logging as _log
-        _log.getLogger("webui").warning("LLM 钩子未启用（llm_client 导入失败，可能缺 httpx）：%s", e)
-    # LLM 配置：若 data/<env>/llm_config.json 存在且有后端，则覆盖路由（WebUI 设置免重启生效）。
-    try:
-        from .llm_client import reconfigure_router_from_llm_config
-        reconfigure_router_from_llm_config(cfg)
-    except Exception as e:
-        import logging as _log
-        _log.getLogger("webui").warning("LLM 路由未从 llm_config.json 覆盖（沿用 env 配置）：%s", e)
     proposals = ProposalStore(cfg)
     notes = NoteStore(cfg)
     device_guard = DeviceGuardStore(cfg)
@@ -210,7 +188,6 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             "task_pool_enabled": is_task_pool_enabled(cfg),
             "raw_node_escape_enabled": is_raw_node_escape_enabled(cfg),
             "deploy_policy": get_deploy_policy(cfg),
-            "selfheal_budget": load_feature_flags(cfg).get("selfheal_budget", 3),
         })
 
     async def settings_update(request: Request):
@@ -239,22 +216,11 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                 set_deploy_policy(cfg, dp)
             except ValueError as e:
                 return _js({"ok": False, "error": str(e)}, 400)
-        # 自愈闭环：自愈重试次数（0=禁用自主重试；1~20=单 (agent, flow) 滑动窗口内最多自主重试）
-        sb = b.get("selfheal_budget")
-        if sb is not None:
-            try:
-                sb = int(sb)
-            except (TypeError, ValueError):
-                return _js({"ok": False, "error": "selfheal_budget 必须是整数"}, 400)
-            if sb < 0 or sb > 20:
-                return _js({"ok": False, "error": "selfheal_budget 必须在 0~20 之间（0=禁用自主重试）"}, 400)
-            set_feature_flag(cfg, "selfheal_budget", sb)
         return _js({"ok": True,
                     "task_pool_enabled": is_task_pool_enabled(cfg),
                     "raw_node_escape_enabled": is_raw_node_escape_enabled(cfg),
                     "submit_run_gate": is_submit_gate_enabled(cfg),
-                    "deploy_policy": get_deploy_policy(cfg),
-                    "selfheal_budget": load_feature_flags(cfg).get("selfheal_budget", 3)})
+                    "deploy_policy": get_deploy_policy(cfg)})
 
     # ── 诊断查看器（P4-C，只读）──
     async def diagnostics_view(request: Request):
@@ -370,257 +336,6 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             return _js({"ok": False, "error": "agent 不存在"}, 404)
         return _js({"ok": True, "agent_id": aid,
                     "note": "已从身份库彻底删除（含身份码哈希），不可恢复。"}, 200)
-
-    # ── ACP 对等令牌（kind=acp，前缀 acp_）──
-    # 签发面仿 memory-worker /api/mcp/tokens，但独立表 acp_tokens：
-    # acp_ 令牌只能进 /acp，进不了 /mcp；af_ 身份码也进不了 /acp（规格 §3/§9 三套隔离）。
-    # 本组端点在 WebUI JWT 保护之下（与 /api/agents 同级），不对匿名开放。
-    async def list_acp_tokens(request: Request):
-        return _js({"tokens": acp_tokens.list_tokens()})
-
-    async def create_acp_token(request: Request):
-        b = await _body(request)
-        name = (b.get("name") or "").strip()
-        if not name:
-            return _js({"ok": False, "error": "name 必填"}, 400)
-        rec, code = acp_tokens.create_token(name, b.get("notes", ""))
-        # 明文仅此一次返回；库里只有 sha256
-        return _js({"ok": True, "token": dict(rec, acp_token=code),
-                    "warn": "ACP 令牌仅显示一次，请立即写入对端的 AUTOFLOW_ACP_TOKEN"}, 201)
-
-    async def revoke_acp_token(request: Request):
-        tid = request.path_params["id"]
-        ok = acp_tokens.revoke_token(tid)
-        return _js({"ok": ok, "token_id": tid}, 200 if ok else 404)
-
-    async def delete_acp_token(request: Request):
-        """【真删除】物理抹除该行（含令牌哈希），不可恢复；与 revoke（留审计）区分。"""
-        tid = request.path_params["id"]
-        ok = acp_tokens.delete_token(tid)
-        if not ok:
-            return _js({"ok": False, "error": "acp 令牌不存在"}, 404)
-        return _js({"ok": True, "token_id": tid,
-                    "note": "已从 acp_tokens 彻底删除（含哈希），不可恢复。"}, 200)
-
-    # ── ACP 启用开关（WebUI「ACP 令牌」页独立开关，运行时经 feature_flags.json 切换免重启）──
-    async def get_acp_enabled(request: Request):
-        return _js({"enabled": bool(is_acp_enabled(cfg))})
-
-    async def set_acp_enabled(request: Request):
-        b = await _body(request)
-        v = bool(b.get("enabled", False))
-        set_feature_flag(cfg, "acp_enabled", v)
-        return _js({"enabled": v,
-                    "note": "ACP 开关已更新；关闭后 /acp 停止服务、ACP 工具返回禁用提示（免重启生效）。"})
-    # ── LLM 配置（DEV-llm-webui-agent：WebUI 内置 LLM 助手）──
-    # 配置落 data/<env>/llm_config.json（与 feature_flags 同目录，免重启读取）；密钥仅存盘不回显。
-    def _mask_llm_key(k: str) -> str:
-        from .llm_client import _mask_secret
-        return _mask_secret(k) if k else ""
-
-    async def get_llm_config(request: Request):
-        d = load_llm_config(cfg)
-        backends = d.get("backends") or []
-        masked_backends = [{
-            "url": b.get("url", ""),
-            "name": b.get("name", ""),
-            "model": b.get("model", ""),
-            "api_key": _mask_llm_key(b.get("api_key", "")),
-            "enabled": bool(b.get("enabled", True)),
-        } for b in backends if isinstance(b, dict)]
-        return _js({
-            "enabled": bool(d.get("enabled", False)),
-            "backends": masked_backends,
-            "api_url": d.get("api_url", ""),
-            "api_key": _mask_llm_key(d.get("api_key", "")),
-            "model": d.get("model", ""),
-            "configured": bool(backends or d.get("api_key") or d.get("api_url")),
-        })
-
-    async def set_llm_config(request: Request):
-        b = await _body(request)
-        enabled = bool(b.get("enabled", False))
-        raw_backends = b.get("backends")
-        if raw_backends is None:
-            raw_backends = []
-        if not isinstance(raw_backends, list):
-            return _js({"ok": False, "error": "backends 必须是数组"}, 400)
-        # 防脱敏回写：若 api_key 为空或含 ****（疑似回传了脱敏值），保留文件中原密钥
-        old = load_llm_config(cfg)
-        old_backends = {x.get("url", ""): x.get("api_key", "") for x in (old.get("backends") or []) if isinstance(x, dict)}
-
-        def _resolve_key(new_key, fallback):
-            # 显式空串 → 清空；含 ****（脱敏回传）或字段缺失 → 保留旧值
-            v = "" if new_key is None else str(new_key)
-            if "****" in v:
-                return fallback
-            return v
-
-        clean_backends = []
-        for x in raw_backends:
-            if not isinstance(x, dict):
-                continue
-            url = str(x.get("url", "")).strip()
-            clean_backends.append({
-                "url": url,
-                "api_key": _resolve_key(x.get("api_key", ""), old_backends.get(url, "")) if "api_key" in x else old_backends.get(url, ""),
-                "model": str(x.get("model", "")).strip(),
-                "name": str(x.get("name", "")).strip(),
-                "enabled": bool(x.get("enabled", True)),
-            })
-        d = {
-            "enabled": enabled,
-            "backends": clean_backends,
-            "api_url": str(b.get("api_url", "")).strip(),
-            "api_key": _resolve_key(b.get("api_key", ""), old.get("api_key", "")) if "api_key" in b else old.get("api_key", ""),
-            "model": str(b.get("model", "")).strip(),
-        }
-        save_llm_config(cfg, d)
-        # 免重启：覆盖路由单例（仅当确有后端凭据）
-        try:
-            from .llm_client import reconfigure_router_from_llm_config
-            reconfigure_router_from_llm_config(cfg)
-        except Exception as e:
-            import logging as _log
-            _log.getLogger("webui").warning("LLM 路由未随配置刷新：%s", e)
-        return _js({
-            "ok": True,
-            "enabled": enabled,
-            "configured": bool(clean_backends or d["api_key"] or d["api_url"]),
-            "note": "LLM 配置已保存（密钥仅存盘不回显）；WebUI 助手免重启生效。",
-        })
-
-    async def llm_chat(request: Request):
-        """服务端跑 agent 循环：取用户面 MCP 工具 → chat_with_tools 多轮 → 经 FastMCP call_tool 执行回填 → 终态文本。
-
-        工具暴露遵循身份分层纪律：排除 _DEPLOY_KNIVES（部署/自检刀），WebUI 助手绝不可触。"""
-        b = await _body(request)
-        user_msg = (b.get("message") or "").strip()
-        history = b.get("history") or []
-        if not user_msg:
-            return _js({"ok": False, "error": "message 必填"}, 400)
-        d = load_llm_config(cfg)
-        if not d.get("enabled", False):
-            return _js({"ok": False, "error": "LLM 未启用：请在 WebUI「LLM 设置」页开启后重试",
-                        "hint": "llm_disabled"})
-        if not (d.get("backends") or d.get("api_key") or d.get("api_url")):
-            return _js({"ok": False, "error": "LLM 未配置：请在 WebUI「LLM 设置」页填入 OpenAI 兼容后端",
-                        "hint": "llm_not_configured"})
-        # 路由：用文件配置建独立 router（不污染单例，避免影响 autoflow_ask_llm）
-        try:
-            from .llm_client import LLMRouter  # 惰性：缺 httpx 时不影响网关启动
-            router = LLMRouter.from_dict(d)
-        except Exception as e:
-            return _js({"ok": False, "error": f"LLM 路由初始化失败: {e}"})
-        if not router.configured:
-            return _js({"ok": False, "error": "LLM 未配置：后端凭据不完整", "hint": "llm_not_configured"})
-        # 取用户面工具（过滤部署/自检刀）
-        try:
-            from . import mcp_server
-            mcp = mcp_server.mcp
-            knives = mcp_server._DEPLOY_KNIVES
-            raw_tools = await mcp.list_tools()
-        except Exception as e:
-            return _js({"ok": False, "error": f"获取 MCP 工具失败: {e}"})
-        tools = []
-        for t in raw_tools:
-            name = getattr(t, "name", None)
-            if not name or name in knives:
-                continue
-            schema = getattr(t, "inputSchema", None) or {"type": "object", "properties": {}}
-            tools.append({"type": "function", "function": {
-                "name": name,
-                "description": getattr(t, "description", "") or "",
-                "parameters": schema,
-            }})
-        if not tools:
-            return _js({"ok": False, "error": "无可用工具（部署/自检刀已按纪律隐藏）"})
-        steps = []
-
-        async def executor(name: str, arguments: dict) -> str:
-            if name in knives:
-                return f"[拒绝：{name} 属部署/自检刀，WebUI 助手不可调用]"
-            try:
-                res = await mcp.call_tool(name, arguments or {})
-                parts = []
-                for blk in (res or []):
-                    txt = getattr(blk, "text", None)
-                    if txt is None:
-                        txt = str(blk)
-                    parts.append(txt)
-                out = "\n".join(parts)
-            except Exception as e:
-                out = f"[工具 {name} 执行出错: {e}]"
-            steps.append({"tool": name, "args": arguments, "result": (out or "")[:4000]})
-            return out
-
-        msgs = []
-        for h in history:
-            if isinstance(h, dict) and h.get("role") in ("user", "assistant", "system"):
-                msgs.append({"role": h["role"], "content": str(h.get("content", ""))})
-        msgs.append({"role": "user", "content": user_msg})
-        system = ("你是 AutoFlow 网关内置助手，可调用网关提供的工具查询与控制智能家居及流程。"
-                  "务必先用工具获取真实数据再作答，禁止编造 entity_id 或设备状态；"
-                  "若工具返回为空或报错，如实说明并建议用户检查设备/连接。")
-        from .llm_client import LLMError  # 惰性导入（同上）
-        try:
-            text = await router.chat_with_tools(msgs, tools, executor, system=system, max_rounds=6)
-        except LLMError as e:
-            return _js({"ok": False, "error": str(e), "steps": steps})
-        except Exception as e:
-            return _js({"ok": False, "error": f"LLM 调用失败: {e}", "steps": steps})
-        return _js({"ok": True, "text": text, "steps": steps})
-
-    async def test_llm(request: Request):
-        """LLM 连通性测试（WebUI「测试全部」/「测试这条」按钮）。
-
-        - scope=all：用已保存配置建 LLMRouter，ping 所有已配置后端（含停用者，便于确认可用性）。
-        - scope=backend：用前端表单构造单后端 LLMProvider 并 ping；若 api_key 含 **** 则从已保存
-          配置按 url/name 找回真实 key（防脱敏回写）。"""
-        b = await _body(request)
-        scope = (b.get("scope") or "all")
-        try:
-            from .llm_client import LLMRouter, LLMProvider
-        except Exception as e:
-            return _js({"ok": False, "error": f"LLM 模块加载失败: {e}"})
-        if scope == "backend":
-            form = b.get("backend") or {}
-            if not isinstance(form, dict):
-                return _js({"ok": False, "error": "backend 必须是对象"}, 400)
-            url = str(form.get("url", "")).strip()
-            name = str(form.get("name", "")).strip() or url
-            model = str(form.get("model", "")).strip()
-            api_key = str(form.get("api_key", ""))
-            # 防脱敏：前端回传 ****（未改密钥）→ 从已保存配置按 url/name 找回真实 key
-            if "****" in api_key:
-                saved = load_llm_config(cfg)
-                for sb in (saved.get("backends") or []):
-                    if isinstance(sb, dict) and (sb.get("url", "") == url or sb.get("name", "") == name):
-                        api_key = sb.get("api_key", "")
-                        break
-                else:
-                    if saved.get("api_url", "") == url:
-                        api_key = saved.get("api_key", "")
-            if not (url and api_key and model):
-                return _js({"ok": False, "error": "后端未完整配置（需 url + api_key + model）",
-                            "backends": [{"connected": False, "name": name, "model": model,
-                                          "endpoint": url, "error": "缺 url / api_key / model"}]})
-            prov = LLMProvider(url=url, api_key=api_key, model=model, name=name)
-            res = await prov.ping()
-            return _js({"ok": bool(res.get("connected")), "message": "单后端探测完成", "backends": [res]})
-        # scope=all（默认）：用已保存配置探测所有后端
-        try:
-            d = load_llm_config(cfg)
-            router = LLMRouter.from_dict(d)
-        except Exception as e:
-            return _js({"ok": False, "error": f"LLM 路由初始化失败: {e}"})
-        if not router.configured:
-            return _js({"ok": False, "error": "未配置任何后端（请先在「LLM 设置」页填写）", "backends": []})
-        try:
-            result = await router.ping()
-        except Exception as e:
-            return _js({"ok": False, "error": f"LLM 测试失败: {e}", "backends": []})
-        return _js(result)
 
     # ── 确认闸 ──
     async def list_pending(request: Request):
@@ -887,28 +602,17 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     # ── A2：Link API 配置表单持久化（方案 B：api_configs 表）──
     _ENV_PH_RE = re.compile(r"<([A-Z][A-Z0-9_]+)>")
 
-    # spec 中会被嵌入生成节点、因而需要占位符替换的「表达式字段」。
-    # 推导(_config_fields_for_spec) 与替换(_effective_spec) 必须共用这份清单：
-    # 只推导不替换 → 用户被要求填一个永远不生效的字段，装出来的 flow 带着裸占位符。
-    # 注意不含 description/notes —— 那是给人看的文档，扫了会造出幽灵配置字段。
-    _SPEC_EXPR_FIELDS = ("url", "nr_body_template", "extract", "nr_assemble")
-
     def _config_fields_for_spec(spec) -> list:
-        """从 spec 的表达式字段 + headers 提取 <ENV_NAME> 占位符，
+        """从 spec 的 url / headers / body_template 提取 <ENV_NAME> 占位符，
 
-        作为该 Link API 需用户填写的配置字段（单一真相源，避免手维护字段清单）。
-        A3(#179)：extract / nr_assemble 也会进 change 节点，故一并纳入扫描。
-        A25：`<NAS_IP>` 等**系统占位符不进此清单**——那是部署环境事实，网关从
-        NR_URL 就能推出来；要用户手填等于把网关的内部知识摊派给使用者。"""
+        作为该 Link API 需用户填写的配置字段（单一真相源，避免手维护字段清单）。"""
         names: list = []
         seen = set()
-        texts = [getattr(spec, f, "") or "" for f in _SPEC_EXPR_FIELDS]
+        texts = [spec.url or "", spec.nr_body_template or ""]
         for v in (spec.nr_headers or {}).values():
             texts.append(str(v))
         for text in texts:
             for m in _ENV_PH_RE.findall(text or ""):
-                if m in SYSTEM_PLACEHOLDERS:
-                    continue
                 if m not in seen:
                     seen.add(m)
                     names.append(m)
@@ -1197,13 +901,8 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     def _resolve_af_api_tab_id(entry_ids=None):
         """解析「AutoFlow API」tab 的真实 id（risk-1 / #177）。
 
-        顺序：① 本地台账命中、NR 上仍在**且 label 仍是「AutoFlow API」** → 直接用；
-        ② 否则 list_flows 按 label 找，找到就回写台账；③ 都没有 → None（尚未安装，
-        走首次创建路径）。
-
-        #178：台账命中必须复验 label。台账可能变脏（换了 NR 实例 / 用户手动改过 /
-        原 tab 被删后该 id 被别的 tab 复用），只判「flow 存在」会误命中无关 tab，
-        把我们的节点塞进人家的流程里。label 不符则视同台账过期，落到重扫。
+        顺序：① 本地台账命中且 NR 上仍在 → 直接用；② 否则 list_flows 按 label 找，
+        找到就回写台账；③ 都没有 → None（尚未安装，走首次创建路径）。
 
         Args:
             entry_ids: 入口节点 id 集合（重名 tab 时用于挑真身）。
@@ -1215,8 +914,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         if cached:
             try:
                 f = gw.nr.get_flow(cached)
-                if (isinstance(f, dict) and f.get("id")
-                        and (f.get("label") or "").strip() == AF_API_TAB_LABEL):
+                if isinstance(f, dict) and f.get("id"):
                     return f.get("id"), [f.get("id")]
             except Exception:
                 pass   # 台账过期（tab 被删 / 换了 NR 实例）→ 落到重扫
@@ -1225,23 +923,15 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             _af_tab_ledger_write(fid)
         return fid, matched
 
-    def _effective_spec(spec, config: dict) -> ApiSpec:
-        """把 spec 表达式字段 + headers 中的 <ENV> 占位符替换为 api_configs 值。
+    def _effective_spec(spec, config: dict) -> "ApiSpec":
+        """把 spec 的 url/headers/body_template 中 <ENV> 占位符替换为 api_configs 值。
 
-        覆盖面与 _config_fields_for_spec 严格一致（共用 _SPEC_EXPR_FIELDS），
-        否则会出现「要求用户填、但装进 NR 的节点里仍是裸占位符」的错位。
-        返回替换后的 ApiSpec 副本（不改原 spec）；build_nr_tab_flows 据此生成真值节点。
-
-        A25：用户配置替换完后再过一遍系统占位符解析。顺序不能反——用户若显式
-        配了 NAS_IP（老数据里可能有），以用户值优先，系统解析只兜没配的。"""
+        返回替换后的 ApiSpec 副本（不改原 spec）；build_nr_tab_flows 据此生成真值节点。"""
         sub = lambda m: config.get(m.group(1), m.group(0))
-        patch = {f: resolve_system_placeholders(
-                     _ENV_PH_RE.sub(sub, getattr(spec, f, "") or ""))
-                 for f in _SPEC_EXPR_FIELDS}
-        patch["nr_headers"] = {k: resolve_system_placeholders(
-                                   _ENV_PH_RE.sub(sub, str(v)))
-                               for k, v in (spec.nr_headers or {}).items()}
-        return _dc.replace(spec, **patch)
+        url = _ENV_PH_RE.sub(sub, spec.url or "")
+        headers = {k: _ENV_PH_RE.sub(sub, str(v)) for k, v in (spec.nr_headers or {}).items()}
+        body = _ENV_PH_RE.sub(sub, spec.nr_body_template or "")
+        return _dc.replace(spec, url=url, nr_headers=headers, nr_body_template=body)
 
     async def install_link_api_tab_endpoint(request: Request):
         """A3(#170)：安装「AutoFlow API」tab（id=af_api_tab）到 NR。
@@ -1346,133 +1036,6 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             "detail": res,
         })
 
-    def _derived_node_ids(spec, tab_id: str) -> set:
-        """该 spec 在「AutoFlow API」tab 里派生出的节点 id 集合（#182）。
-
-        id 规则不在这里复刻，而是直接调 build_nr_tab_flows 生成一遍取 id ——
-        规则只有一处真相源（api_specs.build_nr_tab_flows），避免删除逻辑与安装
-        逻辑对 id 命名各自为政，改一处漏一处就会留孤儿节点或误删。
-
-        Args:
-            spec: ApiSpec。
-            tab_id: 目标 tab id（只影响节点的 z 字段，不影响 id）。
-        Returns:
-            节点 id 集合；spec 不生成 NR 流时返回空集。
-        """
-        from .api_specs import build_nr_tab_flows
-        if not spec.needs_nr_flow():
-            return set()
-        return {n.get("id") for n in build_nr_tab_flows(tab_id, specs=[spec])
-                if n.get("id")}
-
-    async def delete_link_api_endpoint(request: Request):
-        """#182：删除（卸载）一个 Link API。
-
-        语义：Link API 是「网关声明的桥接能力 + 用户填的运行配置 + NR tab 里派生
-        的执行链」三件套。删除 = 拆掉后两件（用户资产），spec 声明本身保留在
-        api_specs.json（代码级数据，随版本库走，供日后重装），与 self_use 一贯做法一致。
-
-        步骤（顺序有讲究）：
-        1. 未知 name → 404；self_use 能力 → 403（与配置端点同口径）；
-        2. 先清 NR：定位真实 tab（台账+扫描），移除本 spec 派生的节点后 PUT 回写
-           （allow_prod=True）。**NR 写失败即 502 且本地状态一律不动** —— 宁可重试，
-           也不能出现「配置已删、NR 里还挂着带旧 token 的孤儿链」；
-        3. 再清本地：api_configs 配置行 + subflow_registry 登记（前端列表源自后者，
-           删掉它面板才会真的少一条）。
-
-        跨 spec 保护：若两个 spec 的 entry_link_id 撞车，只删「仅本 spec 会生成」
-        的 id，其余留给它的主人。
-
-        Returns:
-            200 {ok, name, config_removed, registry_removed, nodes_removed,
-                 node_ids, tab_id, nr_skipped}
-        Raises:
-            404 未知 Link API；403 self_use；400 该 key 不是 Link API；502 NR 写失败。
-        """
-        from .api_specs import API_SPECS
-        name = request.path_params.get("name") or ""
-        spec = get_api_spec(name)
-        try:
-            meta = await asyncio.to_thread(gw.tasks.get_subflow_meta, name)
-        except Exception as e:
-            return _js({"ok": False, "error": f"读取子流程元数据失败：{e}"}, 502)
-        if spec is None and not meta:
-            return _js({"ok": False, "error": f"未知 Link API: {name}"}, 404)
-        if spec is not None and getattr(spec, "self_use", False):
-            return _js({"ok": False,
-                        "error": "self_use 能力（网关自用）不可删除"}, 403)
-        if meta and (meta.get("kind") or "subflow") not in ("link_out", "http_api"):
-            return _js({"ok": False,
-                        "error": f"{name} 不是 Link API（kind={meta.get('kind')}），"
-                                 f"请在「子流程」Tab 删除"}, 400)
-
-        # ── 1) 清 NR：只删本 spec 独有的派生节点 ──
-        nodes_removed, removed_ids, tab_id, nr_skipped = 0, [], None, True
-        if spec is not None and spec.needs_nr_flow():
-            others = [s for s in API_SPECS
-                      if s.name != name and s.needs_nr_flow()
-                      and not getattr(s, "self_use", False)]
-            # 与 install-tab 同口径：只拿非 self_use 的入口 id 作重名 tab 的挑真身依据，
-            # 免得豆包（用户自用 tab）的入口把解析引到人家的流程上。
-            entry_ids = {(s.entry_link_id or f"{s.name}_in")
-                         for s in API_SPECS
-                         if s.needs_nr_flow() and not getattr(s, "self_use", False)}
-            tab_id, _matched = await asyncio.to_thread(
-                _resolve_af_api_tab_id, entry_ids)
-            if tab_id:
-                probe = tab_id or AF_API_TAB_SEED_ID
-                own = _derived_node_ids(spec, probe)
-                for s in others:                      # entry_link_id 撞车保护
-                    own -= _derived_node_ids(s, probe)
-                try:
-                    existing = await asyncio.to_thread(gw.nr.get_flow, tab_id)
-                except Exception:
-                    existing = None
-                exist_nodes = ((existing or {}).get("nodes", [])
-                               if isinstance(existing, dict) else [])
-                kept = [n for n in exist_nodes if n.get("id") not in own]
-                removed_ids = [n.get("id") for n in exist_nodes
-                               if n.get("id") in own]
-                nodes_removed = len(exist_nodes) - len(kept)
-                if nodes_removed:
-                    flow_data = {
-                        "id": tab_id,
-                        "label": (existing or {}).get("label") or AF_API_TAB_LABEL,
-                        "nodes": kept,
-                        "disabled": bool((existing or {}).get("disabled", False)),
-                        "info": (existing or {}).get("info", False),
-                    }
-                    try:
-                        await asyncio.to_thread(
-                            gw.nr.update_flow_nodes, tab_id, flow_data, True, True)
-                    except Exception as e:
-                        return _js({"ok": False,
-                                    "error": f"清理 NR 派生节点失败（本地配置未动）：{e}"},
-                                   502)
-                    nr_skipped = False
-
-        # ── 2) 清本地：配置 + 注册表登记 ──
-        try:
-            config_removed = await asyncio.to_thread(
-                api_configs.delete_api_config, name)
-        except Exception as e:
-            return _js({"ok": False, "error": f"删除配置失败：{e}"}, 502)
-        registry_removed = False
-        if meta:
-            r = await asyncio.to_thread(gw.tasks.delete_subflow, name)
-            if not r.get("ok"):
-                return _js({"ok": False, "error": r.get("error")}, 400)
-            registry_removed = True
-        return _js({
-            "ok": True, "name": name,
-            "config_removed": config_removed,
-            "registry_removed": registry_removed,
-            "nodes_removed": nodes_removed,
-            "node_ids": removed_ids,
-            "tab_id": tab_id,
-            "nr_skipped": nr_skipped,
-        })
-
     # ── 版本同步已剥离为独立 CLI（C3 / B8）──
     # 后端逻辑保留在 autoflow_gateway/sync.py，由命令行脚本调用；
     # WebUI 不再承载版本同步面板。
@@ -1504,23 +1067,11 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         # Bark 密钥改了之后，NR 里**已经生成过**的 bark_push 子流程仍持有旧值
         # （子流程 env 是生成时快照的）。这里如实提示，不擅自去改用户的 NR。
         touched = list(result.get("changed", [])) + list(result.get("cleared", []))
-        # R3(#round4) 同族：NR 地址改了要把 debug 回读桥一起搬过去，否则它继续死连
-        # 旧地址，debug_read 恒 connected:false —— 用户完全看不出是「桥没跟着搬」。
-        if "NR_URL" in touched:
-            try:
-                bridge = getattr(gw, "debug_bridge", None)
-                if bridge is not None and bridge.retarget(getattr(cfg, "nr_url", "")):
-                    payload.setdefault("notices", []).append(
-                        "NR 地址已变更，debug 回读桥已切到新地址（重连需数秒）。")
-            except Exception:
-                pass
         if any(k.startswith("BARK_") for k in touched):
-            # 注意用 append 而非直接赋值：同时改了 NR_URL 与 BARK_* 时，
-            # 直接赋值会把上面的桥重定向提示整条吞掉。
-            payload.setdefault("notices", []).append(
+            payload["notices"] = [
                 "Node-RED 中若已生成过 bark_push 子流程，它仍持有旧的 BARK_* 值。"
                 "需要同步时：在 Node-RED 里删除该子流程，网关下次部署会用新值自动重建。"
-            )
+            ]
         return _js(payload)
 
     async def connections_test(request: Request):
@@ -1691,19 +1242,6 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/agents/{id}/regen", regen_agent, methods=["POST"]),
         Route("/api/agents/{id}", update_agent, methods=["PUT"]),
         Route("/api/agents/{id}", delete_agent, methods=["DELETE"]),
-        # ACP 对等令牌（acp_ 前缀，仅用于 /acp）
-        Route("/api/acp/tokens", list_acp_tokens, methods=["GET"]),
-        Route("/api/acp/tokens", create_acp_token, methods=["POST"]),
-        Route("/api/acp/tokens/{id}/revoke", revoke_acp_token, methods=["POST"]),
-        Route("/api/acp/tokens/{id}", delete_acp_token, methods=["DELETE"]),
-        # ACP 启用开关（前端「ACP 令牌」页开关调用）
-        Route("/api/acp/enabled", get_acp_enabled, methods=["GET"]),
-        Route("/api/acp/enabled", set_acp_enabled, methods=["PUT"]),
-        # LLM 配置与内置助手（DEV-llm-webui-agent）
-        Route("/api/llm/config", get_llm_config, methods=["GET"]),
-        Route("/api/llm/config", set_llm_config, methods=["PUT"]),
-        Route("/api/llm/chat", llm_chat, methods=["POST"]),
-        Route("/api/llm/test", test_llm, methods=["POST"]),
         # 确认闸
         Route("/api/pending", list_pending, methods=["GET"]),
         Route("/api/pending/{id}/approve", approve, methods=["POST"]),
@@ -1741,12 +1279,6 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         # A3：安装「AutoFlow API」tab 到 NR（增量合并，绝不整体覆盖）
         Route("/api/link-apis/install-tab", install_link_api_tab_endpoint,
               methods=["POST"]),
-        # #182：删除（卸载）Link API —— 清配置 + 清 tab 内派生节点 + 取消登记。
-        # 必须排在 install-tab 之后：`{name}` 会字面匹配 "install-tab"，
-        # Starlette 靠方法不同（POST vs DELETE）走 partial-match 继续找，
-        # 但顺序摆对更不容易在日后加 POST 时踩坑。
-        Route("/api/link-apis/{name}", delete_link_api_endpoint,
-              methods=["DELETE"]),
 
         # 静态
         Route("/", index, methods=["GET"]),

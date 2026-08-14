@@ -326,3 +326,143 @@ class AgentStore:
             notes=r["notes"] or "",
             mode=mode,
         )
+
+
+class AcpTokenStore:
+    """ACP（Agent Client Protocol）对等凭证存储（SQLite，与 AgentStore 完全隔离）。
+
+    ACP 令牌（kind=acp，前缀 acp_）仅用于 /acp 端点鉴权，与 MCP 的 af_ 身份码、
+    WebUI 的 af_ui_token JWT 三套互不认领（规格 §3/§9）。本类用独立表 acp_tokens，
+    不污染 agent 身份模型（peer 凭证不需要 tier/mode/admin）。
+
+    令牌明文仅在 create_token 时返回一次；落库 sha256；可吊销（status=revoked）。
+    """
+
+    _lock = threading.Lock()
+
+    def __init__(self, config=None):
+        self.cfg = config or get_config()
+        os.makedirs(self.cfg.data_dir, exist_ok=True)
+        self.db_path = os.path.join(self.cfg.data_dir, "autoflow.db")
+        self._init_db()
+
+    def _conn(self):
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self):
+        with self._lock:
+            conn = self._conn()
+            try:
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS acp_tokens (
+                        token_id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        token_hash TEXT NOT NULL UNIQUE,
+                        created_at TEXT NOT NULL,
+                        last_seen TEXT,
+                        status TEXT NOT NULL DEFAULT 'active',
+                        notes TEXT DEFAULT ''
+                    )"""
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def create_token(self, name: str, notes: str = "") -> "tuple[dict, str]":
+        """签发 acp_ 令牌，返回 (记录字典, 明文令牌)。明文仅此刻可见。"""
+        import secrets
+        code = "acp_" + secrets.token_urlsafe(24)
+        token_id = "acp_" + uuid.uuid4().hex[:12]
+        now = _now()
+        with self._lock:
+            conn = self._conn()
+            try:
+                conn.execute(
+                    "INSERT INTO acp_tokens (token_id,name,token_hash,created_at,notes,status) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (token_id, name, _sha256(code), now, notes, "active"),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        rec = {"token_id": token_id, "name": name, "created_at": now,
+               "last_seen": None, "status": "active", "notes": notes}
+        return rec, code
+
+    def resolve_by_token(self, token: str):
+        """用明文 acp_ 令牌解析记录；不存在/失效/非 acp_ 前缀返回 None（中间件据此拒匿名/非 acp）。"""
+        if not token or not token.startswith("acp_"):
+            return None
+        h = _sha256(token)
+        with self._lock:
+            conn = self._conn()
+            try:
+                r = conn.execute(
+                    "SELECT * FROM acp_tokens WHERE token_hash=?", (h,)
+                ).fetchone()
+            finally:
+                conn.close()
+        if not r:
+            return None
+        rec = self._row_to_token(r)
+        if rec["status"] != "active":
+            return None
+        return rec
+
+    def record_last_seen(self, token_id: str) -> None:
+        with self._lock:
+            conn = self._conn()
+            try:
+                conn.execute(
+                    "UPDATE acp_tokens SET last_seen=? WHERE token_id=?",
+                    (_now(), token_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def revoke_token(self, token_id: str) -> bool:
+        with self._lock:
+            conn = self._conn()
+            try:
+                cur = conn.execute(
+                    "UPDATE acp_tokens SET status='revoked' WHERE token_id=?", (token_id,)
+                )
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+
+    def list_tokens(self) -> List[dict]:
+        with self._lock:
+            conn = self._conn()
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM acp_tokens ORDER BY created_at DESC"
+                ).fetchall()
+            finally:
+                conn.close()
+        return [self._row_to_token(r) for r in rows]
+
+    def delete_token(self, token_id: str) -> bool:
+        with self._lock:
+            conn = self._conn()
+            try:
+                cur = conn.execute("DELETE FROM acp_tokens WHERE token_id=?", (token_id,))
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+
+    @staticmethod
+    def _row_to_token(r) -> dict:
+        return {
+            "token_id": r["token_id"],
+            "name": r["name"],
+            "created_at": r["created_at"],
+            "last_seen": r["last_seen"],
+            "status": r["status"],
+            "notes": r["notes"] or "",
+        }

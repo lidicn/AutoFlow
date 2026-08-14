@@ -286,3 +286,57 @@ body {
 .modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 16px; border-top: 1px solid var(--border); }
 .modal.first-run .ck { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 14px; }
 .modal.first-run .ck input { width: 16px; height: 16px; }
+
+/* 帮助 / 使用手册页 */
+:root { --accent: var(--primary); --bg-soft: var(--surface-2); }
+.help-layout { display: flex; gap: 20px; align-items: flex-start; }
+.toc-sidebar { position: sticky; top: 20px; width: 220px; flex-shrink: 0; align-self: flex-start; max-height: calc(100vh - 120px); overflow-y: auto; background: var(--bg-soft); }
+.help-content { flex: 1; min-width: 0; }
+.toc { margin: 6px 0 0; padding-left: 22px; line-height: 2; }
+.toc a { color: var(--accent); text-decoration: none; }
+.toc a:hover { text-decoration: underline; }
+#view-help h3 { margin-top: 18px; }
+#view-help h4 { margin: 14px 0 6px; color: var(--text); }
+#view-help ol.desc, #view-help ul.desc { padding-left: 22px; line-height: 1.9; }
+#view-help .tbl { width: 100%; border-collapse: collapse; margin: 8px 0 4px; font-size: 13px; }
+#view-help .tbl th, #view-help .tbl td { border: 1px solid var(--border); padding: 7px 10px; text-align: left; vertical-align: top; }
+#view-help .tbl th { background: var(--surface-2); color: var(--text); font-weight: 600; }
+#view-help .tbl td { color: var(--text); }
+#view-help .code-box { white-space: pre-wrap; word-break: break-word; line-height: 1.6; }
+.badge.ok { background: var(--ok-weak); color: var(--ok); }
+.badge.danger { background: var(--danger-weak); color: var(--danger); }
+.badge.tier-0 { background: var(--danger-weak); color: var(--danger); }
+.badge.tier-1 { background: var(--ok-weak); color: var(--ok); }
+@media (max-width: 900px) { .help-layout { flex-direction: column; } .toc-sidebar { position: static; width: 100%; max-height: none; } }
+/* LLM 设置：可视化账号池（DEV-llm-ui-pool-test） */
+.account-pool { max-width: 760px; }
+.backend-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin-bottom: 12px; background: var(--surface); }
+.bc-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.bc-idx { flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%; background: var(--primary-weak); color: var(--primary);
+  display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; }
+.bc-head .bc-name { flex: 1; min-width: 0; }
+.switch-inline { display: flex; align-items: center; gap: 4px; color: var(--text-dim); font-size: 13px; white-space: nowrap; cursor: pointer; }
+.bc-ops { display: flex; gap: 4px; }
+.bc-ops .btn { padding: 4px 9px; font-size: 13px; }
+.bc-params { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+.bc-params > div { flex: 1; min-width: 110px; }
+.bc-params .lbl { font-size: 12px; }
+.bc-test-res { margin-left: 8px; }
+
+/* LLM 助手对话（DEV-llm-ui-pool-test：气泡 + 持久化） */
+.chat { display: flex; flex-direction: column; min-height: 240px; max-height: 60vh; }
+.chat-row { display: flex; gap: 8px; margin-bottom: 14px; align-items: flex-end; }
+.chat-row.user { justify-content: flex-end; }
+.chat-row.ai { justify-content: flex-start; }
+.chat-row.error { justify-content: center; }
+.chat-avatar { flex: 0 0 auto; width: 30px; height: 30px; border-radius: 50%; background: var(--surface-2);
+  display: flex; align-items: center; justify-content: center; font-size: 16px; }
+.chat-bubble { max-width: 82%; padding: 10px 13px; border-radius: 14px; line-height: 1.55; word-break: break-word; }
+.chat-bubble.user { background: var(--primary); color: #fff; border-bottom-right-radius: 4px; }
+.chat-bubble.ai { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+.chat-bubble.error { background: var(--danger-weak); color: var(--danger); border: 1px solid var(--danger); max-width: 92%; }
+.chat-text { white-space: pre-wrap; }
+.chat-tool-calls { margin-bottom: 6px; }
+.chat-tool-calls summary { cursor: pointer; color: var(--text-dim); font-size: 13px; }
+.chat .step, .bubble .step { border-left: 3px solid var(--primary); padding: 4px 8px; margin: 6px 0; background: var(--bg); border-radius: 0 6px 6px 0; }
+.chat .step code, .bubble .step code { font-size: 13px; }

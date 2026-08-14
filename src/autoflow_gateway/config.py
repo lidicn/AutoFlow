@@ -124,6 +124,25 @@ class GatewayConfig:
     mcp_white_path: str = field(default_factory=lambda: os.environ.get("AF_MCP_WHITE_PATH", "/mcp-white"))
     mcp_admin_path: str = field(default_factory=lambda: os.environ.get("AF_MCP_ADMIN_PATH", "/mcp-admin"))
 
+    # ── ACP（Agent Client Protocol）对接（拓扑 X peer-to-peer，与 memory-worker 互通）──
+    # /acp 挂既有网关 :8000 的 Starlette app（与 /mcp 同端口），不另起服务。
+    acp_path: str = field(default_factory=lambda: os.environ.get("AUTOFLOW_ACP_PATH", "/acp"))
+    # autoflow → memory-worker 委派链路（autoflow_delegate_to_memory_worker 调用对端 /acp 用）。
+    # 仅走 env/连接设置，绝不落仓库（P-2 门禁）。
+    memory_worker_acp_url: str = field(default_factory=lambda: os.environ.get("MEMORY_WORKER_ACP_URL", ""))
+    memory_worker_acp_token: str = field(default_factory=lambda: os.environ.get("MEMORY_WORKER_ACP_TOKEN", ""))
+
+    # ── LLM 钩子（autoflow 自带大模型能力，OpenAI 兼容 /chat/completions，多后端 fallback）──
+    # 优先 llm_backends（JSON 数组：[{url,api_key,model,name?}...]）；缺失回落单 llm_api_key/url/model。
+    # 仅 env 驱动，绝不硬编码密钥（P-2 门禁）；未配置时 configured=False，ask_llm 返回友好错误不崩。
+    llm_backends: list = field(default_factory=lambda: json.loads(os.environ.get("AUTOFLOW_LLM_BACKENDS", "[]")))
+    llm_api_key: str = field(default_factory=lambda: os.environ.get("AUTOFLOW_LLM_API_KEY", ""))
+    llm_api_url: str = field(default_factory=lambda: os.environ.get("AUTOFLOW_LLM_API_URL", ""))
+    llm_model: str = field(default_factory=lambda: os.environ.get("AUTOFLOW_LLM_MODEL", ""))
+    llm_temperature: float = field(default_factory=lambda: float(os.environ.get("AUTOFLOW_LLM_TEMPERATURE", "0.7")))
+    llm_max_tokens: int = field(default_factory=lambda: int(os.environ.get("AUTOFLOW_LLM_MAX_TOKENS", "4096")))
+    llm_timeout: int = field(default_factory=lambda: int(os.environ.get("AUTOFLOW_LLM_TIMEOUT", "120")))
+
     # ── 连接设置代数（#45）──
     # WebUI 保存 HA/NR/Bark 连接后由 connections.bump_revision 递增；
     # NR/HA 层在 client property 里比对代数，变了就丢弃缓存 client 用新凭据重建，
@@ -210,6 +229,16 @@ def is_submit_gate_enabled(cfg: "GatewayConfig") -> bool:
     return bool(load_feature_flags(cfg).get("submit_run_gate", False))
 
 
+def is_acp_enabled(cfg: "GatewayConfig") -> bool:
+    """ACP（Agent Client Protocol 双向对接）是否启用。
+
+    默认**启用**：与现状一致（/acp 服务端 + delegate_to_memory_worker + ask_llm 均可用）。
+    置 False 后：/acp 停止服务（中间件直接拒）、ACP 工具返回禁用提示；可由 WebUI
+    「ACP 令牌」页开关随时关闭（运行时经 feature_flags.json 切换，免重启）。
+    ACP 属小众功能，故 opt-out：默认开便于测试，管理员可一键关。"""
+    return bool(load_feature_flags(cfg).get("acp_enabled", True))
+
+
 def set_feature_flag(cfg: "GatewayConfig", key: str, value: Any) -> Dict[str, Any]:
     """写入单个特性开关并落盘，返回更新后的完整 flags。"""
     p = cfg.feature_flags_path()
@@ -219,6 +248,40 @@ def set_feature_flag(cfg: "GatewayConfig", key: str, value: Any) -> Dict[str, An
     with open(p, "w", encoding="utf-8") as f:
         json.dump(flags, f, ensure_ascii=False, indent=2)
     return flags
+
+
+# ── LLM 配置（DEV-llm-webui-agent：WebUI 内置 LLM 助手，独立 llm_config.json）──
+# 与 feature_flags.json 同目录（data/<env>/），运行时由 WebUI 落盘、免重启读取。
+# 字段：enabled(bool) / backends([{url,api_key,model,name?}]) / 回落单 api_url/api_key/model。
+# 密钥仅存盘不回显（GET 走 _mask_secret 脱敏），绝不硬编码（P-2 门禁）。
+def llm_config_path(cfg: "GatewayConfig") -> str:
+    """LLM 配置落盘位置（与特性开关同目录，按环境隔离）。"""
+    return os.path.join(cfg.data_dir, cfg.env, "llm_config.json")
+
+
+def load_llm_config(cfg: "GatewayConfig") -> Dict[str, Any]:
+    """读取 LLM 配置（实时读文件，缺省返回空 dict 表示未配置）。"""
+    p = llm_config_path(cfg)
+    if os.path.isfile(p):
+        try:
+            with open(p, encoding="utf-8") as f:
+                o = json.load(f)
+                if isinstance(o, dict):
+                    return o
+        except Exception:
+            pass
+    return {}
+
+
+def save_llm_config(cfg: "GatewayConfig", d: Dict[str, Any]) -> Dict[str, Any]:
+    """原子写入 LLM 配置并落盘，返回写入后的完整 dict。"""
+    p = llm_config_path(cfg)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, p)  # 原子替换，避免半写文件被读到
+    return d
 
 
 # ── 部署策略（运行时由 WebUI 落盘，免重启读取）──

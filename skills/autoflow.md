@@ -4,7 +4,7 @@ command: /autoflow
 description: AutoFlow Automations 一站式技能。把自然语言家居场景变成经网关校验、能自证跑通的 Node-RED
   flow；网关内部用「编译器路径」（默认，产出干净可维护、无 spaghetti function 的
   flow）或「原生手写路径」（表达编译器覆盖不了的逻辑，需人审）。你的能力范围由 WebUI 给的身份决定，你无需也无需选箱。
-version: 3.3.4
+version: 3.3.6
 disable: true
 ---
 
@@ -20,7 +20,7 @@ disable: true
 | **编译器 + 原生手写** | 在 DSL 表达不了时，可直写 flow JSON 走提案闸（允许 function 节点）；**落提案待人审，不直写 NR** | `http://127.0.0.1:8000/mcp-white`（原生手写面，含部署刀） |
 | **管理员** | 上述全集 + 运维/测试杠杆 | `http://127.0.0.1:8000/mcp-admin`（管理面） |
 
-> 历史术语对照（仅供理解旧文档/日志）：「黑箱」= 编译器路径；「白箱」= 原生手写路径；`auto_*` 任务池 = 编译器子池，`wb_*` = 原生手写子池。新文档统一用「编译器路径 / 原生手写路径」。
+> 历史术语对照（仅供理解旧文档/日志）：「黑箱」= 编译器路径；「白箱」= 原生手写路径。新文档统一用「编译器路径 / 原生手写路径」。（`auto_*`/`wb_*` 任务池为早期迭代产物，已停用，勿再认领。）
 
 ## 连接（一次性配置）
 - 你只有**一个身份码**（已预置在 MCP 客户端侧——deepseek++ 浏览器扩展的 Bearer 字段，或 WorkBuddy 的 MCP 配置）。网关靠这个码识别你的**能力**（而非要你自己选箱）。
@@ -30,20 +30,10 @@ disable: true
 ## 通用铁律（两条路径都守）
 1. **实体必须真实**：所有 `entity_id` 只能来自 `autoflow_resolve_entity` 的返回，**绝不靠记忆拼** `light.xxx`——拼错网关闸门直接判 FAIL。
 2. **你不需要猜设备是 light 还是 switch**：把自然语言设备名丢给 `autoflow_resolve_entity(name=..., area=...)`，网关返回该区域所有沾边实体（含 `domain`、`state` 当前状态、`possible_states` 可能状态），**由你挑**该用哪个。
-   - ★★ **同名设备有多个子实体，必须按用途挑对的那个**：一个自然语言名可能返回同一物理设备的好几个 entity。典型：「书房人体传感器」会同时返回 `binary_sensor..._motion`(移动检测) 和 `sensor..._illuminance`(光照度数值)——做"有人移动"触发选 `_motion`；做"光照度低于 10"数值条件选 `_illuminance`。**两个是不同实体，别混用、别只取第一个。**
-   - ★★ **吊灯 ≠ 台灯 ≠ 牌匾灯泡**：书房吊灯/射灯是 `switch` 域（`switch.lumi..._p_3_1` / `_p_2_1`），动作用 `switch.turn_on`；只有台灯(`light.philips...rwread...`)、牌匾灯泡(`light.philips...cbulb...`)是 `light` 域。名字里带"开关/电脑"的（如 `switch.example_switch`）是干扰项，绝不拿来冒充灯。拿不准就把候选读全、按 domain+friendly_name 挑。
+   - ★★ **同名多子实体、吊灯≠台灯≠牌匾灯泡、switch 干扰项**等易混点，完整判定规则与实例见 `autoflow_dsl_help()` 的 `resolve_entity_rules`——**写 DSL 前先调它确认语法与挑选规则**，本 skill 不重复罗列。
 3. **零信任**：你只做「发现 + 提案/部署」。不部署审批（人在 WebUI 做）、不直连 HA/NR、不提交任何地址/端口/令牌。
-4. **resolve 返回 0 候选就停手**：说明该区域根本无此设备（如「客厅窗帘」客厅没窗帘）。**不要跨区 scavenge 去别的房间顺一个凑**——应改用 `autoflow_report_issue(title=…, body=…, task_id="…", severity="high", category="entity")` 上报（属任务编排错误），人类会看到。
-5. **聊天框优先（交互原则）**：你是**交互式 chat agent**，人类就在这段对话里。轻量、可逆的歧义（如「开哪盏灯」「用什么亮度」「叫什么名」）**直接在聊天框问、等人回复**，不要为此调 `autoflow_request_decision`、也别让人跑去 WebUI 点选——把正在对话协作的人类切去另一个界面会有割裂感。仅当 (1) agent **无人值守**（headless / 任务池 worker / 定时任务，对话里没人）或 (2) 该选择需**持久化 / 可审计**地记进网关时，才走 `autoflow_request_decision` → WebUI 通道。完整通道选择见下方「人类决策协议」。
-
-## 任务池（可选认领，结构化练手）
-除自由创作外，还有结构化任务池供你练手/贡献语料：
-- **编译器子池 `auto_*`（250 条，tier=auto）**：覆盖 15 区域 + 18+ DSL 指令面，条件类约 71 条。编译器/双能力身份领到此池。
-- **原生手写子池 `wb_*`（25 条，tier=auto_wb）**：覆盖原生节点族（switch/change/template/delay/debug 等），专练 `原生节点:` 逃逸与白名单边界。原生手写/双能力身份领到此池。
-- 认领：`autoflow_claim_task()` **按你的能力自动选池**——仅编译器→只领 `auto_*`；编译器+原生手写→只领 `wb_*`；**双能力→先领 `wb_*`，空了再领 `auto_*`**（一套身份干两池活）。
-- 提交：`autoflow_submit_result(task_id="<id>", dsl="...")`。原生手写任务用 `原生节点:` 写手写 NR 节点；编译器禁的 function/exec 对原生手写同样永久禁止（白名单生效）。
-- 浏览与进度：`autoflow_list_tasks(only_mine?, status?, limit?, offset?, fields?)` 看池子全貌/自己认领的任务；`autoflow_list_pending()` 查自己提交后的待人工确认项进度；`autoflow_set_plan(current?, overall?, completed_append?)` 把当前计划/进展写给 WebUI 的人类看（无人值守跑池时建议每领一条更新一次）。
-- 这是编译器语料探针：原生手写跑通的原生节点片段，可蒸馏反哺编译器。
+4. **resolve 返回 0 候选就停手**：说明该区域根本无此设备（如「客厅窗帘」客厅没窗帘）。**不要跨区 scavenge 去别的房间顺一个凑**——应改用 `autoflow_report_issue(title=…, body=…, severity="high", category="entity")` 上报（属任务编排错误），人类会看到。
+5. **聊天框优先（交互原则）**：你是**交互式 chat agent**，人类就在这段对话里。轻量、可逆的歧义（如「开哪盏灯」「用什么亮度」「叫什么名」）**直接在聊天框问、等人回复**，不要为此调 `autoflow_request_decision`、也别让人跑去 WebUI 点选——把正在对话协作的人类切去另一个界面会有割裂感。仅当 (1) agent **无人值守**（headless / 定时任务，对话里没人）或 (2) 该选择需**持久化 / 可审计**地记进网关时，才走 `autoflow_request_decision` → WebUI 通道。完整通道选择见下方「人类决策协议」。
 
 ---
 
@@ -54,17 +44,10 @@ disable: true
 你**不直接写 flow JSON**，只写一段简短的语义 **DSL**。网关会：解析 → 编译成真实 NR flow →
 在本机虚拟 HA 孪生里重放动作 → 断言灯真的亮了/开关真的动了。这套"自证"是编译器路径的核心价值，别绕过它。
 
-你认领的是 `auto_*` 专属任务池（编译器子池 250 条）。直接 `autoflow_claim_task()` 领、直接写 DSL，不用手动指定 tier。
+你直接写 DSL 提案即可，**无需认领任何任务池**（早期 `auto_*`/`wb_*` 任务池已停用，别再调 `autoflow_claim_task`/`submit_result`/`list_tasks`）。
 
 ## 编译器路径标准流程（照做即可）
-1. **解析设备名**（唯一发现入口）：
-   ```
-   autoflow_resolve_entity(name="显示器挂灯", area="书房")
-   autoflow_resolve_entity(name="书房牌匾灯泡", area="书房")
-   ```
-   - 返回 `candidates:[{entity_id, friendly_name, domain, area, state, possible_states, confidence}]`。
-   - `possible_states` 直接告诉你这设备能同步到哪些状态（如 `["on","off"]` / `["open","closed"]`），省去你猜。
-   - 从候选里挑出你要的 `entity_id`（优先 `confidence=high` 或排序第一）。把选中的 id 记下来。
+1. **解析设备名**（唯一发现入口）：对每个设备名调 `autoflow_resolve_entity(name="显示器挂灯", area="书房")` 拿真实 `entity_id`。返回 `candidates:[{entity_id, friendly_name, domain, area, state, possible_states, confidence}]`，从候选里挑（优先 `confidence=high`）。**同名多子实体、吊灯≠台灯等挑选规则与全部约束，以 `autoflow_dsl_help()` 的 `resolve_entity_rules` / `constraints` 为准——语法 help 已详述，本 skill 不重复。**
 2. **套模板**（首选）：
    - `autoflow_list_templates()` → 现有：`motion_to_light` / `entry_announce` / `tts_announce` / `api_call_chat` / `api_call_image`
    - `autoflow_render_template(name="motion_to_light", values_json='{"room":"书房","sensor":"<真实传感器>","light":"<真实灯>","brightness":"80"}')`
@@ -217,7 +200,7 @@ disable: true
 只有很少的约束。网关不编译你的逻辑，只做安全 sanitize 后**落为提案**（供人类审核后部署），并**留存一份你产出的
 JSON**（供人类迭代编译器）。这是"看看 agent 到底能写出什么、编译器边界在哪"的实验通道。
 
-你认领的是 `wb_*` 专属子池（25 条）。`autoflow_claim_task()` 按你的原生手写能力自动取 tier=auto_wb，直接返回 `wb_*` 任务。
+你直接写 flow JSON 提案即可，**无需认领任何任务池**（早期 `auto_*`/`wb_*` 任务池已停用，别再调 `autoflow_claim_task`/`submit_result`/`list_tasks`）。
 
 ## 你的固定 tab（隔离约定，务必遵守）
 - 你产出的每个 flow，`label` **必须以 `[DS白箱] ` 开头**，例如 `[DS白箱] 书房人来开灯`。
@@ -387,22 +370,16 @@ autoflow_create_subflow(
 - 子流程提案**不能升格为经验 skill**（那是 flow/经验类提案的路径），只能走「部署」注册到网关。
 
 ## 调用外部 API 的 flow（必须 function 节点）
-**重要经验（deepseek++ 实测）**：像「调 OpenAI 兼容聊天接口 / 文生图」这类 **API 编排 flow**，
-**必须用 `function` 节点** 来构造请求体，再交给 `http request`。纯靠 http request 节点很难拼出
-正确 body，deepseek++ 会反复报错、需要人反复引导。标准链路：
+调用外部 API（聊天 / 文生图等）**优先走编译器 DSL 模板**：`autoflow_list_templates()` 里的
+`api_call_chat` / `api_call_image` 已封装好请求体构造与解析，直接 `autoflow_render_template(...)`
+生成 DSL 即可，无需手写节点。
 
-    inject(手动触发/payload) → function(构建 JSON body) → http request(POST, ret:"obj")
-           → function(从响应提取字段) → debug / 下游
+若走**原生手写路径**且需自定义 HTTP 请求体，经验上**必须用 `function` 节点**构造 JSON body 再交给
+`http request`——纯靠 http request 节点很难拼出正确 body。注意 `http request` 的 `ret` 设 `"obj"`
+让 NR 自动解析 JSON；body 写成 JSON 对象（不是字符串）。
 
-**可复用的本地代理（doubao2api，无需 API Key）**：
-- 聊天补全：`POST http://<NAS_IP>:9090/v1/chat/completions`，
-  body `{"model":"doubao","messages":[{"role":"user","content":<文本>}]}`
-- 文生图：`POST http://<NAS_IP>:9090/v1/images/generations`，
-  body `{"model":"doubao-seedream-3-0-250715","prompt":<文本>,"n":1,"size":"1024x1024"}`，返回 `data[0].url`
-- 完整可跑参考实现见 `docs/reference_flows/doubao_chat_imagegen.json`（用户手搓、已验证）。
-- 模板骨架见 `docs/templates/api_call_openai_compat.md`。
-
-**注意**：`http request` 的 `ret` 设 `"obj"` 让 NR 自动解析 JSON；body 写成 JSON 对象（不是字符串）。
+> 早期文档提到的本地 doubao2api 代理（`:9090/v1/...`）与 `docs/reference_flows/doubao_chat_imagegen.json`、
+> `docs/templates/api_call_openai_compat.md` 均已弃用，勿再引用。
 
 ## 逃生舱定位：编译器表达不了 → 原生手写兜
 
@@ -434,13 +411,43 @@ AutoFlow 两条内部路径职责互补：
 
 ---
 
+## 自愈闭环（flow 跑不通时，你自动调试修正）
+
+当部署的 flow 没跑通（用户反馈 / 你自测发现），你**无需人审即可走闭环自动修**——这是与「人工审核」并行的另一条路。用户只要对你说「这个 flow 跑不通，走自愈闭环修一下」即可。
+
+### 闭环步骤（照做）
+1. **先验证**：`autoflow_trigger_inject(flow_id)` 真实点火让 flow 跑一次；`autoflow_debug_read(flow_id, since=点火前时间戳)` 读回 NR debug 帧，断言探针帧到齐（帧结构契约见下方「debug 回读契约要点」）。
+2. **分析报错**：debug 帧里的异常节点 / 空输出 / 状态不符，定位问题（实体 id 错、分支没生效、子流程未注册等）。
+3. **apply 修正**：`autoflow_apply(mode="A", correction_json='{"dsl":"...修正后DSL","reason":"..."}')`（重编译整条）或 `mode="C"`（node_patches 局部热补丁）。A/C 高风险默认 `auto_approve=False` 只请示不落地，人类批准后以相同 `trace_id` + `auto_approve=True` 重调才真写回。
+4. **再点火验证**：回到第 1 步，直到跑通。
+
+### 预算保护（防死循环，与 inject 无关）
+- 网关按 `(agent, flow)` 计失败次数，默认**最多 3 次**自动修正（`_selfheal_budget_check`）。顶部 ♻️ 按钮可改上限，**设为 0 即关闭自愈闭环**（任何修正回到人工审核）。
+- 预算用尽仍失败，你会如实收到「已超重试上限，需人工介入」，**不会假装成功**。
+- ★ 这道预算是**纯失败计数，与 flow 里有没有 inject 节点无关**——没有 inject，预算照样生效，你也不会陷入无限循环。
+
+### inject 节点缺失时怎么处置（重点）
+- 闭环「点火」入口在发现 flow **没有 inject 节点**时**不报错**，只返回 `{ok:true, triggered:[], warning:"该 flow 没有 inject 节点，无触发目标"}`（`triggered` 为空）。此时「自动点火验证」这一步没有目标。
+- 你应当这样处置（按推荐顺序）：
+  1. **补一个 inject 节点**（最常见修法，让 flow 可被自动点火）；
+  2. **改用 flow 已有的其他触发器**：如 HA 状态变化事件、HTTP in、websocket 等——这些同样会产生 debug 帧；
+  3. **如实告知用户**：若实在无法自动验证，说「该 flow 没有可自动触发的入口，请你手动触发，或我加一个 inject」，**而不是假装跑通**。
+- 而 `autoflow_debug_read` 读的是网关旁路订阅的 NR debug 事件流，对**任何产生的 debug 帧**都有效、与触发源无关——只要 flow 真被触发过（不管谁触发的），你都能读到输出去做修正。
+
+### debug 回读契约要点（消费方务必遵守）
+- `events[]` 每个元素 `payload` 是 **JSON 字符串**（消费前 `json.loads`）；`payload_preview` 是 ~186 字符短预览（排错别只看它）。
+- **排序最新在前**（`received_at` 降序），`events[0]` 即最新帧，多实体流一次触发产多帧直接取 `[0]`，**不要再 `reversed()`**。
+- **截断**：`payload`（即便 `full=True`）在 ~2000 字符处截断并追加 `(truncated,N chars)`，截断后不再是合法 JSON，`json.loads` 前须先剥离该标记。
+
+---
+
 ## 人类决策协议（遇歧义 / 不可逆分叉点请人类拍板）
 
 向人类确认分叉点有两条通道，**优先在聊天框确认，WebUI 决策工具只用于特定场景**，避免把正在对话框协作的人类频繁切去另一个界面（割裂感）。
 
 ### 通道选择（关键）
 - **✅ 聊天框直接问（首选）**：你是「交互式 chat agent」、人类就在这段对话里，且分叉点是**轻量、可逆**的歧义（如「开哪盏灯」「用什么亮度」「叫什么名」）——直接用自然语言在对话里问，人类在聊天框回复即可。**不要**为此调 `autoflow_request_decision`，也别让人跑去 WebUI 点选。
-- **🌐 autoflow_request_decision → WebUI（仅限）**：(1) agent **无人值守**（headless / 任务池 worker / 定时任务），唯一能把人类选择取回的方式就是经工具；或 (2) 该选择需**持久化 / 可审计**地记进网关（供其他 agent 或人类稍后在 WebUI 复查），而非仅当前一轮对话用一下。
+- **🌐 autoflow_request_decision → WebUI（仅限）**：(1) agent **无人值守**（headless / 定时任务），唯一能把人类选择取回的方式就是经工具；或 (2) 该选择需**持久化 / 可审计**地记进网关（供其他 agent 或人类稍后在 WebUI 复查），而非仅当前一轮对话用一下。
 - 两条通道都**禁止自己假设**分叉点答案——要么聊天拿到，要么经工具拿到。黑箱 / 白箱 / 管理员身份都带这套工具（属用户工具集，不在部署刀里）。
 
 ### 工具（仅 WebUI 通道用）
@@ -469,7 +476,6 @@ AutoFlow 两条内部路径职责互补：
 autoflow_report_issue(
     title="客厅窗帘任务：客厅实际无窗帘，三家选了不同实体",
     body="resolve_entity('客厅窗帘') 返回 0 候选，agent 被迫跨区 scavenge → 实体发散。根因是任务编排引用了不存在的实体。",
-    task_id="hist2_duration_curtain_01",   # 可选：关联任务
     severity="high",                       # low|medium|high|critical
     category="entity",                     # defect|doc|dsl|entity|feature|other
 )

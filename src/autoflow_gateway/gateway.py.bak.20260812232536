@@ -5733,6 +5733,7 @@ class Gateway:
         # A22：存在「被跳过/未建模/重放归零 warn_only」的验证层时，即便断言全过也不算充分验证，
         # verdict 降级为「未充分验证」（而非「放行」），消除「零验证报 pass」假象。
         _unverified = (
+            (has_effect_nodes and bool(gate.get("skipped"))) or
             bool(_unmodeled) or
             (bool(replay_zero_steps) and _rz_policy == "warn_only")
         )

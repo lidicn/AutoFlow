@@ -28,17 +28,24 @@ import asyncio
 import json
 import os
 import re
+import secrets
+import threading
+import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from mcp.server.fastmcp import FastMCP
 
 from .gateway import Gateway, schema_blocking_issues
 from .flow_linter import lint_flow
 from .flow_simulator import simulate_flow
-from .identity import AgentStore, get_current_agent
+from .identity import AgentStore, AcpTokenStore, get_current_agent
 from .template_lib import list_templates, render_template, TemplateValidationError
 from .webui import build_webui_asgi
-from .config import get_config, is_task_pool_enabled, is_submit_gate_enabled
+from .config import get_config, is_task_pool_enabled, is_submit_gate_enabled, is_acp_enabled
+from . import acp_client  # 仅用 stdlib(urllib)，安全常驻导入
+# llm_client 含 `import httpx` —— 改为惰性导入（见 autoflow_ask_llm），
+# 避免 httpx 未安装时网关启动期 ImportError 全功能宕机（ACP 属小众，不应绑架 boot）。
 
 def _gw():
     return Gateway()
@@ -669,6 +676,56 @@ def autoflow_get_entity_state(entity_id: str) -> str:
     return _js({"ok": False, "error":
                 f"无法读取实体 {eid}：实时 HA 不可达且该实体不在网关设备目录缓存中。"
                 f"请先 autoflow_resolve_entity 确认 id 存在，或检查网关 HA 配置(HASS_SERVER/HASS_TOKEN)。"})
+
+@mcp.tool()
+def autoflow_delegate_to_memory_worker(task: str, context_json: str = "{}") -> str:
+    """【ACP 反向委派 memory-worker】经 ACP 把任务委派给对端 memory-worker（取家庭记忆/知识检索）。
+
+    与 memory-worker 的 delegate_to_autoflow 对称（规格 §8）；本工具本身只读、不发起任何写操作，
+    既有「共享态→防御层→确认闸」写护栏对 ACP 调用同样生效（委派不会绕过）。
+    - task：自然语言任务描述（如『记一下昨晚书房灯关了之后，牌匾灯还常亮』）。
+    - context_json：可选 JSON 对象，透传给 memory-worker（对齐 delegate_to_autoflow 的 context 字段），
+      例如 '{"entity_id":"light.study_main"}'。
+    - 未配置 MEMORY_WORKER_ACP_URL / MEMORY_WORKER_ACP_TOKEN → 返回 ok=false + 友好提示（不报错）；
+      请在网关连接设置或环境变量填入 memory-worker 的 /acp 地址与 acp_ 令牌后重试。
+    - 成功返回 {ok, session_id, status, text, blocks}；text 即 memory-worker 的 completed 文本。"""
+    if not is_acp_enabled(get_config()):
+        return _js({"ok": False, "error": "ACP 已关闭（WebUI「ACP 令牌」页开关）",
+                    "hint": "在 WebUI 将 ACP 开关打开即可使用。"})
+    try:
+        ctx = json.loads(context_json or "{}")
+    except json.JSONDecodeError:
+        return _js({"ok": False, "error": "context_json 非法 JSON"})
+    res = acp_client.delegate_to_memory_worker(task, context=ctx)
+    if not res.get("ok"):
+        return _js({"ok": False, "error": res.get("error", "委派失败"),
+                    "hint": "请确认网关已配置 MEMORY_WORKER_ACP_URL / MEMORY_WORKER_ACP_TOKEN。"})
+    return _js({"ok": True, "session_id": res.get("session_id"), "status": res.get("status"),
+                "text": res.get("text"), "blocks": res.get("blocks")})
+
+@mcp.tool()
+async def autoflow_ask_llm(prompt: str, model: str = "", system: str = "") -> str:
+    """【自带 LLM 钩子】调网关内置大模型（OpenAI 兼容 /chat/completions，多后端 fallback）做通用问答 / 摘要。
+
+    与 delegate_to_memory_worker 对称：autoflow 自身具备 LLM 能力，不再依赖 memory-worker 转发。
+    - prompt：必填，问题或指令文本（如『用一句话总结刚发生的灯光变化』）。
+    - model：可选，覆盖默认模型（如 gpt-4o / deepseek-chat）；留空用网关默认。
+    - system：可选，系统提示词。
+    - 未配置 LLM（缺 AUTOFLOW_LLM_* 环境变量 / llm_backends）返回 {ok:False} 友好提示，不崩；
+      全部后端 429/5xx/超时/鉴权失败自动 fallback，仍失败返回 {ok:False, error}。"""
+    if not is_acp_enabled(get_config()):
+        return _js({"ok": False, "error": "ACP 已关闭（WebUI「ACP 令牌」页开关）",
+                    "hint": "在 WebUI 将 ACP 开关打开即可使用。"})
+    if not prompt or not prompt.strip():
+        return _js({"ok": False, "error": "prompt 必填"})
+    try:
+        from . import llm_client  # 惰性导入：httpx 缺失仅在本工具调用时报错，不绑架网关 boot
+        router = llm_client.get_llm_router()
+        text = await router.chat([{"role": "user", "content": prompt}],
+                                 model=model or None, system=system or None)
+        return _js({"ok": True, "text": text})
+    except Exception as e:  # 含 LLMError / ImportError(httpx 缺失) / 网络超时 —— 均不裸崩
+        return _js({"ok": False, "error": f"LLM 调用失败: {e}"})
 
 @mcp.tool()
 def autoflow_submit_result(task_id: str, dsl: str) -> str:
@@ -1669,11 +1726,104 @@ class AgentAuthMiddleware:
       · /mcp-white 拒编译器身份(mode=black)，原生手写/管理员/双箱可进；
       · /mcp 任意 active 身份均可。"""
 
-    def __init__(self, user_path: str, white_path: str, admin_path: str, store: AgentStore):
+    def __init__(self, user_path: str, white_path: str, admin_path: str, store: AgentStore,
+                 acp_path: str = "/acp", acp_store: "AcpTokenStore | None" = None):
         self.user_path = user_path
         self.white_path = white_path
         self.admin_path = admin_path
         self.store = store
+        self.acp_path = acp_path
+        self.acp_store = acp_store
+
+    # ── ACP 端点鉴权（独立 acp_ 令牌体系，与 /mcp 的 af_ 身份码完全隔离）──
+    # /acp 用 kind=acp 令牌（AcpTokenStore 落库），鉴权失败返回 HTTP 200 + JSON-RPC
+    # error -32000（不是 MCP 的 401），满足工单 A6。任何改动不得影响 /mcp / WebUI / NR。
+    def _acp_token_from_scope(self, scope) -> str:
+        """从 Authorization: Bearer acp_xxx 或 x-acp-token: acp_xxx 取令牌；无则返回空串。"""
+        headers = dict(scope.get("headers", []))
+        raw = headers.get(b"authorization")
+        if raw:
+            try:
+                tok = raw.decode().removeprefix("Bearer ").strip()
+            except Exception:
+                tok = ""
+            if tok:
+                return tok
+        x = headers.get(b"x-acp-token")
+        if x:
+            try:
+                return x.decode().strip()
+            except Exception:
+                return ""
+        return ""
+
+    async def _acp_unauthorized(self, send) -> None:
+        """acp_ 令牌缺失/非法/非 acp → HTTP 200 包体 JSON-RPC error code -32000（工单 A6）。"""
+        body = json.dumps({
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {
+                "code": -32000,
+                "message": "unauthorized: /acp 需要 kind=acp 令牌（Authorization: Bearer acp_xxx "
+                           "或 x-acp-token: acp_xxx）。acp_ 令牌与 MCP af_ 身份码、WebUI JWT "
+                           "三套隔离、互不可混用；非 acp 令牌（如 af_）也不可进 /acp。",
+            },
+        }).encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    async def _acp_disabled(self, send) -> None:
+        """ACP 被 WebUI 开关关闭时，/acp 直接拒（JSON-RPC error -32099），不进入鉴权。"""
+        body = json.dumps({
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {
+                "code": -32099,
+                "message": "acp_disabled: ACP 已由 WebUI 开关关闭（将 /api/acp/enabled 置 true 可重新启用）。",
+            },
+        }).encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    async def _handle_acp(self, scope, receive, send, app) -> None:
+        """/acp 鉴权 + 转发到 Starlette 路由的 _ACPApp。OPTIONS 预检放行（补 CORS）。"""
+        if scope.get("method", "").upper() == "OPTIONS":
+            origin = self._cors_origin(scope)
+            await self._cors_preflight(send, origin)
+            return
+        origin = self._cors_origin(scope)
+
+        async def send_with_cors(msg):
+            if msg["type"] == "http.response.start":
+                msg["headers"] = self._with_cors(msg.get("headers", []), origin)
+            await send(msg)
+
+        token = self._acp_token_from_scope(scope)
+        if not token:
+            await self._acp_unauthorized(send_with_cors)
+            return
+        rec = self.acp_store.resolve_by_token(token) if self.acp_store else None
+        if rec is None:
+            await self._acp_unauthorized(send_with_cors)
+            return
+        if self.acp_store is not None:
+            self.acp_store.record_last_seen(rec["token_id"])
+        # 认证通过 → 交给 Starlette 路由的 _ACPApp 处理（JSON-RPC 分发/SSE）
+        await app(scope, receive, send_with_cors)
 
     # ── CORS 支持（浏览器端 MCP 客户端必需）────────────────────────────────
     # deepseek++ 等浏览器扩展的 MCP 客户端跨域连 http://<NAS_IP>:8000/mcp 时，
@@ -1745,6 +1895,13 @@ class AgentAuthMiddleware:
                 await app(scope, receive, send)
                 return
             path = scope.get("path", "")
+            # ── ACP 端点（独立 acp_ 令牌体系，与 /mcp 的 af_ 身份码完全隔离）──
+            if path == self.acp_path or path.startswith(self.acp_path + "/"):
+                if not is_acp_enabled(get_config()):
+                    await self._acp_disabled(send)
+                    return
+                await self._handle_acp(scope, receive, send, app)
+                return
             # 判定请求归属哪个端点（按前缀；长路径优先，避免 /mcp 与 /mcp-white /mcp-admin 混淆）
             ep = None
             if path == self.admin_path or path.startswith(self.admin_path + "/"):
@@ -1841,6 +1998,343 @@ class AgentAuthMiddleware:
         })
         await send({"type": "http.response.body", "body": body})
 
+# ───────────── ACP（Agent Client Protocol）服务端（拓扑 X peer-to-peer）─────────────
+# 与 memory-worker 对称：/acp 暴露 JSON-RPC 2.0 over HTTP+SSE。autoflow 网关无 LLM，
+# 采用确定性意图分发器（关键词→只读网关工具 + 反向 delegate）；未来若引入 LLM，仅需替换
+# _acp_agent_run 的实现，外层 SSE/会话/分发逻辑不变。会话存储为单进程内存（规格 §9，重启丢上下文可接受）。
+_ACP_SESSIONS: "dict[str, _ACPSession]" = {}
+_ACP_SESSIONS_LOCK = threading.Lock()
+_ACP_VERSION = "1.0.0"
+
+# ACP /acp 首版工具面（工单范围默认保守只读；写/变更类不进默认 ACP 工具面）。
+_ACP_TOOLS = [
+    {"name": "list_entities", "description": "列出全屋 Home Assistant 实体目录（按域/区域/关键词过滤），只读。",
+     "input_schema": {"type": "object",
+                       "properties": {"domain": {"type": "string"}, "area": {"type": "string"},
+                                      "keyword": {"type": "string"}, "limit": {"type": "integer"}}}},
+    {"name": "get_entity_state", "description": "查询单个实体的实时状态（直连 HA，只读）。",
+     "input_schema": {"type": "object", "properties": {"entity_id": {"type": "string"}}}},
+    {"name": "list_automations", "description": "列出本网关已建/待审的自动化（flow 注册表），只读。",
+     "input_schema": {"type": "object",
+                       "properties": {"keyword": {"type": "string"}, "only": {"type": "string"}}}},
+    {"name": "delegate_to_memory_worker",
+     "description": "反向委派给 memory-worker（取家庭记忆/知识检索），跨容器 HTTP。",
+     "input_schema": {"type": "object",
+                       "properties": {"task": {"type": "string"}, "context": {"type": "object"}}}},
+]
+
+
+def _acp_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _acp_new_session_id() -> str:
+    return "acp_s_" + uuid.uuid4().hex
+
+
+class _ACPSession:
+    """单条 ACP 会话（内存态）：累积 content 块 + 取消事件。"""
+
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        self.status = "running"
+        self.history: list = []          # 累积 content 块（tool_call / text）
+        self.cancel_event = None         # asyncio.Event，由 cancel 方法 set
+        self.created_at = _acp_now()
+
+    def is_cancelled(self) -> bool:
+        return bool(self.cancel_event and self.cancel_event.is_set())
+
+
+def _acp_get_or_create_session(session_id: str) -> "_ACPSession":
+    with _ACP_SESSIONS_LOCK:
+        s = _ACP_SESSIONS.get(session_id)
+        if s is None:
+            s = _ACPSession(session_id)
+            _ACP_SESSIONS[session_id] = s
+        return s
+
+
+def _acp_list_sessions() -> list:
+    with _ACP_SESSIONS_LOCK:
+        return [{"sessionId": s.session_id, "status": s.status,
+                 "created_at": s.created_at, "block_count": len(s.history)}
+                for s in _ACP_SESSIONS.values()]
+
+
+def _acp_delete_session(session_id: str) -> bool:
+    with _ACP_SESSIONS_LOCK:
+        return _ACP_SESSIONS.pop(session_id, None) is not None
+
+
+def _acp_extract_entity_id(text: str):
+    """从自然语言里抽取 domain.object 形如的实体 id（不区分大小写）。"""
+    m = re.search(r"\b([a-z_]+)\.([a-z0-9_]+)\b", text)
+    return f"{m.group(1)}.{m.group(2)}" if m else None
+
+
+def _acp_agent_run(messages, context, session: "_ACPSession") -> None:
+    """确定性意图分发（无 LLM）。把 content 块增量 append 到 session.history；
+    每个步骤前检查 session.cancel_event，取消则提前返回（保留部分结果）。
+
+    只暴露只读意图 + 反向 delegate（不发起任何写操作，确认闸对 ACP 同样生效）。"""
+    ctx = context or {}
+    # 取最后一条 user 文本
+    last_text = ""
+    for m in reversed(messages or []):
+        if isinstance(m, dict) and m.get("role") == "user":
+            c = m.get("content")
+            if isinstance(c, str):
+                last_text = c
+            elif isinstance(c, list):
+                for blk in c:
+                    if isinstance(blk, dict) and blk.get("type") == "text":
+                        last_text = blk.get("text", "")
+            if last_text:
+                break
+    text = (last_text or "").strip()
+    low = text.lower()
+
+    def _emit(tool_name: str, arguments: dict, result):
+        session.history.append({"type": "tool_call", "name": tool_name,
+                                "arguments": arguments, "result": result})
+        session.history.append({
+            "type": "text",
+            "text": (result if isinstance(result, str) else json.dumps(result, ensure_ascii=False))[:4000],
+        })
+
+    if session.is_cancelled():
+        return
+    # （测试钩子）模拟长任务以便验证 cancel：仅当 context._acp_slow_seconds 存在
+    slow = ctx.get("_acp_slow_seconds")
+    if isinstance(slow, (int, float)) and slow > 0:
+        import time as _t
+        steps = max(1, int(slow * 10))
+        for _ in range(steps):
+            if session.is_cancelled():
+                return
+            _t.sleep(0.1)
+    if not text and not ctx:
+        session.history.append({"type": "text",
+            "text": "未收到有效指令：prompt 需包含 role=user 的文本或 context。"})
+        return
+
+    # 1) 反向委派 memory-worker（意图优先：记忆/知识/检索/委派）
+    if any(k in low for k in ("memory", "记忆", "知识库", "检索", "delegate", "委派", "recall")):
+        if not is_acp_enabled(get_config()):
+            _emit("delegate_to_memory_worker", {"task": text},
+                  "ACP 已关闭（WebUI「ACP 令牌」页开关）；将 /api/acp/enabled 置 true 可重新启用。")
+            return
+        res = acp_client.delegate_to_memory_worker(text, context=ctx)
+        if not res.get("ok"):
+            _emit("delegate_to_memory_worker", {"task": text}, res.get("error", "委派失败"))
+            return
+        _emit("delegate_to_memory_worker", {"task": text}, res.get("text") or "（memory-worker 无文本返回）")
+        return
+
+    # 2) 实体状态查询
+    if ("状态" in text) or ("state" in low) or ctx.get("entity_id"):
+        eid = ctx.get("entity_id") or _acp_extract_entity_id(text)
+        if eid:
+            _emit("get_entity_state", {"entity_id": eid}, autoflow_get_entity_state(eid))
+            return
+        # 没解析到 entity_id：兜底给实体目录，避免空响应
+        _emit("list_entities", {"limit": 20, "keyword": text}, autoflow_list_entities(limit=20))
+
+    # 3) 自动化 / 子流程查询
+    elif ("自动化" in text) or ("子流程" in text) or ("automation" in low) or ("flow" in low):
+        _emit("list_automations", {"keyword": ctx.get("keyword", ""), "only": ctx.get("only", "all")},
+              autoflow_list_automations(keyword=ctx.get("keyword", ""), only=ctx.get("only", "all")))
+
+    # 4) 默认：列出全屋实体目录（或关键词过滤）
+    else:
+        kw = ctx.get("keyword", "") or text
+        _emit("list_entities",
+              {"domain": ctx.get("domain", ""), "area": ctx.get("area", ""), "keyword": kw,
+               "limit": ctx.get("limit", 20)},
+              autoflow_list_entities(domain=ctx.get("domain", ""), area=ctx.get("area", ""),
+                                     keyword=kw, limit=ctx.get("limit", 20)))
+
+
+async def _acp_read_body(receive) -> bytes:
+    parts = []
+    while True:
+        evt = await receive()
+        if evt.get("type") == "http.request":
+            parts.append(evt.get("body") or b"")
+            if not evt.get("more_body", False):
+                break
+        elif evt.get("type") == "http.disconnect":
+            break
+    return b"".join(parts)
+
+
+async def _acp_json_response(send, obj: dict) -> None:
+    body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+    await send({"type": "http.response.start", "status": 200,
+                "headers": [(b"content-type", b"application/json"),
+                            (b"content-length", str(len(body)).encode())]})
+    await send({"type": "http.response.body", "body": body})
+
+
+async def _acp_json_error(send, req_id, code: int, message: str) -> None:
+    await _acp_json_response(send, {"jsonrpc": "2.0", "id": req_id,
+                                    "error": {"code": code, "message": message}})
+
+
+def _acp_result_initialize(req: dict) -> dict:
+    return {"jsonrpc": "2.0", "id": req.get("id"),
+            "result": {
+                "agent": {"name": "AutoFlow Gateway", "version": _ACP_VERSION,
+                          "role": "home-automation-gateway"},
+                "capabilities": {"streaming": True, "sessions": True, "tools": True},
+                "tools": _ACP_TOOLS,
+            }}
+
+
+def _acp_handle_cancel(req: dict) -> dict:
+    sid = (req.get("params") or {}).get("sessionId")
+    with _ACP_SESSIONS_LOCK:
+        s = _ACP_SESSIONS.get(sid)
+    if s is None:
+        return {"jsonrpc": "2.0", "id": req.get("id"),
+                "error": {"code": -32001, "message": f"session not found: {sid}"}}
+    if s.cancel_event:
+        s.cancel_event.set()  # 置位；正在跑的 prompt 循环检测到后下发 aborted
+    return {"jsonrpc": "2.0", "id": req.get("id"), "result": {"cancelled": True, "sessionId": sid}}
+
+
+def _acp_handle_session(method: str, req: dict) -> dict:
+    req_id = req.get("id")
+    sub = method.split(".", 1)[1] if "." in method else ""
+    params = req.get("params") or {}
+    if sub == "new":
+        sid = _acp_new_session_id()
+        _acp_get_or_create_session(sid)
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"sessionId": sid}}
+    if sub == "list":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"sessions": _acp_list_sessions()}}
+    if sub == "history":
+        sid = params.get("sessionId")
+        s = _ACP_SESSIONS.get(sid)
+        if s is None:
+            return {"jsonrpc": "2.0", "id": req_id,
+                    "error": {"code": -32001, "message": f"session not found: {sid}"}}
+        return {"jsonrpc": "2.0", "id": req_id,
+                "result": {"sessionId": sid, "status": s.status, "content": s.history}}
+    if sub == "delete":
+        return {"jsonrpc": "2.0", "id": req_id,
+                "result": {"deleted": _acp_delete_session(params.get("sessionId")),
+                           "sessionId": params.get("sessionId")}}
+    return {"jsonrpc": "2.0", "id": req_id,
+            "error": {"code": -32601, "message": f"unknown session method: {method}"}}
+
+
+async def _acp_write_frame(send, session_id: str, status: str, content: list, more: bool = False) -> None:
+    notif = {"jsonrpc": "2.0", "method": "session_update",
+             "params": {"sessionId": session_id, "status": status, "content": content}}
+    body = f"event: message\ndata: {json.dumps(notif, ensure_ascii=False)}\n\n".encode("utf-8")
+    await send({"type": "http.response.body", "body": body, "more_body": more})
+
+
+class _ACPApp:
+    """Starlette Route 端点：GET 返回服务说明（非 JSON-RPC、探活）；
+    POST 解析 JSON-RPC 2.0 并分发 initialize/prompt(SSE)/cancel/session.*。"""
+
+    def __init__(self, acp_store: "AcpTokenStore", cfg):
+        self.acp_store = acp_store
+        self.cfg = cfg
+
+    async def __call__(self, scope, receive, send):
+        method = scope.get("method", "GET").upper()
+        if method == "GET":
+            await self._service_desc(send)
+            return
+        if method != "POST":
+            await _acp_json_error(send, None, -32600, f"unsupported method {method}")
+            return
+        body = await _acp_read_body(receive)
+        try:
+            req = json.loads(body)
+        except Exception:
+            await _acp_json_error(send, None, -32700, "parse error")
+            return
+        if not isinstance(req, dict) or "method" not in req:
+            await _acp_json_error(send, req.get("id") if isinstance(req, dict) else None,
+                                  -32600, "invalid request")
+            return
+        m = req.get("method")
+        if m == "initialize":
+            await _acp_json_response(send, _acp_result_initialize(req))
+        elif m == "prompt":
+            await self._handle_prompt(req, send)
+        elif m == "cancel":
+            await _acp_json_response(send, _acp_handle_cancel(req))
+        elif isinstance(m, str) and m.startswith("session."):
+            await _acp_json_response(send, _acp_handle_session(m, req))
+        else:
+            await _acp_json_error(send, req.get("id"), -32601, f"method not found: {m}")
+
+    async def _service_desc(self, send) -> None:
+        desc = {
+            "name": "AutoFlow Gateway ACP Endpoint",
+            "protocol": "Agent Client Protocol (JSON-RPC 2.0 over HTTP+SSE)",
+            "version": _ACP_VERSION,
+            "auth": "kind=acp Bearer token (Authorization: Bearer acp_xxx 或 x-acp-token: acp_xxx)",
+            "methods": ["initialize", "prompt", "cancel",
+                        "session.new", "session.list", "session.history", "session.delete"],
+            "note": "POST JSON-RPC 到本端点；GET 仅用于探活。",
+        }
+        body = json.dumps(desc, ensure_ascii=False).encode("utf-8")
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"content-length", str(len(body)).encode())]})
+        await send({"type": "http.response.body", "body": body})
+
+    async def _handle_prompt(self, req: dict, send) -> None:
+        params = req.get("params")
+        if params is None:
+            params = {}
+        # 规格 §6：参数结构不合法 → -32602（先于开流校验，避免半截 SSE）
+        if not isinstance(params, dict):
+            await _acp_json_error(send, req.get("id"), -32602, "params must be an object")
+            return
+        msgs = params.get("messages")
+        if msgs is not None and not isinstance(msgs, list):
+            await _acp_json_error(send, req.get("id"), -32602, "params.messages must be an array")
+            return
+        sid_in = params.get("sessionId")
+        if sid_in is not None and not isinstance(sid_in, str):
+            await _acp_json_error(send, req.get("id"), -32602, "params.sessionId must be a string")
+            return
+        session_id = sid_in or _acp_new_session_id()
+        session = _acp_get_or_create_session(session_id)
+        session.cancel_event = asyncio.Event()
+        session.status = "running"
+        # 开启 SSE 流（先发 start，再发帧；完成帧 more_body=False）
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"text/event-stream"),
+                                (b"cache-control", b"no-cache"),
+                                (b"connection", b"keep-alive")]})
+        await _acp_write_frame(send, session_id, "running", [])
+        try:
+            # 在 worker 线程跑确定性分发器，使事件循环保持空闲以处理并发的 cancel 请求
+            await asyncio.to_thread(_acp_agent_run, params.get("messages", []),
+                                    params.get("context"), session)
+        except Exception as e:  # 分发器异常 → 下发 error 帧（仍结束流，不发额外 result）
+            session.status = "error"
+            await _acp_write_frame(send, session_id, "error",
+                                   [{"type": "text", "text": f"ACP 处理异常: {e}"}], more=False)
+            return
+        if session.is_cancelled():
+            session.status = "aborted"
+            await _acp_write_frame(send, session_id, "aborted", session.history, more=False)
+        else:
+            session.status = "completed"
+            # 流末 completed 即结束（不再单独发 JSON-RPC result，满足工单 A3）
+            await _acp_write_frame(send, session_id, "completed", session.history, more=False)
+
+
 def get_current_agent_var():
     # 延迟取 identity.current_agent，避免循环导入风险
     from .identity import current_agent
@@ -1926,6 +2420,7 @@ def build_app(cfg=None, with_webui: bool = True, gateway: Gateway = None):
     sm_white = StreamableHTTPSessionManager(app=mcp._mcp_server, json_response=True)
     sm_admin = StreamableHTTPSessionManager(app=mcp_admin._mcp_server, json_response=True)
     store = AgentStore(cfg)
+    acp_store = AcpTokenStore(cfg)
     webui = build_webui_asgi(cfg, gateway=gateway) if with_webui else None
 
     # 关键：用 Route 而非 Mount。Mount 会剥离 path 前缀导致 session manager 收到空 path → 404；
@@ -2010,12 +2505,15 @@ def build_app(cfg=None, with_webui: bool = True, gateway: Gateway = None):
         Route(cfg.mcp_path, endpoint=_MCPApp(sm_user, filter_tools=True)),
         Route(cfg.mcp_white_path, endpoint=_MCPApp(sm_white, filter_tools=True)),
         Route(cfg.mcp_admin_path, endpoint=_MCPApp(sm_admin)),
+        # ACP 端点：独立 acp_ 令牌体系（与 /mcp 的 af_ 身份码隔离），由中间件单独鉴权
+        Route(cfg.acp_path, endpoint=_ACPApp(acp_store, cfg)),
     ]
     if webui is not None:
         routes.append(Mount("/", app=webui))
     starlette_app = Starlette(lifespan=lifespan, routes=routes)
 
-    auth = AgentAuthMiddleware(cfg.mcp_path, cfg.mcp_white_path, cfg.mcp_admin_path, store)
+    auth = AgentAuthMiddleware(cfg.mcp_path, cfg.mcp_white_path, cfg.mcp_admin_path, store,
+                               acp_path=cfg.acp_path, acp_store=acp_store)
     return auth.wrap(starlette_app)
 
 def main():

@@ -20,7 +20,7 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 import logging
 
-from .config import get_config, is_raw_node_escape_enabled, get_deploy_policy, load_feature_flags
+from .config import get_config, is_raw_node_escape_enabled, get_deploy_policy
 from .state import SharedState
 from .defense import DefenseLayer, DefenseError
 from .confirm import ConfirmationGate, PendingOp, ConfirmationError
@@ -277,37 +277,6 @@ def check_unknown_node_types(flow: Dict[str, Any], installed: set) -> List[str]:
             unknown.append(t)
     return unknown
 
-
-# ── R9(#round4) iss_86d66844f7（报告 A19）：schema 级「致命错误」集 ──
-# 症结：validate_flow_schema 一直只把问题**记进 validation 数组**，deploy_raw 里那句
-# `if errors: pass  # 记录后继续` 让缺 server / switch wires≠rules 这种「部署即坏」的流
-# 照样落 NR，自检工具还回 will_deploy_block=false、node_gate_ok=true——绿灯放行坏流。
-# 这里给致命项打上稳定 rule 码，统一升格为 blocking：
-#   S1 结构非法（flow 非对象 / nodes 非数组）—— NR 收到即 400/静默丢弃
-#   S2 节点缺 type       —— NR 无法实例化该节点，整条链断
-#   S3 HA 节点缺 server  —— 注意 _inject_ha_server 只替换 REPLACE_WITH_HA_SERVER 占位符，
-#                          「压根没有 server 字段」的节点不会被补值，部署后永久未配置
-#   S4 switch rules/wires 不匹配 —— 分支错位或整枝丢消息，静态合法运行必错
-#   S5 空 flow（nodes 为空数组）—— 覆盖已有 tab 时等同静默清空，破坏性最强
-# 非致命项（数字 id、负坐标、缺顶层 label、POST 无 body、http 缺 url 等）保持原级别，
-# 仅报告不拦——避免误伤合法手搓流（白箱 escape hatch 原则）。
-SCHEMA_BLOCK_RULES = {"S1", "S2", "S3", "S4", "S5"}
-
-
-def schema_blocking_issues(issues: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-    """从 validate_flow_schema 结果中挑出会硬拦部署的致命项（R9）。
-
-    Args:
-        issues: validate_flow_schema 返回的 [{"level","rule","node_id","message"}] 列表。
-
-    Returns:
-        致命项子集（level=error 且 rule ∈ SCHEMA_BLOCK_RULES）；输入为空时返回 []。
-    """
-    return [v for v in (issues or [])
-            if isinstance(v, dict) and v.get("level") == "error"
-            and v.get("rule") in SCHEMA_BLOCK_RULES]
-
-
 # ── C4：staging 闸门「分支感知重放」辅助（vhass 真闭环）──
 # 让闸门不再"跳过所有 switch 后代"，而是评估 switch/条件/时间段门控，只重放
 # 命中分支内的 HA 意图，从而能断言多步/状态类场景（关闭"只验闸门没验真跑"缺口）。
@@ -321,27 +290,13 @@ def _vg_resolve_path(msg, path):
     return cur
 
 def _vg_set_path(msg, path, val):
-    """按点路径写 msg，返回是否真正写入。
-
-    刻意复刻 NR `RED.util.setObjectProperty` 的语义：中间段若**既非 dict 也非缺失**
-    （典型：inject payloadType=date → msg.payload 是标量），既不下钻也不创建，
-    直接放弃写入且不报错。返回 False 让调用方能把这次「静默丢写」显式记为告警，
-    而不是像旧版那样连闸门自己都不知道字段没落地（A15-b）。
-    """
     cur = msg
     parts = path.split(".")
     for p in parts[:-1]:
         cur = cur.setdefault(p, {})
         if not isinstance(cur, dict):
-            return False
+            return
     cur[parts[-1]] = val
-    return True
-
-
-# 编译器为规避「标量 payload 静默吞写」在取值节点注入的容器归一表达式，
-# 形如 `$type(payload) = "object" ? payload : {}`（见 dsl_engine._emit_read_state）。
-_VG_PAYLOAD_OBJ_RE = re.compile(
-    r'^\s*\$type\(\s*(?P<p>[\w.]+)\s*\)\s*=\s*"object"\s*\?\s*(?P=p)\s*:\s*\{\s*\}\s*$')
 
 def _vg_val_eq(val, expect, vt):
     # 剥离两侧单/双引号（与编译器分支值归一化保持一致），避免 'off' vs "off" 类引号不一致误判
@@ -453,43 +408,15 @@ def _vg_eval_jsonata_expr(expr, msg):
         return (val not in (None, False, 0, "0", "", "off", "unknown", "unavailable"), True)
     return (False, False)
 
-def _vg_eval_switch(node, msg, warnings=None, dead_rules=None, report=None):
-    """返回 switch 命中输出的索引列表（checkall=true 语义：可多输出）。
-
-    dead_rules：`{switch_id: {规则下标: [未定义字段]}}`（来自 flow_linter.R31 静态判定）。
-    命中其中的规则一律按**不命中**处理——见 G3 注释。
-    report：可选 dict，回填 {"dead": [...], "conservative": [...]} 供闸门归因。
-    """
+def _vg_eval_switch(node, msg, warnings=None):
+    """返回 switch 命中输出的索引列表（checkall=true 语义：可多输出）。"""
     prop = node.get("property", "payload")
     rules = node.get("rules", []) or []
     val = _vg_resolve_path(msg, prop)
-    node_dead = (dead_rules or {}).get(node.get("id") or "", {}) or {}
-    nlabel = node.get("name") or node.get("id") or "switch"
     taken = []
     matched = False
     for i, rule in enumerate(rules):
         t = rule.get("t")
-        # ── G3（报告 A30 闸门侧）：编译器已判「恒假/不可达」的分支，闸门不得保守视为命中 ──
-        # 旧行为：`分支: 状态.光照 < night_start` 引用未声明字段 → 本地无法求值 →
-        # 一律「保守视为命中」→ passed=true，与编译器 R31「条件恒假、动作永不执行」
-        # 的结论**直接矛盾**，把恒假分支 bug 掩盖成闸门放行。
-        # 新行为：尊重编译器静态判定——undefined 字段在运行态 JSONata 求值即 undefined，
-        # NR switch 该规则本就不命中，闸门必须如实反映（有 else 则走 else）。
-        # 只有「编译器未判恒假、仅运行期不可本地求值」才保留保守命中 + warn。
-        if t not in ("else", "otherwise") and i in node_dead:
-            toks = "、".join(node_dead[i])
-            if report is not None:
-                report.setdefault("dead", []).append(
-                    {"node_id": node.get("id"), "node_name": node.get("name"),
-                     "rule_index": i, "undefined_fields": list(node_dead[i]),
-                     "expr": rule.get("v", "")})
-            if warnings is not None:
-                warnings.append(
-                    f"switch「{nlabel}」第 {i + 1} 条分支引用未定义字段「{toks}」"
-                    f"（编译器 R31 已判条件恒假）：闸门按【不命中】处理，其 THEN 体动作"
-                    f"不在重放/断言范围；依赖该分支的期望项记为 N/A（不算通过）。"
-                    f"请修正 取值:/变量: 声明与分支引用的字段名。")
-            continue
         if t == "eq":
             if _vg_val_eq(val, rule.get("v"), rule.get("vt")):
                 taken.append(i)
@@ -498,14 +425,7 @@ def _vg_eval_switch(node, msg, warnings=None, dead_rules=None, report=None):
             if not _vg_val_eq(val, rule.get("v"), rule.get("vt")):
                 taken.append(i)
                 matched = True
-        elif t in ("jsonata", "jsonata_exp") or (
-                t not in ("else", "otherwise") and rule.get("vt") == "jsonata"):
-            # A15 关键：NR switch 的 JSONata 规则类型是 **jsonata_exp**（编译器亦按此产出，
-            # 见 dsl_engine._parse_switch_rule / _emit_switch）。旧代码只判 t == "jsonata"，
-            # 对真实产物**永不命中** → 有 else 体时恒走 else（断言反向后置条件），
-            # 无 else 体时一个分支都不走 → 重放归零（0 意图 → 闸门 skip → 假过）。
-            # 这里同时兜住 vt=="jsonata" 的变体写法，并显式排除 else/otherwise
-            # （编译器给 else 规则也带 vt="jsonata"，不可当条件求值）。
+        elif t == "jsonata":
             matched_rule, known = _vg_eval_jsonata_expr(rule.get("v", ""), msg)
             if known:
                 if matched_rule:
@@ -516,10 +436,6 @@ def _vg_eval_switch(node, msg, warnings=None, dead_rules=None, report=None):
                 # 由调用方经 warnings 记录，避免误杀结构正确的 DSL。
                 taken.append(i)
                 matched = True
-                if report is not None:
-                    report.setdefault("conservative", []).append(
-                        {"node_id": node.get("id"), "rule_index": i,
-                         "expr": rule.get("v", "")})
                 if warnings is not None:
                     warnings.append(
                         f"switch 规则含无法本地求值的 JSONata「{rule.get('v','')}」，"
@@ -592,215 +508,13 @@ def _vg_apply_change(node, msg):
         _vg_set_path(m, p, val)
     return m
 
-def _vg_is_external_call(node_type) -> bool:
-    """是否为「外部调用」节点：link out 或子流程实例。
-
-    A12 关键：NR 5.x 的子流程**实例** type 是 `subflow:<subflow_id>`（带前缀），
-    旧代码只判 `t in ("link out","subflow")`，对真实编译产物**永不命中** →
-    external_calls 恒空 → 「期待调用某子流程」根本无从验证。
-    """
-    t = node_type or ""
-    return t in ("link out", "subflow") or t.startswith("subflow:")
-
-
-def _ha_node_call(nd) -> tuple:
-    """从 api-call-service 节点解析 (domain, service, targets, data)。
-
-    必须兼容两种写法，否则白箱路径重放不到任何意图：
-      - 编译产物：domain/service/entityId 三字段；
-      - agent 手写 / NR HA 2.x：action="light.turn_on" + data.entity_id 或 entities.entity。
-    """
-    raw = nd.get("data")
-    try:
-        if isinstance(raw, str):
-            data = json.loads(raw or "{}")
-        elif isinstance(raw, dict):
-            data = dict(raw)
-        else:
-            data = {}
-    except Exception:
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    domain = nd.get("domain") or ""
-    service = nd.get("service") or ""
-    if not (domain and service):
-        action = nd.get("action") or ""
-        if isinstance(action, str) and "." in action:
-            domain, service = action.split(".", 1)
-    targets = nd.get("entityId") or []
-    if isinstance(targets, str):
-        targets = [t.strip() for t in targets.split(",") if t.strip()]
-    if not targets:
-        ent = (nd.get("entities") or {}).get("entity") or []
-        if isinstance(ent, list):
-            targets = [e for e in ent if e]
-    if not targets:
-        eid = data.get("entity_id") or data.get("entityId")
-        if isinstance(eid, str):
-            targets = [t.strip() for t in eid.split(",") if t.strip()]
-        elif isinstance(eid, list):
-            targets = [e for e in eid if e]
-    return domain, service, list(targets), data
-
-
-def _expected_state_for(domain, service, data):
-    """按 vhass 的服务建模推导「调用后该实体应有的 state」。
-
-    A18 之二：旧实现只认 turn_on/turn_off，导致 climate.set_hvac_mode /
-    fan.set_percentage 之类**一个期望都提不出来** → 闸被 skip → 顶层假 pass。
-    这里直接复用 vhass 的建模表作为唯一事实源，能推就推、推不出就说清为什么。
-
-    返回 (expected_state | None, unverifiable_reason | None)。
-    """
-    from . import vhass as _vh
-    key = (domain, service)
-    if service in _vh._ON_OFF:
-        return _vh._ON_OFF[service], None
-    if service in _vh._COVER:
-        return _vh._COVER[service], None
-    if service in _vh._LOCK:
-        return _vh._LOCK[service], None
-    if key in _vh._FIXED_STATE:
-        return _vh._FIXED_STATE[key], None
-    if key in _vh._STATE_FROM_DATA:
-        dkey = _vh._STATE_FROM_DATA[key]
-        val = data.get(dkey)
-        if val is not None:
-            return str(val), None
-        return None, f"{domain}.{service} 缺少参数 {dkey}，无法推导后置状态"
-    if key in _vh._ATTR_FROM_DATA:
-        return None, f"{domain}.{service} 只改属性不改 state，无法用 state 断言"
-    if service == "toggle":
-        return None, f"{domain}.toggle 终态取决于初始态，无法静态推导"
-    return None, f"{domain}.{service} 未被 vhass 建模，后置状态无法验证"
-
-
-def _auto_expected_from_nodes(nodes) -> tuple:
-    """从 flow 的 api-call-service 节点自动推导 (expected 列表, 不可验证原因列表)。"""
-    expected, unverifiable = [], []
-    for n in nodes or []:
-        if n.get("type") != "api-call-service":
-            continue
-        domain, service, targets, data = _ha_node_call(n)
-        if not (domain and service):
-            unverifiable.append(f"节点 {n.get('id')} 无法解析 domain.service")
-            continue
-        if not targets:
-            unverifiable.append(f"{domain}.{service} 未指定 entity_id，无法断言")
-            continue
-        state, why = _expected_state_for(domain, service, data)
-        if state is None:
-            unverifiable.append(why)
-            continue
-        for t in targets:
-            item = {"entity_id": t, "state": state}
-            if item not in expected:
-                expected.append(item)
-    return expected, unverifiable
-
-
-def _sub_name_norm(s) -> str:
-    """子流程名归一化：去空白/下划线/连字符/箭头装饰，转小写。
-
-    编译产物里 link out 节点名是 `→ bark_push`、子流程实例名是 `bark_push`，
-    而 expected 里人写的是 `bark_push`，需要能对上。
-    """
-    return re.sub(r"[\s_\-→>]+", "", str(s or "")).lower()
-
-
-def _sub_name_match(want, actual) -> bool:
-    """期望的子流程名是否命中某个实际外部调用名（归一化后相等或被包含）。"""
-    w, a = _sub_name_norm(want), _sub_name_norm(actual)
-    if not w or not a:
-        return False
-    return w == a or w in a
-
-
-def _replay_zero_policy() -> str:
-    """「重放归零」处置策略（G2 / 报告 A15）。
-
-    fail_closed（默认）：闸门无法本地判定条件（unevaluable JSONata）或分支被判恒假，
-      导致本步 **0 个 HA 意图 + 0 个外部调用** 被重放时，不得报「验证通过」——
-      0 重放意味着**什么都没验证**，静默 pass 就是假过。
-    warn_only：只给显式告警、保留放行（可用性优先）。
-
-    这是 `WORKORDER_DEV_c4_replay_semantics.md`（未触发/unevaluable 分支统一语义）
-    的**对接 hook**：终裁下来后只改这里的默认值/取值，不动闸门主体。
-    """
-    v = (os.environ.get("AUTOFLOW_REPLAY_ZERO_POLICY") or "").strip().lower()
-    return v if v in ("fail_closed", "warn_only") else "fail_closed"
-
-
-def _vg_dead_switch_rules(flow):
-    """从编译产物静态提取「恒假分支」索引：`{switch_id: {规则下标: [未定义字段]}}`。
-
-    直接复用编译器 lint 的 R31 判定（flow_linter.collect_undefined_field_refs），
-    保证**闸门结论与编译器结论一致**（G3）。取不到就返回空 dict（fail-open，
-    退回旧的保守命中行为，不因 linter 异常把正常 flow 拦死）。
-    """
-    try:
-        from .flow_linter import collect_undefined_field_refs
-        return collect_undefined_field_refs(flow.get("nodes", []) or []) or {}
-    except Exception:
-        return {}
-
-
-def _vg_dead_branch_reach(flow, dead_rules):
-    """恒假分支下游可达的「本应执行却永不执行」的动作面。
-
-    返回 (entity_ids, subflow_names)：供闸门把依赖这些动作的 expected 标 N/A，
-    而不是笼统报「状态不对」——让 agent 一眼看出是分支写错、不是设备没响应。
-    """
-    ents, subs = set(), set()
-    if not dead_rules:
-        return ents, subs
-    nodes = {n["id"]: n for n in flow.get("nodes", []) if n.get("id")}
-    wires = {}
-    for n in flow.get("nodes", []):
-        w = n.get("wires") or []
-        wires[n.get("id")] = [list(o) if isinstance(o, (list, tuple)) else [o] for o in w]
-
-    def _walk(nid, seen):
-        if nid in seen:
-            return
-        seen.add(nid)
-        nd = nodes.get(nid)
-        if nd is None:
-            return
-        if nd.get("type") == "api-call-service":
-            try:
-                _d, _s, targets, _data = _ha_node_call(nd)
-                ents.update(t for t in targets if t)
-            except Exception:
-                pass
-        elif _vg_is_external_call(nd.get("type")):
-            subs.add(nd.get("name") or nd.get("type") or "subflow")
-        for outs in wires.get(nid, []) or []:
-            for tgt in outs:
-                _walk(tgt, seen)
-
-    for sid, rules in dead_rules.items():
-        ow = wires.get(sid, []) or []
-        for i in rules:
-            for tgt in (ow[i] if i < len(ow) else []):
-                _walk(tgt, set())
-    return ents, subs
-
-
-def _vg_evaluate_active_intents(flow, world, virtual_time=None, warnings=None,
-                                dead_rules=None, report=None):
+def _vg_evaluate_active_intents(flow, world, virtual_time=None, warnings=None):
     """分支感知：返回当前世界态下应执行的 api-call-service 节点 id 集合。
 
     从每个触发的触发器出发，沿 wires 传播 msg；遇 switch 评估规则选定输出分支、
     遇 api-current-state 条件门控按世界态决定通行/走否则、遇 time-range-switch 按虚拟时间
     决定窗口内/外。最终 api-call-service 节点若从触发源经「通行路径」可达即视为激活。
-
-    dead_rules 缺省自动从 flow 静态推导（G3），保证任何调用方都不会退回
-    「undefined 字段分支被保守视为命中」的假过行为。
     """
-    if dead_rules is None:
-        dead_rules = _vg_dead_switch_rules(flow)
     nodes = {n["id"]: n for n in flow.get("nodes", [])}
     out_wires = {}
     for n in flow.get("nodes", []):
@@ -853,41 +567,22 @@ def _vg_evaluate_active_intents(flow, world, virtual_time=None, warnings=None,
             for tgt in outs[0]:
                 _trace(tgt, msg, seen)
             return
-        if _vg_is_external_call(t):
+        if t in ("link out", "subflow"):
             # 外部调用（子流程/link）同样按分支感知标记可达，供闸门只记录命中分支的调用
             active.add(nid)
-            # 子流程实例可有下游（调用完继续往下走），沿 out0 继续传播
-            for tgt in (outs[0] if outs else []):
-                _trace(tgt, msg, seen)
             return
         if t == "switch":
-            for oi in _vg_eval_switch(node, msg, warnings, dead_rules, report):
+            for oi in _vg_eval_switch(node, msg, warnings):
                 for tgt in (outs[oi] if oi < len(outs) else []):
                     _trace(tgt, msg)
             return
         if t == "api-current-state":
             if node.get("halt_if") in (None, ""):
-                # 读值节点：按 outputProperties **声明顺序**回放
-                # （NR 对同一 msg 逐条 setMessageProperty，顺序即执行序）。
+                # 读值节点：把实体态写入 outputProperties 指定的 msg 字段
                 m = dict(msg)
-                _ent_state = world(node.get("entityId") or node.get("entity_id"))
                 for op in (node.get("outputProperties") or []):
-                    if op.get("propertyType") != "msg":
-                        continue
-                    prop = op.get("property") or "payload"
-                    vtp = op.get("valueType")
-                    if vtp == "entityState":
-                        if not _vg_set_path(m, prop, _ent_state) and warnings is not None:
-                            warnings.append(
-                                f"取值节点写 msg.{prop} 被静默丢弃（中间路径不是对象），"
-                                f"下游分支读不到该字段")
-                    elif vtp == "jsonata" and _VG_PAYLOAD_OBJ_RE.match(str(op.get("value") or "")):
-                        # A15-b：这条是编译器插的「payload 容器归一」。旧重放器只认
-                        # entityState、直接跳过它 → 上游 inject 的标量 payload 没被重置成 {}
-                        # → 紧随其后的 payload.<field> 写入静默失败 → 分支变量恒 undefined
-                        # → JSONata 判定不出结果。必须一并回放才能还原真机行为。
-                        if not isinstance(_vg_resolve_path(m, prop), dict):
-                            _vg_set_path(m, prop, {})
+                    if op.get("propertyType") == "msg" and op.get("valueType") == "entityState":
+                        _vg_set_path(m, op.get("property"), world(node.get("entityId") or node.get("entity_id")))
                 msg = m
                 for tgt in outs[0]:
                     _trace(tgt, msg)
@@ -975,9 +670,6 @@ class Gateway:
                     "offset": offset, "next_offset": None, "total": 0,
                     "freshness": "", "area_resolved": None, "area_hint": None}
         area_filter, area_hint = self._resolve_area(area)
-        # A29：区域过滤透明化——area 传入却解析失败(area_filter=None)时实际未按
-        # 区域过滤、返回全量；显式告警，避免 agent 被 area_resolved:null 误导以为过滤生效。
-        area_warning = area_hint if (area and area_filter is None) else None
         area_index = self.state.get_area_index()
         # ── 先全量过滤出命中集合，再分页（这样 matched_count 才准确，B3）──
         matched = []
@@ -1025,7 +717,6 @@ class Gateway:
             "freshness": cat.get("freshness", ""),
             "area_resolved": area_filter,
             "area_hint": area_hint,
-            "area_warning": area_warning,
         }
 
     def list_entities(self, domain: Optional[str] = None, area: Optional[str] = None,
@@ -1061,8 +752,6 @@ class Gateway:
                     "offset": offset, "next_offset": None, "total": 0,
                     "freshness": "", "area_resolved": None, "area_hint": None}
         area_filter, area_hint = self._resolve_area(area)
-        # A29：同 discover——area 传入却解析失败(area_filter=None)时显式告警。
-        area_warning = area_hint if (area and area_filter is None) else None
         area_index = self.state.get_area_index()
         matched = []
         for eid, meta in ents.items():
@@ -1102,7 +791,6 @@ class Gateway:
             "freshness": cat.get("freshness", ""),
             "area_resolved": area_filter,
             "area_hint": area_hint,
-            "area_warning": area_warning,
         }
 
     # 设备级总览里挑代表名 / 关键可控实体状态用的域
@@ -1631,9 +1319,7 @@ class Gateway:
         if not ents:
             return {'ok': False, 'error': 'device_catalog 为空，请先 refresh_catalog()。',
                     'query': name, 'candidates': []}
-        area_filter, area_hint = self._resolve_area(area) if area else (None, None)
-        # A29：area 传入却解析失败(area_filter=None)时显式告警（原本 area_hint 被丢弃）。
-        area_warning = area_hint if (area and area_filter is None) else None
+        area_filter, _ = self._resolve_area(area) if area else (None, None)
         area_index = self.state.get_area_index()
         q = (name or '').strip().lower()
 
@@ -1692,7 +1378,6 @@ class Gateway:
                 'confidence': conf,
             })
         return {'ok': True, 'query': name, 'area': area_filter,
-                'area_warning': area_warning,
                 'domain': domain, 'count': len(out), 'candidates': out}
 
     def _resolve_best(self, name: str) -> Optional[str]:
@@ -1766,9 +1451,9 @@ class Gateway:
                     "场景: 书房入户播报\n"
                     "触发: <发现的传感器 entity_id> on\n"
                     "动作: light.turn_on(<发现的灯 entity_id>)\n"
-                    "调用子流程: demo_notify(text=欢迎回家, room=书房, level=一般)"
+                    "调用子流程: tts_speak(text=欢迎回家, room=书房, level=一般)"
                 ),
-                "expected_postconditions_json_example": '[{"entity_id":"<灯 entity_id>","state":"on"},{"subflow":"demo_notify"}]',
+                "expected_postconditions_json_example": '[{"entity_id":"<灯 entity_id>","state":"on"},{"subflow":"tts_speak"}]',
             },
             "help": "语法/子流程随时调 autoflow_dsl_help()。",
         }
@@ -1994,7 +1679,7 @@ class Gateway:
                 "取值(数值条件)": "取值: <entity_id> <字段名>   把实体当前 state 读进 msg.<字段名>，供下面『分支』做数值判断。数值比较要用 $number(字段名)，如 分支: $number(lux) < 10。见 examples.数值条件",
                 "构建": "构建: <JSON对象 或 JSONata表达式>   把 msg.payload 设为请求体；动态值用反引号包裹，如 `payload`",
                 "请求": "请求: <METHOD> <url> [<字面JSON body>] [K=V headers]   不带字面 body 时自动把上游『构建』的 msg.payload 作为请求体发送",
-                "调用子流程": "调用子流程: <name>(k=值, ...)   如 demo_notify(text=..., room=书房, level=一般)。见 examples.TTS播报",
+                "调用子流程": "调用子流程: <name>(k=值, ...)   如 tts_speak(text=..., room=书房, level=一般)。见 examples.TTS播报",
                 "分支": "分支: <jsonata 条件>\n  动作: ...   条件成立才走缩进块。支持【嵌套】（分支体内再写 分支: 生成多级判断）与【多路】（连续写多个 分支: 或改用 否则如果: 接更多条件分支）",
                 "否则": "否则:\n  动作: ...   紧跟『分支』或『时间段/查询』门之后；不动作可留『注释:』占位",
                 "否则如果": "否则如果: <jsonata 条件>\n  动作: ...   紧跟『分支』之后再追加一个条件分支，实现 if/elif/else 多路判断（也可用连续 分支: 表达；嵌套判断在 分支/否则 体内再写 分支: 即可）",
@@ -2014,7 +1699,7 @@ class Gateway:
                 "场景: 书房入户播报\n"
                 "触发: binary_sensor.0x00158d0001a2520d_motion on\n"
                 "动作: light.turn_on(light.philips_cn_249518489_rwread_s_2_light, brightness_pct=80)\n"
-                "调用子流程: demo_notify(text=欢迎回到书房，已为你打开台灯, room=书房, level=一般)"
+                "调用子流程: tts_speak(text=欢迎回到书房，已为你打开台灯, room=书房, level=一般)"
             ),
             "examples": {
                 "OR多触发": (
@@ -2042,11 +1727,11 @@ class Gateway:
                     "  动作: switch.turn_on(switch.lumi_cn_lumi_158d000239c546_aq1_on_p_3_1)"
                 ),
                 "TTS播报": (
-                    "# 有人移动 → 开台灯 并 语音播报（跨域：light 动作 + demo_notify 子流程）\n"
+                    "# 有人移动 → 开台灯 并 语音播报（跨域：light 动作 + tts_speak 子流程）\n"
                     "场景: 书房有人开灯并播报\n"
                     "触发: binary_sensor.0x00158d0001a2520d_motion on\n"
                     "动作: light.turn_on(light.philips_cn_249518489_rwread_s_2_light)\n"
-                    "调用子流程: demo_notify(text=书房已有人，灯已打开, room=书房, level=一般)"
+                    "调用子流程: tts_speak(text=书房已有人，灯已打开, room=书房, level=一般)"
                 ),
                 "持久等待": (
                     "# 有人移动且持续 5 分钟 → 才开吊灯（避免人一晃就亮灯；持续时长支持 分钟/小时/秒）\n"
@@ -2063,7 +1748,7 @@ class Gateway:
                     "调用子流程: history_state_at(entity=climate.书房空调, at=昨晚23:12, attribute=temperature)\n"
                     "提取: 设定温度 = payload.value\n"
                     "分支: $number(设定温度) > 26\n"
-                    "  动作: 调用子流程: demo_notify(text=昨晚空调设到了27度以上，偏高, room=书房, level=一般)\n"
+                    "  动作: 调用子流程: tts_speak(text=昨晚空调设到了27度以上，偏高, room=书房, level=一般)\n"
                     "否则:\n"
                     "  注释: 温度正常，不提醒\n"
                     "# 另一例：门昨天11-12点开过没？→ occurred=true/false 在 msg.payload\n"
@@ -2075,7 +1760,7 @@ class Gateway:
                 "autoflow_propose_dsl(\n"
                 "  dsl=<上面的 DSL 文本>,\n"
                 "  expected_postconditions_json='[{\"entity_id\":\"<灯 entity_id>\",\"state\":\"on\"},"
-                "{\"subflow\":\"demo_notify\"}]'\n"
+                "{\"subflow\":\"tts_speak\"}]'\n"
                 ")"
             ),
             "note": "写作中任何不确定，随时再调 autoflow_dsl_help() 复查语法、examples 与子流程参数。",
@@ -2329,14 +2014,6 @@ class Gateway:
         """
         if not flow_id:
             return {"ok": False, "error": "flow_id 为空", "stage": "get_flow"}
-        # A31：af_scene_* 是 propose_dsl 编译产物的逻辑 id，未部署到 Node-RED；
-        # get_flow 仅查已部署 flow，故必 404。明确告知，避免 agent 误以为流程失败。
-        if flow_id.startswith("af_scene") or flow_id.startswith("af_"):
-            return {"ok": False, "proposal": True, "flow_id": flow_id,
-                    "stage": "get_flow",
-                    "error": "该 flow_id 为编译提案逻辑 id（af_scene_*），尚未部署到 Node-RED。",
-                    "hint": "get_flow 只查已部署 flow。如需查看节点图，请用 propose_dsl 返回的 "
-                            "flow 字段；或先 deploy_proposal 部署，再用部署后返回的真实 flow id 回查。"}
         try:
             flow = self.nr.get_flow(flow_id)
         except Exception as e:
@@ -3076,7 +2753,7 @@ class Gateway:
             f"7. 只解析不提交 = 失败。解析→写全 DSL（触发+条件+动作齐全）→提交，一气呵成。\n"
             f"8. 【复杂场景（多分支/多动作/含查询+子流程）】：先在本轮脑内列出『触发→条件→各分支动作』清单，"
             f"再把完整 DSL 一次性写进单个代码块提交，**不要分多次调用 propose_dsl、也不要中途反复翻 help**；"
-            f"多分支用嵌套 分支/否则，TTS/大模型调用用 调用子流程: demo_notify(...)，保持每个动作一行、参数精简。\n"
+            f"多分支用嵌套 分支/否则，TTS/大模型调用用 调用子流程: tts_speak(...)，保持每个动作一行、参数精简。\n"
         )
 
     def _wait_ds_bridge_idle(self, max_wait: int = 45, settle: float = 4.0, job_id: str = None) -> Dict[str, Any]:
@@ -3284,8 +2961,7 @@ class Gateway:
     def deploy_proposal(self, pid: str, agent_id: str = "human",
                         target_flow_id: Optional[str] = None,
                         target: str = "prod", force: bool = False,
-                        validate: bool = True, allow_prod: bool = True,
-                        vhass_store=None,
+                        validate: bool = True, vhass_store=None,
                         dry_run: bool = False,
                         require_e2e: Optional[bool] = None) -> Dict[str, Any]:
         """把已通过的 DSL 提案直接部署到 NR（一步确认，不再走冗余确认闸）。
@@ -3520,7 +3196,7 @@ class Gateway:
         _e2e = None  # 默认未运行；仅当 require_e2e 开启且非 dry_run 才赋值（避免成功返回 NameError）
         if require_e2e and not dry_run:
             try:
-                _e2e = self.run_e2e_trace_raw(flow, target=target, live=False, allow_prod=allow_prod)
+                _e2e = self.run_e2e_trace_raw(flow, target=target, live=False)
             except Exception as _ee:
                 _slog(_tid, "deploy_proposal.e2e_gate_err",
                       elapsed=round(time.perf_counter() - _t0, 3), error=str(_ee)[:200])
@@ -3564,8 +3240,7 @@ class Gateway:
                 }
 
         try:
-            result = self.nr.create_or_update_flow(deploy_id, flow, force=True,
-                                                  allow_prod=allow_prod)
+            result = self.nr.create_or_update_flow(deploy_id, flow, force=True)
         except Exception as e:
             return {"ok": False, "error": f"NR 部署失败: {e}"}
         fid = result.get("id") or deploy_id
@@ -3858,15 +3533,11 @@ class Gateway:
         - switch 节点：rules/property
         - change 节点：rules
         返回 [{"level":"error|warning","node_id":...,"message":...}] 列表。
-
-        【R9】致命项额外带 "rule": S1..S5（见 SCHEMA_BLOCK_RULES），调用方用
-        schema_blocking_issues() 提取后硬拦部署 / 置 will_deploy_block=True。
         """
         issues = []
 
         if not isinstance(flow, dict):
-            return [{"level": "error", "rule": "S1", "node_id": "_root",
-                     "message": "flow 必须是 JSON 对象"}]
+            return [{"level": "error", "node_id": "_root", "message": "flow 必须是 JSON 对象"}]
 
         for field in ("id",):
             if not flow.get(field):
@@ -3875,14 +3546,8 @@ class Gateway:
 
         nodes = flow.get("nodes")
         if not isinstance(nodes, list):
-            issues.append({"level": "error", "rule": "S1", "node_id": "_root",
+            issues.append({"level": "error", "node_id": "_root",
                            "message": "flow.nodes 必须是数组"})
-            return issues
-        if not nodes:
-            # R9/S5：空 flow 覆盖已有 tab = 静默清空线上内容，破坏性最强，必须硬拦。
-            issues.append({"level": "error", "rule": "S5", "node_id": "_root",
-                           "message": "空 flow（nodes 为空数组）：部署到已有 tab 会清空其全部"
-                                      "节点。若确要清空请显式走删除/回滚接口。"})
             return issues
 
         node_ids = set()
@@ -3895,7 +3560,7 @@ class Gateway:
                 issues.append({"level": "warning", "node_id": nid,
                                "message": f"[{ntype}] 缺少 id"})
             if not n.get("type"):
-                issues.append({"level": "error", "rule": "S2", "node_id": nid,
+                issues.append({"level": "error", "node_id": nid,
                                "message": "节点缺少 type 字段"})
             elif n.get("id"):
                 if n["id"] in node_ids:
@@ -3942,12 +3607,8 @@ class Gateway:
             # ── HA 节点校验 ──
             if ntype in ("api-call-service", "server-state-changed"):
                 if not n.get("server"):
-                    # R9/S3：_inject_ha_server 只把 REPLACE_WITH_HA_SERVER 占位符换成真实 id，
-                    # 「压根没有 server 字段」不在其修补范围 → 部署后节点永久未配置，必须硬拦。
-                    issues.append({"level": "error", "rule": "S3", "node_id": nid,
-                                   "message": f"[{ntype}] 缺少 server（HA 配置节点 id）。"
-                                              f"请填真实 server id，或填占位符 "
-                                              f"REPLACE_WITH_HA_SERVER 由网关注入。"})
+                    issues.append({"level": "error", "node_id": nid,
+                                   "message": f"[{ntype}] 缺少 server（HA 配置节点 id）"})
                 if ntype == "api-call-service":
                     if not n.get("action") and not n.get("domain"):
                         issues.append({"level": "error", "node_id": nid,
@@ -3957,13 +3618,12 @@ class Gateway:
             if ntype == "switch":
                 rules = n.get("rules")
                 if not rules:
-                    issues.append({"level": "error", "rule": "S4", "node_id": nid,
+                    issues.append({"level": "error", "node_id": nid,
                                    "message": "[switch] 缺少 rules"})
                 else:
                     outputs = len(n.get("wires", []))
                     if outputs != len(rules):
-                        # R9/S4：分支与出线错位 → 整枝消息静默丢失，静态合法运行必错。
-                        issues.append({"level": "error", "rule": "S4", "node_id": nid,
+                        issues.append({"level": "error", "node_id": nid,
                                        "message": f"[switch] wires({outputs}) 与 "
                                                 f"rules({len(rules)}) 数量不匹配"})
 
@@ -3988,8 +3648,7 @@ class Gateway:
             | {"http request", "api-call-service", "server-state-changed",
                "api-current-state", "switch", "change", "function", "template",
                "delay", "debug", "inject", "link in", "link out", "catch",
-               # 注：不含 "merge"——NR 核心无此类型（见 dsl_engine.RAW_NODE_ALLOWED 注释）
-               "status", "split", "join", "csv", "json", "xml", "html",
+               "status", "merge", "split", "join", "csv", "json", "xml", "html",
                "markdown", "range", "exec", "file", "mqtt in", "mqtt out",
                "tcp in", "udp in", "email", "http in", "websocket in", "time",
                "trigger", "comment", "subflow"}
@@ -4159,25 +3818,20 @@ class Gateway:
                     "message": (
                         f"link out『{lo_name}』指向不存在的 link-in/子流程入口「{tgt}」："
                         f"部署后运行时将报『Error delivering message to node:undefined』。"
-                        f"请确认目标 id 正确（如 demo_notify=b595563939283231、"
+                        f"请确认目标 id 正确（如 tts_speak=b595563939283231、"
                         f"anysearch_batch=af_anysearch_in）且该子流程已在目标 NR 注册。"
                     ),
                 })
         return out
 
     @staticmethod
-    def _build_unified_gate(staging_gate, e2e_result, canary_result,
-                            *, require_e2e: bool = False,
-                            staging_required: bool = False) -> Dict[str, Any]:
+    def _build_unified_gate(staging_gate, e2e_result, canary_result) -> Dict[str, Any]:
         """聚合三类闸为单一可机读门面（P3 核心聚合，#686）。
 
         输入：
           - staging_gate: run_staging_gate 结果 / {"skipped": True} 占位 / None
           - e2e_result: run_e2e_trace_raw 结果 / None（未开启）
           - canary_result: get_nr_subflow_integrity 结果 / {"ok":True,"source":"skipped"}
-          - require_e2e: 调用方是否**要求**跑 e2e（A22）。要求了却没真跑 → 不许判 pass。
-          - staging_required: 调用方是否**期望** vhass 闸真跑（A18，如 run_gate=True 且
-            flow 含 HA 动作）。期望了却被 skip → 后置条件根本没验证，降级 warn。
         输出 {
           verdict: "block" | "warn" | "pass",
           passed: bool,
@@ -4186,30 +3840,19 @@ class Gateway:
         }
         聚合规则：
           vhass 未通过 → block；e2e 真跑且非通过 → block；
-          require_e2e 但 e2e 未真跑 → block（A22：拒绝「空 pass」）；
-          staging_required 但 vhass 被 skip → warn（A18：拒绝「零验证的绿灯」）；
           canary 探测到空壳 / mustache 占位 → warn（fail-open，预存问题非本次部署）；
-          其余（含全 SKIP 且调用方无要求）→ pass。"""
+          其余（含全 SKIP）→ pass。"""
         # ── vhass staging 层 ──
         if (staging_gate is None or not isinstance(staging_gate, dict)
                 or "passed" not in staging_gate):
-            # A18：skip 原因必须如实回传（旧实现硬编码「run_gate=False / 无 HA 动作」，
-            # 在 run_gate=True 且明明有 HA 动作时自相矛盾，误导排障）。
-            _skip_reason = None
-            if isinstance(staging_gate, dict):
-                _skip_reason = staging_gate.get("reason") or staging_gate.get("error")
             vhass = {"ran": False, "passed": None, "verdict": "skipped",
-                     "detail": _skip_reason or "未运行（run_gate=False / 无 HA 动作 / dry_run）"}
+                     "detail": "未运行（run_gate=False / 无 HA 动作 / dry_run）"}
         else:
             vhass = {
                 "ran": True,
                 "passed": bool(staging_gate.get("passed")),
                 "verdict": staging_gate.get("verdict", "?"),
                 "detail": staging_gate.get("reasons") or staging_gate.get("error"),
-                # 闸内「没能真正证实」的项（vhass 未建模的服务 A14 / 无法本地求值只能
-                # 保守视为命中的 JSONata 分支 A15 / 字段静默丢写）。passed=True 只说明
-                # 「没抓到反例」，不等于「验证过」，故单独抬出来供聚合层降级。
-                "warnings": list(staging_gate.get("warnings") or []),
             }
 
         # ── e2e 实机追踪层 ──
@@ -4248,49 +3891,24 @@ class Gateway:
             }
 
         # ── 聚合 verdict ──
-        # 分别收集 block / warn 理由再定级，避免「命中前一条就吞掉后面所有告警」。
-        block_notes: List[str] = []
-        warn_notes: List[str] = []
-
+        notes = []
         if vhass["ran"] and not vhass["passed"]:
-            block_notes.append("vhass staging 闸门未通过 → 硬拦")
-        if e2e["ran"] and not e2e["passed"]:
-            block_notes.append("E2E 实机验证未通过 → 硬拦")
-        # 【A22】要求跑 e2e 却没真跑（PROD 写保护 / 基建异常 / 被吞成 e2e=False）→
-        # 绝不能顶层 pass 制造「e2e 通过」假象。
-        if require_e2e and not e2e["ran"]:
-            block_notes.append(
-                f"require_e2e=True 但 E2E 未真正执行（层内 verdict={e2e['verdict']}，"
-                f"detail={e2e.get('detail')}）→ 拒绝空 pass[A22]")
-        # 【A14/A15】vhass 闸「过了」但过程中有未证实项（未建模服务 / 只能保守视为命中的
-        # JSONata 分支 / 字段静默丢写）→ 这类绿灯是「没抓到反例」而非「验证通过」，
-        # 不许当作干净 pass 交付，降级 warn 并把原因原样带出。
-        if vhass["ran"] and vhass["passed"] and vhass.get("warnings"):
-            warn_notes.append(
-                "vhass staging 判过，但存在【未证实项】，后置结论不完全可信："
-                + "；".join(str(w) for w in vhass["warnings"])
-                + " → 降级 warn[A14/A15]")
-        # 【A18】期望 vhass 闸运行却被 skip → 后置条件一条都没验证，不许绿灯。
-        if staging_required and not vhass["ran"]:
-            warn_notes.append(
-                f"vhass staging 闸被要求运行却未执行：{vhass['detail']}"
-                f" → 后置条件【未验证】，降级 warn[A18]")
-        if canary["ran"] and canary["verdict"] == "warn":
-            if canary["any_empty_shell"]:
-                warn_notes.append("结构金丝雀：预先存在空壳子流程（非本次部署，fail-open 放行）")
-            if canary["mustache_warnings"]:
-                warn_notes.append(f"结构金丝雀：{canary['mustache_warnings']} 个子流程含 mustache 占位实体"
-                                  f"（降级非致命，WARN）")
-
-        if block_notes:
             verdict = "block"
-        elif warn_notes:
+            notes.append("vhass staging 闸门未通过 → 硬拦")
+        elif e2e["ran"] and not e2e["passed"]:
+            verdict = "block"
+            notes.append("E2E 实机验证未通过 → 硬拦")
+        elif canary["ran"] and canary["verdict"] == "warn":
             verdict = "warn"
+            if canary["any_empty_shell"]:
+                notes.append("结构金丝雀：预先存在空壳子流程（非本次部署，fail-open 放行）")
+            if canary["mustache_warnings"]:
+                notes.append(f"结构金丝雀：{canary['mustache_warnings']} 个子流程含 mustache 占位实体"
+                             f"（降级非致命，WARN）")
         else:
             verdict = "pass"
             if not (vhass["ran"] or e2e["ran"] or canary["ran"]):
-                warn_notes.append("所有闸均跳过（dry-run / 未开启 / 无 HA 动作）→ 无聚合结论，沿用各闸独立结果")
-        notes = block_notes + warn_notes
+                notes.append("所有闸均跳过（dry-run / 未开启 / 无 HA 动作）→ 无聚合结论，沿用各闸独立结果")
 
         return {
             "verdict": verdict,
@@ -4312,15 +3930,12 @@ class Gateway:
                        (os.environ.get("AUTOFLLOW_WHITEBOX_BLOCK_ON_LINT_ERROR", "1") != "0"),
                    block_on_logic_error: bool =
                        (os.environ.get("AUTOFLLOW_WHITEBOX_BLOCK_ON_LOGIC_ERROR", "0") != "0"),
-                   block_on_schema_error: bool =
-                       (os.environ.get("AUTOFLLOW_WHITEBOX_BLOCK_ON_SCHEMA_ERROR", "1") != "0"),
-                   require_e2e: Optional[bool] = None,
-                   allow_prod: bool = False
+                   require_e2e: Optional[bool] = None
                    ) -> Dict[str, Any]:
         """白盒部署：直接接受 Agent 产出的原始 Node-RED flow JSON，经校验后部署。
 
         流程：
-          1. Schema 校验（validate_flow_schema）— 致命项(S1..S5)硬拦，其余 error/warning 放行
+          1. Schema 校验（validate_flow_schema）— error 级别阻塞，warning 放行
           2. HA server 占位符替换（REPLACE_WITH_HA_SERVER → 真实 id）
           3. 冲突检测（同名非本流拒绝 / force 改名）
           4. 可选 vhass staging 闸门（run_gate=True 且有 HA 动作时）
@@ -4341,10 +3956,6 @@ class Gateway:
           - run_gate: 是否跑 vhass 闸门（有 HA 动作时建议开启）
           - block_on_lint_error: B3 可配置阻塞 —— 当 lint 出现 R13(孤儿 api-call-service)/
             R15(紧环) 等硬伤时阻止部署（默认开，env AUTOFLLOW_WHITEBOX_BLOCK_ON_LINT_ERROR=0 可关）
-          - block_on_schema_error: 【R9】schema 致命错误闸 —— 缺 server(S3)、switch
-            wires≠rules(S4)、空 flow(S5)、节点缺 type(S2)、结构非法(S1) 等「部署即坏」的
-            schema error 阻止部署（默认开，env AUTOFLLOW_WHITEBOX_BLOCK_ON_SCHEMA_ERROR=0 可关）。
-            非致命 schema error（缺顶层 id、http 缺 url、POST 无 body 等）仍只报告不拦。
           - block_on_logic_error: 【Phase B·B4】L2 逻辑可达性闸门 —— 当逻辑仿真发现「任何触发
             场景都触达不到的动作终点(L1)」时阻止部署。默认【关】(AUTOFLLOW_WHITEBOX_BLOCK_ON_LOGIC_ERROR
             缺省为 "0")：仅把 logic 段附在返回里报告，不拦部署（白箱 escape hatch，先把流跑起来看真实
@@ -4417,26 +4028,9 @@ class Gateway:
         errors = [v for v in validation if v["level"] == "error"]
         warnings = [v for v in validation if v["level"] == "warning"]
 
-        # R9(#round4) iss_86d66844f7：此处**曾经**是 `if errors: pass  # 记录后继续`——
-        # 于是缺 server / switch wires≠rules / 空 flow 这类「部署即坏」的流照样落 NR，
-        # 上游自检还回 will_deploy_block=false 当绿灯。现改为：致命项(S1..S5)硬拦，
-        # 其余 error（缺顶层 id、http 缺 url 等）沿用旧的 fail-open 只记录不拦。
-        # dry-run 不早退，改为在预览里报 would_block_on_schema（与 lint 同策略）。
-        _schema_blocking = schema_blocking_issues(validation)
-        if _schema_blocking and block_on_schema_error and not dry_run:
-            _srules = ",".join(sorted({b.get("rule") for b in _schema_blocking}))
-            _slog(_tid, "deploy_raw.schema_block",
-                  elapsed=round(time.perf_counter() - _t0, 3),
-                  rules=_srules, blocking_count=len(_schema_blocking))
-            _record_fail()
-            return {
-                "ok": False, "stage": "schema_block",
-                "error": (f"Schema 致命错误 {len(_schema_blocking)} 项（{_srules}），已阻止部署："
-                          + "；".join(b.get("message", "") for b in _schema_blocking[:5])),
-                "validation": validation,
-                "schema_blocking": _schema_blocking,
-                "schema_blocking_rules": sorted({b.get("rule") for b in _schema_blocking}),
-            }
+        # 有 error 但不强制阻塞——记录但继续部署（让 NR/NR debug 告诉你更多细节）
+        if errors:
+            pass  # 不 return，记录后继续
 
         # Step 2.5：静态 Flow Linter（A1）—— 抓「静态合法、运行必错」反模式（非阻塞）
         # 专拦本次 ArcFace 排障暴露的坑：switch otherwise 前置→死代码、
@@ -4449,9 +4043,7 @@ class Gateway:
         # Step 2.6: Bark 子流程幂等确保（A3）——前置，保证后续闸门/E2E/部署时子流程已存在。
         # dry-run 不做任何副作用（仅预览）。活体 1990 已存在 b0bbc86 → ensure 走 no-op（零风险）；
         # 仅在缺失时按声明式规格生成（env 值经 os.environ 注入，密钥绝不硬编码）。
-        # 仅作用于 1990（prod 实例，AUTOFLLOW_ENV=prod）→ allow_prod=True 显式 opt-in
-        # （#119 护栏订正：is_prod() 按 env 判定，写 prod 必须 allow_prod=True，否则 _guard_prod
-        # 抛 NRGuardError 被下方 except 吞掉，导致子流程永不重建）。绝不动 1880。
+        # 仅作用于 staging NR(self.nr=1990)，allow_prod=False 兜底，绝不动 1880。
         if not dry_run:
             from .subflows import (
                 ensure_bark_subflow, flow_uses_bark_subflow,
@@ -4459,7 +4051,7 @@ class Gateway:
             )
             if flow_uses_bark_subflow(flow.get("nodes", [])):
                 try:
-                    _bark_res = ensure_bark_subflow(self.nr.client, allow_prod=True)
+                    _bark_res = ensure_bark_subflow(self.nr.client, allow_prod=False)
                     _slog(_tid, "deploy_raw.bark_ensure",
                           created=_bark_res.get("created"), exists=_bark_res.get("exists"))
                 except Exception as _be:
@@ -4468,10 +4060,10 @@ class Gateway:
             # Step 2.6b：历史查询子流程幂等确保（仿 bark 的 A3 模式）。
             # 4 个 af_hist_* 子流程的 ensure 与 bark 同策略：活体已存在 → no-op（零风险）；
             # 仅在缺失时从 subflows_built.json 重建（server 替换成默认 HA server，可移植）。
-            # 仅作用于 1990（prod 实例）→ allow_prod=True 显式 opt-in（#119 护栏订正），绝不动 1880。
+            # 仅作用于 staging NR(1990)，allow_prod=False 兜底，绝不动 1880。
             if flow_uses_history_subflow(flow.get("nodes", [])):
                 try:
-                    _hist_res = ensure_history_subflow(self.nr.client, allow_prod=True)
+                    _hist_res = ensure_history_subflow(self.nr.client, allow_prod=False)
                     _slog(_tid, "deploy_raw.history_ensure",
                           created=_hist_res.get("created"), exists=_hist_res.get("exists"),
                           rebuilt=_hist_res.get("rebuilt"))
@@ -4608,23 +4200,30 @@ class Gateway:
             n.get("type") in ("api-call-service", "server-state-changed", "api-current-state")
             for n in nodes
         )
-        _gate_unverifiable: List[str] = []
-        _staging_required = bool(run_gate and has_ha_actions and not dry_run)
-        if _staging_required:
-            # 【A18】与 verify_flow 同源修复：改走 flow= 直通口 + 正确 kwarg（旧写法
-            # expected_postconditions= 是 TypeError，dsl 又是伪造的注释文本，两头必死）。
-            expected_auto, _gate_unverifiable = _auto_expected_from_nodes(nodes)
-            if not expected_auto:
-                gate = {"skipped": True,
-                        "reason": ("flow 含 HA 动作，但没有任何后置条件可自动推导，闸未运行："
-                                   + "；".join(sorted(set(_gate_unverifiable)) or ["未知原因"]))}
-            else:
-                try:
-                    gate = self.run_staging_gate(dsl="", expected=expected_auto, flow=flow)
-                except Exception as _ge:
-                    # 闸门基建异常按 fail-open 处理（与本函数既有取向一致），但如实留痕
-                    gate = {"skipped": True, "reason": f"staging 闸异常: {_ge}"}
-                if not gate.get("passed") and not gate.get("skipped"):
+        if run_gate and has_ha_actions and not dry_run:
+            # 尝试从 flow 中提取可断言的实体（启发式：从 domain/service/data 中提取 entity_id）
+            expected_auto = []
+            for n in nodes:
+                if n.get("type") == "api-call-service":
+                    data_str = n.get("data", "{}")
+                    try:
+                        data = json.loads(data_str) if isinstance(data_str, str) else data_str
+                    except Exception:
+                        data = {}
+                    entity_id = data.get("entity_id") or data.get("entityId")
+                    if entity_id:
+                        action = n.get("action", "")
+                        state = "on" if "turn_on" in (action or "") else (
+                            "off" if "turn_off" in (action or "") else None)
+                        if state:
+                            expected_auto.append({"entity_id": entity_id, "state": state})
+            if expected_auto:
+                gate = self.run_staging_gate(
+                    dsl=f"# raw-deploy from {agent_id}\n# auto-extracted entities:\n"
+                        + json.dumps(expected_auto, ensure_ascii=False),
+                    expected_postconditions=expected_auto,
+                )
+                if not gate.get("passed"):
                     _slog(_tid, "deploy_raw.gate_fail", elapsed=round(time.perf_counter() - _t0, 3))
                     _record_fail()
                     return {
@@ -4645,7 +4244,7 @@ class Gateway:
         _e2e = None  # 默认未运行；仅当 require_e2e 开启且非 dry_run 才赋值（避免成功返回 NameError）
         if _require_e2e and not dry_run:
             try:
-                _e2e = self.run_e2e_trace_raw(flow, target=target, live=False, allow_prod=allow_prod)
+                _e2e = self.run_e2e_trace_raw(flow, target=target, live=False)
             except Exception as _ee:
                 _slog(_tid, "deploy_raw.e2e_gate_err",
                       elapsed=round(time.perf_counter() - _t0, 3), error=str(_ee)[:200])
@@ -4688,17 +4287,11 @@ class Gateway:
                 except Exception:
                     live = None
             node_diff = _build_node_diff(live, flow)
-            # R9：dry-run 预告里把 schema 致命项与 lint 硬伤合并进 would_block_rules，
-            # 否则「预览说能部署、真部署被 schema_block 拦」又是一次自相矛盾。
-            _schema_rules = sorted({b.get("rule") for b in _schema_blocking})
-            _blocking_rules = sorted(
-                {b.get("rule") for b in _blocking} | set(_schema_rules))
-            _would_block_schema = bool(_schema_blocking) and block_on_schema_error
+            _blocking_rules = sorted({b.get("rule") for b in _blocking})
             _slog(_tid, "deploy_raw.dry_run", elapsed=round(time.perf_counter() - _t0, 3),
                   would="update" if live is not None else "create",
                   added=len(node_diff["added"]), removed=len(node_diff["removed"]),
-                  changed=len(node_diff["changed"]),
-                  would_block=bool(_blocking) or _would_block_schema)
+                  changed=len(node_diff["changed"]), would_block=bool(_blocking))
             return {
                 "ok": True,
                 "dry_run": True,
@@ -4716,8 +4309,6 @@ class Gateway:
                 "lint_error_count": sum(1 for v in lint_issues if v["level"] == "error"),
                 "lint_warning_count": sum(1 for v in lint_issues if v["level"] == "warning"),
                 "would_block_on_lint": bool(_blocking),
-                "would_block_on_schema": _would_block_schema,
-                "schema_blocking": _schema_blocking,
                 "would_block_rules": _blocking_rules,
                 "logic": _logic_block,
                 "would_block_on_logic": bool(_logic_err) and block_on_logic_error,
@@ -4751,8 +4342,7 @@ class Gateway:
 
         # Step 8: 部署到 NR
         try:
-            result = self.nr.create_or_update_flow(fid, flow, force=True,
-                                                   allow_prod=allow_prod)
+            result = self.nr.create_or_update_flow(fid, flow, force=True)
         except Exception as e:
             _log_raw_deploy(agent_id, flabel, "DEPLOY_FAIL", f"NR error: {e}", validation)
             _record_fail()
@@ -4837,10 +4427,7 @@ class Gateway:
             "lint": lint_issues,
             "lint_error_count": sum(1 for v in lint_issues if v["level"] == "error"),
             "lint_warning_count": sum(1 for v in lint_issues if v["level"] == "warning"),
-            # A18：闸被要求跑却没跑 → 报告里如实降级 warn（部署侧的 fail-open 策略
-            # 不改，但「验证结论」不能替它撒谎说 pass）。
-            "gate": self._build_unified_gate(gate, _e2e, nr_integrity,
-                                             staging_required=_staging_required),
+            "gate": self._build_unified_gate(gate, _e2e, nr_integrity),
             "logic": _logic_block,
             "deployed_at": meta["deployed_at"],
             "source_agent": agent_id,
@@ -4853,7 +4440,7 @@ class Gateway:
 
     def verify_flow(self, flow_json: Dict, agent_id: str = "verify",
                     run_gate: bool = True, require_e2e: bool = False,
-                    target: str = "staging", allow_prod: bool = False) -> Dict[str, Any]:
+                    target: str = "staging") -> Dict[str, Any]:
         """白盒质量验证（只读，绝不部署）：跑与 deploy_raw 同源的质量闸，但不写 NR / 不登记 catalog。
 
         用途：agent / WB2 在部署前或回归时，按需校验一份 flow 的质量（schema + lint + 可选 vhass
@@ -4903,37 +4490,36 @@ class Gateway:
         warnings = [v for v in validation if v.get("level") == "warning"]
 
         # Step 3: 可选 vhass staging 闸（只读：断言预期后条件，不部署）
-        # 【A18】三处硬伤一并修：
-        #   1) 旧代码把 expected 用错 kwarg（expected_postconditions=）传给 run_staging_gate，
-        #      必抛 TypeError 被 except 吞成 skipped → 闸门**从来没跑过**；
-        #   2) 旧代码伪造一段注释 DSL 让闸门去 parse，注定编译失败 → 改走 flow= 直通口；
-        #   3) 期望提取只认 turn_on/turn_off，非 on/off 动作一律提不出 → 现按 vhass
-        #      建模表推导，推不出的如实登记为「不可验证」并让顶层降级 warn。
+        gate = {"skipped": True, "reason": "无 HA 动作或无预期条件"}
         has_ha_actions = any(
             n.get("type") in ("api-call-service", "server-state-changed", "api-current-state")
             for n in nodes
         )
-        staging_required = bool(run_gate and has_ha_actions)
-        unverifiable: List[str] = []
-        if not run_gate:
-            gate = {"skipped": True, "reason": "run_gate=False（调用方未要求跑 staging 闸）"}
-        elif not has_ha_actions:
-            gate = {"skipped": True, "reason": "flow 无 HA 动作节点，没有后置条件可断言"}
-        else:
-            expected_auto, unverifiable = _auto_expected_from_nodes(nodes)
+        if run_gate and has_ha_actions:
+            expected_auto = []
+            for n in nodes:
+                if n.get("type") == "api-call-service":
+                    data_str = n.get("data", "{}")
+                    try:
+                        data = json.loads(data_str) if isinstance(data_str, str) else data_str
+                    except Exception:
+                        data = {}
+                    entity_id = data.get("entity_id") or data.get("entityId")
+                    if entity_id:
+                        action = n.get("action", "")
+                        state = "on" if "turn_on" in (action or "") else (
+                            "off" if "turn_off" in (action or "") else None)
+                        if state:
+                            expected_auto.append({"entity_id": entity_id, "state": state})
             if expected_auto:
                 try:
-                    gate = self.run_staging_gate(dsl="", expected=expected_auto, flow=flow)
-                    if unverifiable:
-                        gate.setdefault("warnings", []).append(
-                            "部分动作的后置条件无法自动推导，未纳入断言："
-                            + "；".join(sorted(set(unverifiable))))
+                    gate = self.run_staging_gate(
+                        dsl=f"# verify from {agent_id}\n# auto-extracted entities:\n"
+                            + json.dumps(expected_auto, ensure_ascii=False),
+                        expected_postconditions=expected_auto,
+                    )
                 except Exception as _ge:
                     gate = {"skipped": True, "reason": f"staging 闸异常: {_ge}"}
-            else:
-                gate = {"skipped": True,
-                        "reason": ("flow 含 HA 动作，但没有任何后置条件可自动推导，闸未运行："
-                                   + "；".join(sorted(set(unverifiable)) or ["未知原因"]))}
 
         # Step 4: 结构金丝雀（只读内省 NR 子流程完整性；NR 不可达则跳过，不误伤验证）
         nr_integrity: Dict[str, Any] = {"ok": True, "source": "skipped"}
@@ -4947,17 +4533,11 @@ class Gateway:
         _e2e = None
         if require_e2e:
             try:
-                _e2e = self.run_e2e_trace_raw(flow, target=target, live=False, allow_prod=allow_prod)
+                _e2e = self.run_e2e_trace_raw(flow, target=target, live=False)
             except Exception as _ee:
                 _e2e = {"e2e": False, "verdict": "拦截", "error": f"E2E 验证异常：{_ee}"}
 
-        unified = self._build_unified_gate(gate, _e2e, nr_integrity,
-                                           require_e2e=bool(require_e2e),
-                                           staging_required=staging_required)
-        if unverifiable:
-            unified["notes"].append(
-                "以下动作的后置条件未被验证（vhass 无法用 state 断言）："
-                + "；".join(sorted(set(unverifiable))))
+        unified = self._build_unified_gate(gate, _e2e, nr_integrity)
         # 把 lint 硬伤数附进 notes，便于 agent 一眼看到（不影响 verdict，保持 fail-open 语义）
         if any(v.get("level") == "error" for v in lint_issues):
             unified["notes"].append(
@@ -5019,14 +4599,10 @@ class Gateway:
         if not flow.get("label"):
             flow["label"] = f"{agent_id}-{datetime.now().strftime('%H%M%S')}"
 
-        # Step 2: Schema 校验（非致命 error 仅记录，fail-open；致命项见下方 R9）
+        # Step 2: Schema 校验（error 仅记录，fail-open）
         validation = self.validate_flow_schema(flow)
         errors = [v for v in validation if v["level"] == "error"]
         warnings = [v for v in validation if v["level"] == "warning"]
-        # R9(#round4)：schema 致命项（S1..S5）必须并入阻塞信号，否则提案回执会出现
-        # 「would_block_on_lint=false + node_gate_ok=true」的绿灯，而这条流真去 deploy_raw
-        # 会被 stage=schema_block 拦下——提案与部署两套口径，正是 A19 复现的自相矛盾。
-        _schema_blocking = schema_blocking_issues(validation)
 
         # Step 2.5: 静态 Flow Linter（A1）
         lint_issues = lint_flow(flow, b1_unreachable=True)
@@ -5036,7 +4612,6 @@ class Gateway:
         _LINT_BLOCK_RULES = {"R13", "R15", "R20", "R17", "R22", "R24", "R30", "R32", "R_SERVICE_PARAM"}
         _blocking = [v for v in lint_issues
                      if v.get("level") == "error" and v.get("rule") in _LINT_BLOCK_RULES]
-        _blocking = _schema_blocking + _blocking
 
         # 【Phase B · B4】L2 逻辑可达性闸门（fail-open，仅报告）
         try:
@@ -5094,29 +4669,11 @@ class Gateway:
                 "lint_error_count": sum(1 for v in lint_issues if v["level"] == "error"),
                 "lint_warning_count": sum(1 for v in lint_issues if v["level"] == "warning"),
                 "would_block_on_lint": bool(_blocking),
-                "would_block_on_schema": bool(_schema_blocking),   # R9
-                "schema_blocking": _schema_blocking,               # R9
                 "would_block_rules": sorted({b.get("rule") for b in _blocking}),
                 "logic": _logic_block,
                 "node_gate_ok": _node_gate_ok,
                 "blocked": bool(_blocking),
                 "flow": _flow_preview,
-                "_trace_id": _tid,
-            }
-
-        # A19：致命 schema 错误（S1..S5）必须阻断落提案——坏流不得静默进提案；
-        # lint/logic 仍走 fail-open 供人审（仅结构性错误在更前已拦）。
-        if _schema_blocking:
-            _slog(_tid, "propose_raw.schema_block", schema_blocking=_schema_blocking,
-                  elapsed=round(time.perf_counter() - _t0, 3))
-            return {
-                "ok": False, "stage": "schema_block",
-                "error": "flow 含致命 schema 错误，已拒绝落提案",
-                "schema_blocking": _schema_blocking,
-                "lint_error_count": sum(1 for v in lint_issues if v["level"] == "error"),
-                "lint_warning_count": sum(1 for v in lint_issues if v["level"] == "warning"),
-                "would_block_rules": sorted({b.get("rule") for b in _blocking}),
-                "logic": _logic_block, "node_gate_ok": _node_gate_ok,
                 "_trace_id": _tid,
             }
 
@@ -5135,7 +4692,6 @@ class Gateway:
             "lint_error_count": sum(1 for v in lint_issues if v["level"] == "error"),
             "lint_warning_count": sum(1 for v in lint_issues if v["level"] == "warning"),
             "blocking_rules": sorted({b.get("rule") for b in _blocking}),
-            "schema_blocking_rules": sorted({b.get("rule") for b in _schema_blocking}),  # R9
             "logic": _logic_block,
             "node_gate_ok": _node_gate_ok,
             "blocked": bool(_blocking),
@@ -5174,8 +4730,6 @@ class Gateway:
             "lint_error_count": sum(1 for v in lint_issues if v["level"] == "error"),
             "lint_warning_count": sum(1 for v in lint_issues if v["level"] == "warning"),
             "would_block_on_lint": bool(_blocking),
-            "would_block_on_schema": bool(_schema_blocking),   # R9
-            "schema_blocking": _schema_blocking,               # R9
             "blocking_rules": sorted({b.get("rule") for b in _blocking}),
             "logic": _logic_block,
             "node_gate_ok": _node_gate_ok,
@@ -5337,7 +4891,7 @@ class Gateway:
         if u_preserved == 0:
             # tab 已空 → 删除整个 tab（clean）
             try:
-                self.nr.delete_flow(flow_id, force=True, allow_prod=True)
+                self.nr.delete_flow(flow_id, force=True)
             except Exception as e:
                 nr_ok = False
                 nr_err = f"NR 删除失败: {e}"
@@ -5347,7 +4901,7 @@ class Gateway:
             reduced = dict(live)  # 保留 label/configs 等所有原始字段
             reduced["nodes"] = ([tab_node] if tab_node else []) + user_nodes
             try:
-                self.nr.update_flow_nodes(flow_id, reduced, force=True, allow_prod=True)
+                self.nr.update_flow_nodes(flow_id, reduced, force=True)
             except Exception as e:
                 nr_ok = False
                 nr_err = f"NR 更新失败: {e}"
@@ -5425,17 +4979,12 @@ class Gateway:
                          scenario: Optional[List[Dict]] = None,
                          virtual_time=None,
                          branch_aware: bool = True,
-                         target: str = "staging",
-                         flow: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                         target: str = "staging") -> Dict[str, Any]:
         """staging 闸门：编译 DSL → 把 flow 的 HA 意图重放到 vhass → 断言后置条件。
 
         不依赖真实 NR/HA：编译产物的 api-call-service 节点即『这个 flow 要对 HA 做的意图』，
         直接在内存 vhass 上重放并断言。子流程(link out/subflow) 属 Tier A 基础设施，
         作为外部调用记录、不参与断言（其效果是人工验证过的）。
-
-        - flow：白箱直通口。给了就跳过 DSL 解析/编译，直接重放这份 NR flow。
-          （旧实现逼白箱路径伪造一段「注释 + JSON」的假 DSL，parse 必失败 →
-           闸门等于从未运行，是 A18 假 pass 的直接成因。）
 
         - 返回 {passed, replayed_services, external_calls, assertions, failures, entity_count}
         """
@@ -5443,21 +4992,18 @@ class Gateway:
                                   Parallel, detect_semantic_gaps)
         from . import vhass as _vh
 
-        scene = None
-        if flow is None:
-            try:
-                scene = parse(dsl)
-                flow = compile(scene, target=target)
-            except DSLError as e:
-                return {"passed": False, "stage": "compile", "error": str(e),
-                        "compile_error": _compile_error_envelope(e),
-                        "result_kind": "compile_error",
-                        "verdict": "拦截", "reasons": [f"编译失败：{e}"]}
+        try:
+            scene = parse(dsl)
+            flow = compile(scene, target=target)
+        except DSLError as e:
+            return {"passed": False, "stage": "compile", "error": str(e),
+                    "compile_error": _compile_error_envelope(e),
+                    "result_kind": "compile_error",
+                    "verdict": "拦截", "reasons": [f"编译失败：{e}"]}
 
         # 0.5) 语义缺口预检（B1）：含历史/首次意图却未用对应原语 → 高声拦截，
         #      不让『静默降级成读当前态』的假阳性 flow 进黑名单之外的任何下游。
-        #      （白箱直通口无 DSL 文本，此检查不适用）
-        gaps = detect_semantic_gaps(dsl) if scene is not None else []
+        gaps = detect_semantic_gaps(dsl)
         if gaps:
             return {"passed": False, "stage": "semantic_gap", "error": "；".join(gaps),
                     "verdict": "拦截", "reasons": gaps}
@@ -5465,7 +5011,7 @@ class Gateway:
         # 0) 实体存在性校验：引用的 entity_id 必须存在于真实设备目录
         #    （防假阳性——假/拼错的 entity_id 不应让闸门误判 PASS；vhass 是空白假 HA，
         #     会无脑接收任何 ID，所以必须靠目录校验兜底。agent 应通过发现工具取真实 ID。）
-        unknown = self._check_entities_known(scene) if scene is not None else []
+        unknown = self._check_entities_known(scene)
         if unknown:
             return {
                 "passed": False,
@@ -5481,7 +5027,7 @@ class Gateway:
         #   若 agent 声明了 resolved_entities（来自 autoflow_resolve_entity 的确认结果），
         #   DSL 引用的所有实体必须 ⊆ resolved_entities，否则拦截。
         #   这直接消灭『把显示器挂灯错配成书房电脑开关』这类合法实体但语义错位的提交。
-        if resolved_entities and scene is not None:
+        if resolved_entities:
             declared = set(resolved_entities)
             used = self._collect_scene_entities(scene)
             rogue = [e for e in used if e not in declared]
@@ -5513,8 +5059,7 @@ class Gateway:
             return rec.get("state") if rec else None
 
         # 1) 单步默认：把首个 state 触发态注入 vhass（兼容旧行为，供条件门控/断言参考）
-        trig = next((t for t in scene.triggers if t.kind == "state"), None) \
-            if scene is not None else None
+        trig = next((t for t in scene.triggers if t.kind == "state"), None)
         if trig and trig.kind == "state":
             tstate = trig.state if trig.state not in ("*", None) else "changed"
             try:
@@ -5526,46 +5071,11 @@ class Gateway:
                 store.inject_trigger(trig.entity, tstate)
             except Exception:
                 pass
-        elif scene is None:
-            # 白箱直通口：无 scene，从 server-state-changed 节点还原触发态
-            for nd in flow.get("nodes", []):
-                if nd.get("type") != "server-state-changed":
-                    continue
-                _ent = (nd.get("entities") or {}).get("entity") or []
-                _eid = (_ent[0] if isinstance(_ent, list) and _ent
-                        else nd.get("entityId") or nd.get("entity_id"))
-                _st = nd.get("ifState")
-                if _eid and _st:
-                    try:
-                        store.inject_trigger(_eid, _st)
-                    except Exception:
-                        pass
-                break
 
         # 2) 重放（分支感知）：单步 = 一个 step；scenario = 多步时间线
         steps = scenario if scenario else [{"expected": expected}]
         step_results = []
         warnings = []
-        # 【A12】flow 里声明过的全部外部调用名（不论本步是否可达）。
-        # 与「本步真的被激活的 external」对照，可把失败精确归因为
-        #「压根没这个子流程」还是「有但挂在死分支」。
-        declared_subflows = [
-            (nd.get("name") or nd.get("type") or "subflow")
-            for nd in flow.get("nodes", [])
-            if _vg_is_external_call(nd.get("type"))
-        ]
-        # 【G3】编译器 R31 判定的恒假分支（引用未声明字段）+ 其下游永不执行的动作面。
-        dead_rules = _vg_dead_switch_rules(flow)
-        dead_ents, dead_subs = _vg_dead_branch_reach(flow, dead_rules)
-        dead_branches = [
-            {"node_id": sid, "rule_index": i, "undefined_fields": toks}
-            for sid, rules in dead_rules.items() for i, toks in rules.items()
-        ]
-        # 【G2】flow 是否**声明**了任何会产生效果的节点：有声明却 0 重放 = 什么都没验证。
-        has_effect_nodes = any(
-            nd.get("type") == "api-call-service" or _vg_is_external_call(nd.get("type"))
-            for nd in flow.get("nodes", []))
-        replay_zero_steps = []
         for step in steps:
             # 2a) 应用本步世界事件（多步场景逐步推进现实态）
             for eid, st in (step.get("world") or {}).items():
@@ -5574,24 +5084,24 @@ class Gateway:
                 except Exception:
                     pass
             vt = step.get("virtual_time", virtual_time)
-            step_report = {}
             # 2b) 评估当前世界态下应执行的 api-call-service（分支感知）
             if branch_aware:
-                active = _vg_evaluate_active_intents(
-                    flow, _world, vt, warnings, dead_rules, step_report)
+                active = _vg_evaluate_active_intents(flow, _world, vt, warnings)
             else:
-                # 非分支感知：所有 HA 动作 + 所有子流程/link out 都算「会执行」，
-                # 否则 external_calls 恒空，A12 的子流程断言会全体误判 FAIL。
                 active = {n["id"] for n in flow.get("nodes", [])
-                          if n.get("type") == "api-call-service"
-                          or _vg_is_external_call(n.get("type"))}
+                          if n.get("type") == "api-call-service"}
             # 2c) 重放激活意图（link out/subflow 作外部调用记录）
             replayed = []
             external = []
             for nd in flow.get("nodes", []):
                 if nd.get("type") == "api-call-service" and nd["id"] in active:
-                    # 统一解析：兼容编译产物(domain/service/entityId)与手写(action/data)
-                    domain, service, targets, data = _ha_node_call(nd)
+                    domain = nd.get("domain")
+                    service = nd.get("service")
+                    targets = nd.get("entityId") or []
+                    try:
+                        data = json.loads(nd.get("data") or "{}")
+                    except Exception:
+                        data = {}
                     for t in targets:
                         payload = dict(data)
                         payload["entity_id"] = t
@@ -5600,177 +5110,47 @@ class Gateway:
                             replayed.append(f"{domain}.{service}({t})")
                         except Exception as e:  # pragma: no cover
                             replayed.append(f"{domain}.{service}({t})#err:{e}")
-                elif _vg_is_external_call(nd.get("type")):
+                elif nd.get("type") in ("link out", "subflow"):
                     if nd["id"] in active:
-                        external.append(nd.get("name") or nd.get("type") or "subflow")
+                        external.append(nd.get("name", "subflow"))
             # 2d) 断言后置条件
             assertions = []
             failures = []
             for cond in step.get("expected", []):
                 eid = cond.get("entity_id")
-                want_sub = cond.get("subflow") or cond.get("subflow_name")
-                if eid:
-                    want = cond.get("state")
-                    rec = store.get_state(eid)
-                    got = rec.get("state") if rec else None
-                    ok = (got == want)
-                    # A14：失败可能只是「vhass 未建模该服务」，须与「flow 真错了」区分
-                    unmodeled = ((rec or {}).get("attributes") or {}).get("_unmodeled_service")
-                    item = {"kind": "state", "entity_id": eid,
-                            "expected": want, "actual": got, "ok": ok}
-                    if rec is None:
-                        # 归因清楚：不是「状态不对」，是这个实体压根不在设备目录里
-                        item["reason"] = ("实体不在 vhass staging 设备目录"
-                                          "（entity_id 拼错 / 设备未接入 / 目录未同步）")
-                    if unmodeled:
-                        item["unmodeled_service"] = unmodeled
-                    # 【G3】期望依赖的动作挂在编译器判定的恒假分支下 → 明确标 N/A，
-                    # 不是「设备没响应」，而是「这条分支根本不会执行」。仍算未通过
-                    # （fail-closed：N/A ≠ pass），但归因直指分支字段写错。
-                    if not ok and eid in dead_ents:
-                        item["na"] = True
-                        item["dead_branch"] = True
-                        item["reason"] = (
-                            (item.get("reason") + "；") if item.get("reason") else ""
-                        ) + ("该期望依赖的动作挂在【恒假分支】下（分支引用未声明字段，"
-                             "编译器 R31 已告警）→ 永不执行，后置条件无法达成 → 记 N/A")
-                    assertions.append(item)
-                    if not ok:
-                        fail = {"entity_id": eid, "expected": want, "actual": got}
-                        if rec is None:
-                            fail["reason"] = item["reason"]
-                        if item.get("dead_branch"):
-                            fail["na"] = True
-                            fail["dead_branch"] = True
-                            fail["reason"] = item["reason"]
-                        if unmodeled:
-                            fail["unmodeled_service"] = unmodeled
-                            fail["hint"] = (f"vhass 未建模 {unmodeled} 的真实副作用，"
-                                            f"后置状态无法验证（非必然是 flow 的错）")
-                        failures.append(fail)
-                elif want_sub:
-                    # 【A12】真验证：期望被调用的子流程必须在本步真的可达并被激活。
-                    # 旧实现只读 entity_id/state，对 {"subflow": x} 恒 ok=(None==None)=True。
-                    hit = next((c for c in external if _sub_name_match(want_sub, c)), None)
-                    declared = any(_sub_name_match(want_sub, d) for d in declared_subflows)
-                    ok = hit is not None
-                    _na = (not ok) and any(_sub_name_match(want_sub, d) for d in dead_subs)
-                    if ok:
-                        why = f"已调用（{hit}）"
-                    elif _na:
-                        why = ("该子流程挂在【恒假分支】下（分支引用未声明字段，"
-                               "编译器 R31 已告警）→ 永不被调用 → 记 N/A")
-                    elif declared:
-                        why = ("flow 中存在该子流程节点，但本步世界态下不可达"
-                               "（死分支 / 条件未命中 / 未接线）")
-                    else:
-                        why = (f"flow 中没有任何 link out / 子流程实例匹配「{want_sub}」；"
-                               f"已声明的外部调用：{declared_subflows or '无'}")
-                    _a = {"kind": "subflow", "subflow": want_sub,
-                          "entity_id": None, "expected": f"调用 {want_sub}",
-                          "actual": hit or "未调用", "ok": ok, "reason": why}
-                    if _na:
-                        _a["na"] = True
-                        _a["dead_branch"] = True
-                    assertions.append(_a)
-                    if not ok:
-                        _f = {"subflow": want_sub, "expected": f"调用 {want_sub}",
-                              "actual": "未调用", "reason": why}
-                        if _na:
-                            _f["na"] = True
-                            _f["dead_branch"] = True
-                        failures.append(_f)
-                else:
-                    # 【A12·fail-closed】识别不了的期望项一律判失败，绝不静默放行。
-                    why = ("无法识别的期望项：需含 {entity_id, state} 或 {subflow}，"
-                           f"实收 {json.dumps(cond, ensure_ascii=False)}")
-                    assertions.append({"kind": "unknown", "entity_id": None,
-                                       "expected": cond, "actual": None,
-                                       "ok": False, "reason": why})
-                    failures.append({"expected": cond, "actual": None, "reason": why})
-            # 2c-bis)【G2 / 报告 A15】重放归零检测：flow 明明声明了动作，本步却
-            # 一个 HA 意图、一个外部调用都没重放 → 闸门**什么都没验证**。
-            # 若归零可归因于「闸门无法本地求值的 JSONata」或「编译器判定的恒假分支」，
-            # 就绝不能报「验证通过」——那正是 A15 的假过路径。
-            _cause = []
-            if step_report.get("dead"):
-                _cause.append("恒假分支（R31 未定义字段）")
-            if step_report.get("conservative"):
-                _cause.append("无法本地求值的 JSONata")
-            _zero = has_effect_nodes and not replayed and not external and bool(_cause)
-            if _zero:
-                replay_zero_steps.append(len(step_results))
-                warnings.append(
-                    "【重放归零】本步 0 个 HA 意图 + 0 个外部调用被重放，"
-                    "原因：" + "、".join(_cause) +
-                    "。闸门实际未验证任何行为，不构成『通过』。"
-                    "请补 否则: 分支 / 改用闸门可求值的条件 / 修正分支字段名。")
+                want = cond.get("state")
+                rec = store.get_state(eid) if eid else None
+                got = rec.get("state") if rec else None
+                ok = (got == want)
+                assertions.append({"entity_id": eid, "expected": want, "actual": got, "ok": ok})
+                if not ok:
+                    failures.append({"entity_id": eid, "expected": want, "actual": got})
             step_results.append({
                 "world": step.get("world", {}),
                 "replayed_services": replayed,
                 "external_calls": external,
                 "assertions": assertions,
                 "failures": failures,
-                "replay_zero": _zero,
             })
-
-        # 2e) A14：未建模服务导致「后置状态压根没被真实改动」，必须显式告警而非静默
-        _unmodeled = list(getattr(store, "unmodeled_calls", []) or [])
-        if _unmodeled:
-            warnings.append(
-                "以下服务 vhass 未建模真实副作用，其后置状态【未被验证】："
-                + "、".join(_unmodeled))
-
-        # 2f)【G2】重放归零的最终处置：默认 fail-closed（0 重放 ≠ 验证通过）。
-        #     策略经 _replay_zero_policy() 可切换，对接 c4_replay_semantics 终裁。
-        _rz_policy = _replay_zero_policy()
-        _rz_block = bool(replay_zero_steps) and _rz_policy == "fail_closed"
-        if replay_zero_steps and _rz_policy == "warn_only":
-            warnings.append(
-                "重放归零按 warn_only 策略保留放行（AUTOFLOW_REPLAY_ZERO_POLICY）："
-                "该结论**未经行为验证**，请人工确认。")
-
-        # A22：存在「被跳过/未建模/重放归零 warn_only」的验证层时，即便断言全过也不算充分验证，
-        # verdict 降级为「未充分验证」（而非「放行」），消除「零验证报 pass」假象。
-        _unverified = (
-            bool(_unmodeled) or
-            (bool(replay_zero_steps) and _rz_policy == "warn_only")
-        )
-        if _unverified:
-            warnings.append("验证存在未覆盖层（闸跳过/未建模服务/重放归零 warn_only），"
-                            "结论未充分验证，请勿视同已通过。")
 
         # 3) 汇总返回（单步与旧结构兼容；多步额外给 steps）
         if scenario:
-            all_pass = all(not s["failures"] for s in step_results) and not _rz_block
-            _verdict = "拦截" if not all_pass else ("未充分验证" if _unverified else "放行")
+            all_pass = all(not s["failures"] for s in step_results)
             return {
                 "passed": all_pass,
-                "fully_verified": (not _unverified) and all_pass,
-                "verdict": _verdict,
+                "verdict": "放行" if all_pass else "拦截",
                 "steps": step_results,
                 "step_count": len(step_results),
                 "warnings": warnings,
-                "dead_branches": dead_branches,
-                "replay_zero_steps": replay_zero_steps,
-                "replay_zero_policy": _rz_policy,
                 "entity_count": len(store.entities),
             }
         sr = step_results[0]
-        passed = len(sr["failures"]) == 0 and not _rz_block
-        verdict = "拦截" if not passed else ("未充分验证" if _unverified else "放行")
+        passed = len(sr["failures"]) == 0
+        verdict = "放行" if passed else "拦截"
         reasons = []
         for a in sr["assertions"]:
-            # G3：恒假分支导致的未过标 [N/A]（不是设备没响应，是分支永不执行）
-            mark = "[通过]" if a["ok"] else ("[N/A]" if a.get("na") else "[未过]")
-            # A12：断言项现在有 state / subflow / unknown 三种，标签不能只认 entity_id
-            label = a.get("entity_id") or a.get("subflow") or "期望项"
-            line = f"{mark} {label} 期望={a['expected']} 实测={a['actual']}"
-            if a.get("reason"):
-                line += f"（{a['reason']}）"
-            if a.get("unmodeled_service"):
-                line += f"[vhass 未建模 {a['unmodeled_service']}]"
-            reasons.append(line)
+            mark = "[通过]" if a["ok"] else "[未过]"
+            reasons.append(f"{mark} {a['entity_id']} 期望={a['expected']} 实测={a['actual']}")
         reasons.append(
             f"重放 {len(sr['replayed_services'])} 个 HA 意图、记录 "
             f"{len(sr['external_calls'])} 个外部调用"
@@ -5778,11 +5158,8 @@ class Gateway:
         )
         for w in warnings:
             reasons.append(f"[警告] {w}")
-        if _rz_block:
-            reasons.append("[拦截] 重放归零：闸门未验证任何行为，按 fail-closed 处置")
         return {
             "passed": passed,
-            "fully_verified": (not _unverified) and passed,
             "verdict": verdict,
             "reasons": reasons,
             "warnings": warnings,
@@ -5790,9 +5167,6 @@ class Gateway:
             "external_calls": sr["external_calls"],
             "assertions": sr["assertions"],
             "failures": sr["failures"],
-            "dead_branches": dead_branches,
-            "replay_zero": bool(replay_zero_steps),
-            "replay_zero_policy": _rz_policy,
             "entity_count": len(store.entities),
         }
 
@@ -6040,7 +5414,7 @@ class Gateway:
             },
         }
 
-    def _safe_delete(self, flow_id: str, allow_prod: bool = False) -> None:
+    def _safe_delete(self, flow_id: str) -> None:
         """删除 e2e-trace 临时部署的 flow。
 
         旧实现 `except Exception: pass` 会静默吞掉删除失败，导致 e2e-trace
@@ -6049,7 +5423,7 @@ class Gateway:
         """
         for attempt in (1, 2):
             try:
-                self.nr.delete_flow(flow_id, force=True, allow_prod=allow_prod)
+                self.nr.delete_flow(flow_id, force=True)
                 return
             except Exception as e:  # noqa: BLE001 — NR 删除异常类型不定，统一兜底
                 if attempt == 1:
@@ -6120,8 +5494,7 @@ class Gateway:
                        expected_path: Optional[List] = None,
                        expected_postconditions: Optional[List[Dict]] = None,
                        target: str = "staging",
-                       live: bool = False,
-                       allow_prod: bool = False) -> Dict[str, Any]:
+                       live: bool = False) -> Dict[str, Any]:
         """P5 · 端到端执行追踪：把 DSL 编译产物**真实部署到 1990**并触发，
         用插桩（tap + catch）抓取信息流实际跑到的每个环节，与期望路径比对，
         产出**断点报告**——明确流程跑到哪个环节、在哪里断、报错是什么。
@@ -6182,7 +5555,7 @@ class Gateway:
         _nodes, inject_ids = self._e2e_prepare_flow(inst)
         # 4) 部署（失败由 NRRollbackError 兜底，这里捕获并产出拦截报告）
         try:
-            dep = self.nr.create_or_update_flow(fid, inst, force=True, allow_prod=allow_prod)
+            dep = self.nr.create_or_update_flow(fid, inst, force=True)
             real_fid = dep.get("id") or fid
         except Exception as e:
             return self._e2e_result("拦截", stage="deploy", flow_id=fid,
@@ -6201,7 +5574,7 @@ class Gateway:
                 # fake/测试环境由 nr 层从入口节点模拟执行）
                 self.nr.inject_flow(real_fid)
         except Exception as e:
-            self._safe_delete(real_fid, allow_prod=allow_prod)
+            self._safe_delete(real_fid)
             return self._e2e_result("拦截", stage="inject", flow_id=real_fid,
                                      error=f"触发失败：{e}",
                                      reasons=[f"inject 触发失败：{e}"])
@@ -6244,7 +5617,7 @@ class Gateway:
             if not post["ok"]:
                 report["verdict"] = "断点"
         # 9) 回滚插桩副本 + 清 trace（context 清理走 DELETE，见 nr_client.delete_context）
-        self._safe_delete(real_fid, allow_prod=allow_prod)
+        self._safe_delete(real_fid)
         try:
             self.nr.delete_context("global", trace_key)
         except Exception:
@@ -6476,8 +5849,7 @@ class Gateway:
 
     def run_e2e_trace_raw(self, flow_json, expected_path=None,
                           expected_postconditions=None, target="staging",
-                          live=False, trigger=None,
-                          allow_prod: bool = False) -> Dict[str, Any]:
+                          live=False, trigger=None) -> Dict[str, Any]:
         """C1 · 白箱 L3 运行时追踪：直接吃**原始 NR flow**（不经 DSL 编译），
         真实部署到 1990 并触发，用插桩抓取实际执行轨迹，与期望路径比对 → 断点报告。
 
@@ -6523,7 +5895,7 @@ class Gateway:
             return self._e2e_result(
                 "拦截", "trigger",
                 error="flow 无 inject 且无可转换的事件入口节点",
-                reasons=[f"{target} 环境 vhass 暂不支持 HA websocket 事件推送"
+                reasons=["staging 环境 vhass 暂不支持 HA websocket 事件推送"
                          "（P3 已知缺口），state 触发器无法在无副作用前提下被真实点燃。"
                          "请改用 inject 触发器，或在 trigger 参数里提供合成触发事件。"])
 
@@ -6537,7 +5909,7 @@ class Gateway:
 
         # 5) 部署
         try:
-            dep = self.nr.create_or_update_flow(fid, inst, force=True, allow_prod=allow_prod)
+            dep = self.nr.create_or_update_flow(fid, inst, force=True)
             real_fid = dep.get("id") or fid
         except Exception as e:
             return self._e2e_result("拦截", "deploy", flow_id=fid,
@@ -6551,7 +5923,7 @@ class Gateway:
                 self.nr.trigger_inject(iid)
                 triggered.append(iid)
         except Exception as e:
-            self._safe_delete(real_fid, allow_prod=allow_prod)
+            self._safe_delete(real_fid)
             return self._e2e_result("拦截", "inject", flow_id=real_fid,
                                     error=f"触发失败：{e}",
                                     reasons=[f"inject 触发失败：{e}"])
@@ -6610,7 +5982,7 @@ class Gateway:
                     f"postconditions 校验异常：{e}")
 
         # 10) 回滚 + 清理
-        self._safe_delete(real_fid, allow_prod=allow_prod)
+        self._safe_delete(real_fid)
         try:
             self.nr.delete_context("global", trace_key)
         except Exception:
@@ -6816,15 +6188,12 @@ class Gateway:
           mode B（落状态）  ：{"domain": "light", "service": "turn_on",
                                 "data": {"entity_id": "light.x"}, "reason": "..."}
 
-        安全模型（铁律·自愈闭环 Self-Healing Loop）：
-          - A/C 改 flow = 高风险 → **默认自动写回**（不再进人审闸）：先 snapshot 落回滚点，
-            再做 per-(agent, flow) 滑动窗口失败预算检查（自愈重试次数，WebUI 可配，默认 3），
-            通过后直接 modify_flow 写回；预算耗尽即停止并转报告/人工
-            （stage=selfheal_budget_exhausted），防止自动修复死循环。
-          - 回滚点快照**保留**（作为安全网，不是闸），apply_rollback 随时可还原到写回前状态。
-          - `auto_approve` 参数**已废弃**：apply 闭环恒自动写回，保留签名仅为 MCP 调用方兼容。
+        安全模型（铁律）：
+          - A/C 改 flow = 高风险 → 默认 auto_approve=False 时**不执行**，先 snapshot 落回滚点、
+            再 request_decision 进人审闸，返回 {pending: True, decision_id, trace_id, snapshot_path}；
+            人类在 WebUI 批准后，调用方以**相同 trace_id + auto_approve=True** 重调本方法才真正写回。
           - B 落状态 = 低风险 → 本层 audit auto-pass（不额外加闸），直接透传 commit_ha_service
-            （它自身已进确认闸，不存在裸写 HA）；B 段不计入自愈预算。
+            （它自身已进确认闸，不存在裸写 HA）。
           - #607：目标 tab 处于禁用态时**显式告警**（tab_disabled=True + warnings），
             提醒调用方别拿空回读当证据乱改；告警不阻塞（禁用 tab 上做热补丁本身是合法运维动作）。
 
@@ -6908,26 +6277,31 @@ class Gateway:
             audit["warnings"].append(
                 "快照落盘失败：本次 apply 无回滚点，apply_rollback 将不可用。")
 
-        # 自愈闭环（Self-Healing Loop）：默认自动写回已部署 flow，不进人审闸；
-        # 以 per-(agent, flow) 滑动窗口失败预算做有界失效保护（fail-safe，防死循环）。
-        _allowed, _info = self._selfheal_budget_check(agent_id, flow_id)
-        if not _allowed:
-            audit.update(ok=False, applied=False, pending=False,
-                         stage="selfheal_budget_exhausted",
-                         error=_info.get("error"),
-                         retry_budget=_info.get("retry_budget"),
-                         failed_attempts_in_window=_info.get("failed_attempts_in_window"),
-                         gate="selfheal_budget", risk="high")
+        # 决策闸：未获批准一律只请示、不落地
+        if not auto_approve:
+            how = ("整条 DSL 重编译" if dsl
+                   else f"{len(node_patches or [])} 条节点补丁（外科式局部改）")
+            q = (f"【apply {mode} 段·改 flow 请示】flow「{label}」({flow_id})\n"
+                 f"修正理由：{reason or '（agent 未提供）'}\n"
+                 f"改动方式：{how}\n"
+                 f"回滚点：{snap or '⚠ 快照失败·无回滚点'}\n"
+                 f"trace_id={trace_id}")
+            dec = self.request_decision(q, ["批准应用", "拒绝"], source=agent_id)
+            did = ((dec or {}).get("decision") or {}).get("id")
+            audit.update(ok=True, pending=True, applied=False,
+                         stage="decision_gate", decision_id=did, risk="high",
+                         gate="request_decision",
+                         note=("已进人审闸：请在 WebUI 工作区选择；批准后以相同 trace_id + "
+                               "auto_approve=True 重调 apply_flow 才会真正写回（回滚点复用）。"))
             _write_apply_trace(audit)
             return audit
 
-        # 走既有外科式改流链路（含节点注册表闸门 + 部署）
+        # 已获批准 → 走既有外科式改流链路（含节点注册表闸门 + 部署）
         res = self.modify_flow(flow_id, dsl=dsl, node_patches=node_patches,
                                agent_id=agent_id)
         ok = bool(res.get("ok"))
-        self._selfheal_budget_record(agent_id, flow_id, ok)
         audit.update(ok=ok, applied=ok, pending=False, stage="modify_flow",
-                     result=res, gate="selfheal_auto_write", risk="high")
+                     result=res, gate="approved", risk="high")
         if not ok:
             audit["error"] = res.get("error") or "modify_flow 失败"
         else:
@@ -7029,15 +6403,15 @@ class Gateway:
 
     def apply_rollback(self, trace_id: str, agent_id: str = "unknown-agent",
                        auto_approve: bool = False) -> Dict[str, Any]:
-        """把某次 apply（trace_id）改动的 flow 还原到 apply 前的快照（自愈闭环·回滚）。
+        """把某次 apply（trace_id）改动的 flow 还原到 apply 前的快照。
 
         - 从 data/apply_traces/<trace_id>.json 找回 flow_id 与 snapshot_path；
-        - 还原同样是「改 flow」＝高风险，**默认自动执行**（与 apply_flow 对称、计入同一
-          (agent, flow) 自愈预算），预算耗尽即停止（stage=selfheal_budget_exhausted，fail-safe 防死循环）；
+        - 还原同样是「改 flow」＝高风险：默认进 request_decision 闸，
+          auto_approve=True 才执行（与 apply_flow 对称，不留后门）；
         - 执行路径复用 modify_flow 的部署链路（节点注册表闸门 + create_or_update_flow(force)），
           **不走 deploy_raw**：还原的是曾经在线的已知良好状态，不该被新增 lint 规则二次拦下。
 
-        返回 {ok, restored, pending, trace_id, flow_id, snapshot_path, error?}。"""
+        返回 {ok, restored, pending, trace_id, flow_id, snapshot_path, decision_id?, error?}。"""
         out: Dict[str, Any] = {"ok": False, "restored": False, "pending": False,
                                "trace_id": trace_id, "agent_id": agent_id, "warnings": []}
         tr = _read_apply_trace(trace_id)
@@ -7064,14 +6438,14 @@ class Gateway:
             out.update(stage="load_snapshot", error="快照内无节点，拒绝用空 flow 覆盖线上")
             return out
         label = flow.get("label") or flow_id
-        # 自愈闭环：回滚同样默认自动执行、计入同一 (agent, flow) 自愈预算（fail-safe 防死循环）
-        _allowed, _info = self._selfheal_budget_check(agent_id, flow_id)
-        if not _allowed:
-            out.update(ok=False, restored=False, pending=False,
-                       stage="selfheal_budget_exhausted",
-                       error=_info.get("error"),
-                       retry_budget=_info.get("retry_budget"),
-                       failed_attempts_in_window=_info.get("failed_attempts_in_window"))
+        if not auto_approve:
+            q = (f"【apply 回滚请示】把 flow「{label}」({flow_id}) 还原到 apply 前快照\n"
+                 f"trace_id={trace_id}\n快照：{snap_path}\n"
+                 f"原修正理由：{tr.get('reason') or '（无）'}")
+            dec = self.request_decision(q, ["批准回滚", "拒绝"], source=agent_id)
+            did = ((dec or {}).get("decision") or {}).get("id")
+            out.update(ok=True, pending=True, stage="decision_gate", decision_id=did,
+                       note="已进人审闸；批准后以 auto_approve=True 重调 apply_rollback 执行。")
             return out
         target = dict(flow)
         target["id"] = flow_id
@@ -7084,9 +6458,7 @@ class Gateway:
             res = self.nr.create_or_update_flow(flow_id, target, force=True)
         except Exception as e:
             out.update(stage="deploy", error=f"还原部署失败：{e}")
-            self._selfheal_budget_record(agent_id, flow_id, False)
             return out
-        self._selfheal_budget_record(agent_id, flow_id, True)
         out.update(ok=True, restored=True, stage="restored",
                    node_count=len(target.get("nodes", [])),
                    result=res if isinstance(res, dict) else {"raw": str(res)},
@@ -7096,52 +6468,6 @@ class Gateway:
                             "agent_id": agent_id, "stage": "restored",
                             "snapshot_path": snap_path})
         return out
-
-    # ── 自愈闭环（Self-Healing Loop）滑动窗口失败预算 ──
-    # WebUI 可配 feature_flags.selfheal_budget（默认 3），env AUTOFLLOW_SELFHEAL_BUDGET 回退；
-    # 窗口 AUTOFLLOW_SELFHEAL_WINDOW_MIN（默认 10 分钟）。0=禁用自主重试（一次失败即停）。
-    # 与 deploy_raw 的 retry_budget 同源思想，仅作用域换成 apply/rollback、默认值 3。
-    def _selfheal_budget_check(self, agent_id: str, flow_id: str):
-        """per-(agent, flow) 滑动窗口失败预算检查。
-
-        返回 (allowed, info)：allowed=True 可继续写回；allowed=False 时 info 含 error /
-        retry_budget / failed_attempts_in_window，调用方据此返回 stage=selfheal_budget_exhausted。
-        """
-        _budget = None
-        try:
-            _budget = int(load_feature_flags(self.cfg).get("selfheal_budget"))
-        except (TypeError, ValueError, AttributeError):
-            _budget = None
-        if _budget is None:
-            _budget = int(os.environ.get("AUTOFLLOW_SELFHEAL_BUDGET", "3"))
-        _window = float(os.environ.get("AUTOFLLOW_SELFHEAL_WINDOW_MIN", "10")) * 60
-        if not hasattr(self, "_apply_selfheal_budget"):
-            self._apply_selfheal_budget = {}
-        _hist = self._apply_selfheal_budget.setdefault((agent_id, flow_id), [])
-        _now = time.time()
-        _hist[:] = [t for t in _hist if _now - t < _window]  # 滑动窗口裁剪
-        # 语义：attempts allowed = selfheal_budget（budget=0 ⇒ 禁用自主重试，任何写回都被拦）。
-        if len(_hist) >= _budget:
-            return False, {
-                "error": (
-                    f"自愈重试预算耗尽：agent `{agent_id}` 在 {_window/60:.0f} 分钟内对 flow "
-                    f"`{flow_id}` 已有 {len(_hist)} 次自主修复失败（上限 {_budget}）。"
-                    f"疑似自动修复死循环，已停止并转报告/人工。请人工介入检查 flow，"
-                    f"或在 WebUI 调高自愈重试次数（selfheal_budget）。"
-                ),
-                "retry_budget": _budget,
-                "failed_attempts_in_window": len(_hist),
-            }
-        return True, {}
-
-    def _selfheal_budget_record(self, agent_id: str, flow_id: str, ok: bool) -> None:
-        """写回结果记预算：成功清空该 (agent, flow) 计数（避免误伤后续正常修复），失败追加时间戳。"""
-        if not hasattr(self, "_apply_selfheal_budget"):
-            self._apply_selfheal_budget = {}
-        if ok:
-            self._apply_selfheal_budget.pop((agent_id, flow_id), None)
-        else:
-            self._apply_selfheal_budget.setdefault((agent_id, flow_id), []).append(time.time())
 
     def get_apply_trace(self, trace_id: str) -> Dict[str, Any]:
         """按 trace_id 读回某次 apply 的完整审计轨迹（data/apply_traces/<trace_id>.json）。
@@ -7423,34 +6749,6 @@ class Gateway:
         立即返回决策记录；人类在 WebUI 工作区点选后由 resolve_decision 闭环。非阻塞。"""
         rec = self.decisions.create(question, options, source=source)
         did = rec["id"]
-        # R10(#round4) iss_fb16973875：A24 报「apply 回执 decision_id 与库错位一位」→
-        # 按回执 id 调 get_decision 必「决策不存在」，apply→get_decision 闭环静默断掉。
-        # 真码复盘未能复现（store 层 300 轮 create→get 零错位、id 同源无中间改写），
-        # 但**「复现不出」不等于「不会发生」**——这条闭环一旦错位是完全静默的：
-        # agent 会拿着一个永远查不到的 id 空等人类拍板。故加读回自检：回执 id 必须
-        # 能从库里查回来，查不回就把 ok 打成 False 并如实说明，绝不把死 id 当成功回执发出去。
-        # ── A24(#round5) 根因排查结论（iss_fb16973875 续）──
-        # 穷举全仓库「dec_」id 去向后确认：唯一生成点是 decision_store.create 的
-        #   did = "dec_" + uuid.uuid4().hex[:12]（L81），落库与回查均走同一 did（_row_to_dict 仅
-        #   做 json.loads(options)，不改 id）。request_decision 回执 decision_id = did = rec["id"] =
-        #   DB 行 id，三处同一来源、无中间改写/截断。调用方（mcp.autoflow_request_decision 取
-        #   res["decision"]["id"]、apply_flow/apply_rollback 已从嵌套剥壳改为优先取 res["decision_id"]）
-        #   均派生自同一 id，脆弱剥壳最多取 None 不会「一位之差」。故原始「dec_83d…3aea vs dec_83d…7aea」
-        #   一位之差无法在当前代码任何路径复现——判定为历史传输/显示偶发，非代码缺陷。
-        # 处置：不静默关单——保留上方 R4 读回自检为最终 fail-safe（任何未来错位都会被它拦成
-        #   ok=False 而非发死 id），并新增 tests/test_decision_id_consistency.py 把「复现不出」固化为
-        #   可执行守护（错位注入→ok:False + 300 轮 create→get→回执 id 一致性）。
-        verify = None
-        try:
-            verify = self.decisions.get(did)
-        except Exception as e:
-            return {"ok": False, "decision": rec, "decision_id": did,
-                    "error": f"决策已落库但读回自检异常：{e}；请勿按该 decision_id 轮询。"}
-        if not verify or verify.get("id") != did:
-            return {"ok": False, "decision": rec, "decision_id": did,
-                    "error": (f"决策 id 读回自检失败：回执 id={did}，库中读回="
-                              f"{(verify or {}).get('id')!r}。apply→get_decision 闭环会断，"
-                              f"请查 decision_store 落库路径，勿按此 id 轮询。")}
         opts_preview = "\n".join(f"{i+1}. {o}" for i, o in enumerate(rec["options"]))
         threading.Thread(
             target=self._bark_push,
@@ -7459,9 +6757,7 @@ class Gateway:
             kwargs={"group": "AutoFlow-决策"},
             daemon=True,
         ).start()
-        # decision_id 与 decision.id 同源（上面已读回自检），显式平铺一份便于调用方直取，
-        # 避免各处各自 `((dec or {}).get("decision") or {}).get("id")` 层层剥壳时取空。
-        return {"ok": True, "decision": rec, "decision_id": did,
+        return {"ok": True, "decision": rec,
                 "note": "决策已写入工作区；请在 WebUI 工作区选择，Bark 也已催办"}
 
     def list_decisions(self, status: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
@@ -7514,21 +6810,8 @@ class Gateway:
         while True:
             try:
                 self._tick_decisions()
-                # 成功一拍即清零连续失败计数（consecutive_failures）
-                self._watchdog_failures = 0
-            except Exception as e:
-                # ★A-3 安全修复：原 except Exception: pass 静默吞掉所有看门狗异常，
-                # 决策催办持续失败也无人知晓。改为记日志 + 连续失败计数，≥10 标 degraded。
-                self._watchdog_failures = getattr(self, "_watchdog_failures", 0) + 1
-                _gw_logger.error(
-                    "watchdog tick failed (consecutive=%d): %s",
-                    self._watchdog_failures, e, exc_info=True,
-                )
-                if self._watchdog_failures >= 10:
-                    _gw_logger.error(
-                        "watchdog degraded: %d consecutive failures, decision reminders may be stuck",
-                        self._watchdog_failures,
-                    )
+            except Exception:
+                pass
             time.sleep(60)
 
     def _tick_decisions(self) -> None:

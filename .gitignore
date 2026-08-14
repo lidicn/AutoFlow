@@ -68,9 +68,6 @@ _archive_restarts/
 # A4 归档区：根目录临时脚本与一次性 flow 导出移入此处（不进版本库）
 scratch/
 
-# 交付卡 / PR 正文（含真实 NAS IP、部署路径，误提交会破 P-2 门禁，不进版本库）
-artifacts/
-
 # 深层历史调试目录（build_subflows.py 等 dev 脚本，不随发布版分发）。
 # R2 起唯一的运行时依赖 subflows_built.json 已迁至 data/subflows/nr_defs/，
 # 此处不再有需白名单放行的文件（少一处「被排除目录内捞文件」的脆弱模式）。
@@ -87,17 +84,8 @@ _*.jsonl
 # 个人 HA 配置导出（含 Bark key / NAS IP，非 AutoFlow 源码）
 /smarthome-assistant/
 
-# ===== P0 安全审计（P-3/P-5/P-8）：诊断/交接/产物脚本与缓存不进版本库 =====
-# 这些文件含 NAS UNC 路径、真实内网 IP、一次性热修逻辑，非仓库源码，误 git add -A 会泄漏。
-HANDOFF_*.md
+# ===== 收敛补充（2026-08-14）：本地散落备份/缓存不进版本库 =====
 .cbcache/
-fix_hist_wires.py
-scan_*.py
-validate_flows.py
-build_capmatrix_flow.py
-capmatrix_flow*.json
-
-# ===== REG 矩阵真实 fixture（隐私，永不 push GitHub）=====
-# 3 个 REG tab 导出 JSON / 真实 HA 设备拓扑，含潜在令牌，绝不可进版本库。
-# 活存档在 1990 测试实例；本地仅 gitignored 导出，容器重建后重新导入。
-tests/fixtures_local/
+src_backup_*/
+skills_backup*/
+*.bak-*/
