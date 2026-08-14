@@ -237,7 +237,8 @@ python -m pytest tests/test_gateway.py -q   # 单文件
 
 ### 阶段 2 — ACP 落地 + NAS 实测（进行中）
 9. **ACP 阶段1 已 push**（`2b11be9`）：ACP 生产代码随 NAS 活树已进 main（`webui.py`/`mcp_server.py`/`identity.py`/`acp_client.py` 均含 `e8b3e63` 等效实现）；本步仅补回缺失测试（`test_acp_server.py` 12+1skip、`test_acp_protocol_and_tokens.py` 18 passed）、契约对齐（`test_mcp_server_merge` 40/27）、P-2 门禁修复（`test_no_secrets` worktree 健壮）、README 内网 IP 脱敏 + `HANDOFF_*` 移出 tracked。**完整 ACP WebUI 前端可视化（委派链路图、令牌生命周期 UI）仍待做。**
-10. **NAS 实测部署**（生产动作，需签收）：`autoflow-nas-deploy` 同步 E:/NAS → `192.168.2.200:/vol1/1000/docker/autoflow/src/autoflow_gateway` + `docker compose restart` 验收；A9 双向联调（autoflow ↔ memory-worker）需 memory-worker 实例。
+10. **NAS 实测部署 ✅ 已执行（2026-08-14）**：`autoflow-nas-deploy` 技能 §1→§5 全流程。`E:/NAS`(main=`ca0dda6`) vs NAS 活树预检：**仅 3 个运行时文件差异**（webui.py 18行/P0、app.js 12行、style.css 62行/P1），其余 44 个 `.py` + index.html 完全一致；对称性辨伪确认 NAS 活树=收敛基线、**无独有热修**，部署安全。备份 `autoflow_backup_20260814_213645.tar.gz` → scp 3 文件 → restart → 验收：容器 `StartedAt` 晚于 webui.py mtime（新码已加载）、ast 确认 P0 注入落在 `llm_chat`（非错方法）、`/`=200 且 `/mcp*` 无令牌均 401、唯一 ERROR 为重启关闭序列的 SSE 断流假阳性（非缺陷）。**网关侧 `/acp` 端点已探活**（返回 -32000 unauthorized，令牌隔离生效）。
+11. **A9 双向联调（阻塞）**：运行容器 `MEMORY_WORKER_ACP_URL`/`MEMORY_WORKER_ACP_TOKEN` **均为空** → 委派链路未配置。需用户提供 memory-worker 的 `/acp` 地址 + `acp_` 令牌（经 WebUI 连接设置或 compose env 注入）后，启用 ACP 开关 + 签发网关 acp_ 令牌，再测 `delegate_to_memory_worker` 闭环。
 11. **deepseek2api 对接**：tools 格式对齐，转交对方开发者后做联调验收。
 12. **A23/A24/A26**（dev/round5-cheap-fixes）：按 `--no-ff` 合并，`push` 后刷新 tracking refs。
 
@@ -255,7 +256,8 @@ python -m pytest tests/test_gateway.py -q   # 单文件
 - [x] P0 agent 身份注入 + P1 底部居中输入 UI 已实现并 push（`ec47078`，2026-08-14）
 - [x] 阶段1 ACP 测试补回 + P-2 门禁修复 + README 脱敏，已 push（`2b11be9`，2026-08-14）：ACP 服务端/协议/令牌测试 30+1skip passed、`test_mcp_server_merge` 对齐 40/27、`test_no_secrets` worktree 健壮、内网 IP 脱敏 + `HANDOFF_*` 移出 tracked
 - [ ] 清理 `*.bak-*` / `src_backup_*` 残留目录；归档旧坏 git 副本 `E:\autoflow`（建议另择机）
-- [ ] NAS 实测部署（生产动作，需签收）：`autoflow-nas-deploy` 同步 + restart 验收 + A9 双向联调
+- [x] NAS 实测部署 ✅（2026-08-14）：`autoflow-nas-deploy` 同步 3 文件 + restart + 运行时内省验收通过；网关侧 `/acp` 已探活
+- [ ] A9 双向联调（阻塞）：需用户提供 memory-worker `/acp` URL + `acp_` 令牌配置委派链路
 - [ ] 修复 2 个基线既有 red（`test_verify_flow`、`test_vhass`，`ceb1218` 基线即有、与 B/C 无关）— 建议另立工单
 - [ ] 裁决 c4_replay_semantics：默认维持 `fail_closed`（建议），写入决策记录
 - [ ] 拍板 c4_replay_semantics（建议维持 fail_closed）
