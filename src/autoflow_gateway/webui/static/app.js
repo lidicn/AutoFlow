@@ -2242,6 +2242,7 @@ async function loadAcpTokens() {
         <span class="sub" id="acpEnabledState">读取中…</span>
       </label>
     </div>
+    <div id="acpOutbound" class="card" style="margin:14px 0">加载出向配置…</div>
     <div id="acpList" class="empty">加载中…</div>`;
   const btn = $("#acpCreateBtn");
   if (btn) btn.onclick = showCreateAcpToken;
@@ -2273,6 +2274,79 @@ async function loadAcpTokens() {
   } catch (e) {
     const box = $("#acpList");
     if (box) box.innerHTML = errBox(e.message || "加载失败", loadAcpTokens);
+  }
+  renderAcpOutbound();
+}
+
+async function renderAcpOutbound() {
+  const box = $("#acpOutbound");
+  if (!box) return;
+  try {
+    const r = await api("GET", "/settings/connections");
+    if (!r.ok) throw new Error(r.data?.error || "加载失败");
+    const g = (r.data?.groups || []).find((x) => x.id === "memory");
+    if (!g) {
+      box.innerHTML = `<div class="empty">当前网关未启用 Memory-Agent 连接字段，请确认后端版本 ≥ 本改动。</div>`;
+      return;
+    }
+    const urlF = g.fields.find((f) => f.key === "MEMORY_WORKER_ACP_URL");
+    const tokF = g.fields.find((f) => f.key === "MEMORY_WORKER_ACP_TOKEN");
+    box.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+      <div>
+        <div class="meta">出向委派配置（autoflow → memory-agent）</div>
+        <div class="sub">网关调用对端 /acp 所需的地址与令牌，保存后立即热生效。</div>
+      </div>
+    </div>
+    <div class="field">
+      <label>${esc(urlF.label)} ${urlF.configured
+        ? `<span class="conn-src">· 已设置</span>`
+        : `<span class="conn-src">· 未设置</span>`}</label>
+      <input id="acpOutUrl" value="${esc(urlF.value || "")}"
+             placeholder="${esc(urlF.placeholder || "http://host:port/acp")}">
+      ${urlF.hint ? `<p class="conn-hint">${esc(urlF.hint)}</p>` : ""}
+    </div>
+    <div class="field" style="margin-top:10px">
+      <label>${esc(tokF.label)} ${tokF.configured
+        ? `<span class="conn-src">· 已设置 ${tokF.length || 0} 字符</span>`
+        : `<span class="conn-src">· 未设置</span>`}</label>
+      <input type="password" id="acpOutToken" autocomplete="new-password"
+             placeholder="${tokF.configured ? "留空表示不修改" : "acp_..."}">
+      ${tokF.hint ? `<p class="conn-hint">${esc(tokF.hint)}</p>` : ""}
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap">
+      <button class="btn primary sm" id="acpOutSave">保存</button>
+      <button class="btn sm" id="acpOutTest">测试连接</button>
+      <span class="sub" id="acpOutResult"></span>
+    </div>`;
+    $("#acpOutSave").onclick = async () => {
+      const patch = {};
+      const u = $("#acpOutUrl").value.trim();
+      const t = $("#acpOutToken").value.trim();
+      if (u) patch.MEMORY_WORKER_ACP_URL = u;
+      if (t) patch.MEMORY_WORKER_ACP_TOKEN = t;
+      const out = $("#acpOutResult");
+      out.textContent = "保存中…";
+      try {
+        const sr = await api("PUT", "/settings/connections", patch);
+        if (!sr.ok) throw new Error(sr.data?.error || sr.status);
+        toast("已保存并生效");
+        await renderAcpOutbound();
+      } catch (e) { out.textContent = "保存失败：" + e.message; }
+    };
+    $("#acpOutTest").onclick = async () => {
+      const out = $("#acpOutResult");
+      out.textContent = "测试中…";
+      try {
+        const tr = await api("POST", "/settings/connections/test", { targets: ["memory"] });
+        if (!tr.ok) throw new Error(tr.data?.error || tr.status);
+        const d = (tr.data?.results || {}).memory || {};
+        out.innerHTML = d.ok
+          ? `✅ ${esc(d.detail || "连接正常")}`
+          : `❌ ${esc(d.error || "连接失败")}`;
+      } catch (e) { out.textContent = "测试失败：" + e.message; }
+    };
+  } catch (e) {
+    box.innerHTML = `<div class="empty">${errBox(e.message || "加载失败", renderAcpOutbound)}</div>`;
   }
 }
 
@@ -2633,7 +2707,11 @@ async function loadLlmAgent() {
     </div></div>
     <div id="llmChat" class="chat"></div>
     <div class="chat-input-bar" id="llmInputBar">
-      <button class="btn ghost sm" id="llmTools" title="工具">+</button>
+      <div class="input-tools">
+        <button class="tool-btn" id="llmTools" title="工具">+</button>
+        <button class="tool-btn" id="llmBuild" title="Build">Build</button>
+        <button class="tool-btn" id="llmModel" title="选择模型">选择模型</button>
+      </div>
       <textarea id="llmInput" rows="1" placeholder="随便问点什么，/ 可查看命令，@ 可添加上下文..."></textarea>
       <button class="btn primary send-btn" id="llmSend">➤</button>
     </div>`;
@@ -2714,6 +2792,10 @@ async function loadLlmAgent() {
   if (input) input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMsg(); }
   });
+  const buildBtn = $("#llmBuild"), modelBtn = $("#llmModel"), toolsBtn = $("#llmTools");
+  if (buildBtn) buildBtn.onclick = () => toast("Build 模式暂未接入，后续可在此直接生成/调试子流程。");
+  if (modelBtn) modelBtn.onclick = () => toast("模型选择暂未接入，当前使用 LLM 设置页配置的默认模型。");
+  if (toolsBtn) toolsBtn.onclick = () => toast("工具面板暂未接入，当前 LLM 已自动调用网关工具。");
 }
 
 // 启动

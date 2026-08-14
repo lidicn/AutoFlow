@@ -358,18 +358,43 @@ body {
 #view-llm_agent .chat-input-bar {
   position: fixed;
   left: 50%;
-  bottom: calc(var(--bottomnav-h) + 12px); /* 底部导航上方 */
+  bottom: calc(var(--bottomnav-h) + 16px); /* 底部导航上方 */
   transform: translateX(-50%);
-  width: min(800px, calc(100vw - var(--sidebar-w) - 48px));
+  width: min(960px, calc(100vw - var(--sidebar-w) - 48px));
   z-index: 30;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 24px;
-  box-shadow: 0 4px 16px rgba(16,24,40,.10);
-  padding: 10px 12px;
+  border-radius: 28px;
+  box-shadow: 0 8px 30px rgba(16,24,40,.12);
+  padding: 12px 14px;
   display: flex;
   align-items: flex-end;
   gap: 10px;
+}
+#view-llm_agent .chat-input-bar .input-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding-bottom: 6px;
+}
+#view-llm_agent .chat-input-bar .input-tools button,
+#view-llm_agent .chat-input-bar .input-tools .tool-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 14px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+#view-llm_agent .chat-input-bar .input-tools button:hover,
+#view-llm_agent .chat-input-bar .input-tools .tool-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
 }
 #view-llm_agent .chat-input-bar textarea {
   flex: 1;
@@ -377,20 +402,21 @@ body {
   background: transparent;
   resize: none;
   max-height: 160px;
-  min-height: 24px;
-  padding: 6px 4px;
+  min-height: 28px;
+  padding: 8px 4px;
   font-size: 15px;
   line-height: 1.5;
   outline: none;
 }
 #view-llm_agent .chat-input-bar .send-btn {
-  width: 36px;
-  height: 36px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
   padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  font-size: 16px;
 }
 /* 聊天消息底部留空，避免被固定输入条遮挡 */
 #view-llm_agent .chat { padding-bottom: 90px; }
