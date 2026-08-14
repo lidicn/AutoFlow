@@ -56,7 +56,19 @@ _TEXT_EXT = {
 
 
 def _is_git_repo() -> bool:
-    return os.path.isdir(os.path.join(_REPO_ROOT, ".git"))
+    # ★ 不能用 os.path.isdir(".git") 判定：在 **git worktree** 里 `.git` 是文本文件
+    # （指向真实 gitdir），isdir 返回 False 会让门禁静默 skip，扫描范围归零
+    # （DEV-acp-integration #708 实测踩中，门禁变成永远绿的摆设）。
+    # 改用 git rev-parse --is-inside-work-tree：主仓 / worktree / submodule 全覆盖，
+    # 非 git 目录仍正确返回 False 而跳过。
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=_REPO_ROOT, capture_output=True, text=True, timeout=30,
+        )
+        return r.returncode == 0 and r.stdout.strip() == "true"
+    except Exception:
+        return False
 
 
 def _tracked_files() -> list[str]:

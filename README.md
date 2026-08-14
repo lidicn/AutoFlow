@@ -184,7 +184,7 @@ docker exec autoflow_gateway cat /data/.webui_token
 
 ```bash
 TOKEN=$(docker exec autoflow_gateway cat /data/.webui_token)
-echo "http://192.168.2.200:8000/?token=$TOKEN"
+echo "http://&lt;NAS_IP&gt;:8000/?token=$TOKEN"
 ```
 
 > 容器名不是默认的 `autoflow_gateway`？先 `docker ps | grep autoflow` 看实际名字，命令里替换掉即可。
@@ -203,9 +203,9 @@ http://<你这台机器的IP>:8000/?token=<刚才那串字符>
 
 | 填什么 | 说明 |
 |---|---|
-| **Home Assistant 地址** | 如 `http://192.168.1.10:8123`。<br>⚠️ 如果 HA 跟 AutoFlow 在**同一台机器**上，要写 `http://host.docker.internal:8123`，**不能写 localhost** |
+| **Home Assistant 地址** | 如 `http://&lt;LAN_IP&gt;:8123`。<br>⚠️ 如果 HA 跟 AutoFlow 在**同一台机器**上，要写 `http://host.docker.internal:8123`，**不能写 localhost** |
 | **HA 长期访问令牌** | HA 里：左下角头像 → 安全 → 长期访问令牌 → 创建 |
-| **Node-RED 地址** | 如 `http://192.168.1.10:1880` |
+| **Node-RED 地址** | 如 `http://&lt;LAN_IP&gt;:1880` |
 | **Node-RED 账号密码** | 如果你的 NR 开了登录 |
 
 保存后立即生效，不用重启。
@@ -242,7 +242,7 @@ http://<你这台机器的IP>:8000/?token=<刚才那串字符>
   "mcpServers": {
     "autoflow": {
       "type": "streamableHttp",
-      "url": "http://192.168.1.10:8000/mcp",
+      "url": "http://&lt;LAN_IP&gt;:8000/mcp",
       "headers": {
         "Authorization": "Bearer af_你的身份码"
       }

@@ -4,6 +4,8 @@
 !.env.example
 # WebUI 访问令牌（af-ui-...，切勿提交）
 **/.webui_token
+# 交接/运营文档（含内网 IP、明文令牌路径、个人 NAS 拓扑，不进版本库）
+HANDOFF_*
 
 # Python
 __pycache__/
