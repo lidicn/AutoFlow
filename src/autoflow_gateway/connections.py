@@ -50,6 +50,9 @@ GROUP_SPECS: List[Dict[str, str]] = [
      "desc": "自动化流程的落地实例，默认指向 1880；启用了登录鉴权才需要填用户名/密码。"},
     {"id": "bark", "label": "Bark 推送（可选）",
      "desc": "网关需要你人工审核时的手机通知通道。不填则相关推送静默跳过，不影响其它功能。"},
+    {"id": "memory", "label": "Memory-Agent (ACP 委派)",
+     "desc": "网关出向委派对端（memory-agent，原 memory-worker 改名）的 /acp 地址与 acp_ 令牌。"
+             "填后网关可经 autoflow_delegate_to_memory_worker 调对端取家庭记忆/知识检索。仅走连接设置落盘，绝不进 git。"},
 ]
 
 FIELD_SPECS: List[FieldSpec] = [
@@ -71,6 +74,15 @@ FIELD_SPECS: List[FieldSpec] = [
               "https://api.day.app", "自建服务填自己的地址，官方服务填 https://api.day.app。"),
     FieldSpec("bark", "BARK_KEY", "设备 Key", "secret", None, "",
               "Bark App 首页那串设备 key，等同于你的推送地址凭据。"),
+    # ── Memory-Agent (ACP 出向委派) ──
+    # 变量名仍沿用 MEMORY_WORKER_ACP_*（代码唯一读取名），config.py 已兼容别名
+    # MEMORY_AGENT_ACP_*（实例改名后用户可能用新名）。仅走连接设置落盘 + 热同步 cfg，
+    # 绝不硬编码、绝不进 git（P-2 门禁）。
+    FieldSpec("memory", "MEMORY_WORKER_ACP_URL", "Memory-Agent /acp 地址", "url", "memory_worker_acp_url",
+              "http://host:port/acp",
+              "memory-agent 实例的 /acp 端点。填基址（如 http://host:port）或带 /acp 均可，网关自动补 /acp。改名前叫 memory-worker，变量兼容 MEMORY_AGENT_ACP_URL。"),
+    FieldSpec("memory", "MEMORY_WORKER_ACP_TOKEN", "acp_ 令牌", "secret", "memory_worker_acp_token", "",
+              "memory-agent 为网关签发的 acp_ 令牌（Bearer）。仅本机落盘，界面只回显掩码，绝不回传明文。"),
 ]
 
 _SPEC_BY_KEY: Dict[str, FieldSpec] = {f.key: f for f in FIELD_SPECS}
@@ -395,6 +407,45 @@ def _test_bark(cfg, send: bool = False) -> Dict[str, Any]:
     return {"ok": False, "error": r.get("error") or f"HTTP {r.get('status')}", "sent": False}
 
 
+def _test_memory(cfg, gateway=None) -> Dict[str, Any]:
+    """探针：确认 memory-agent /acp 端点可达且令牌被接受（带令牌 POST initialize，期望 200）。
+
+    规格（memory-agent ACP §3）：鉴权失败走 HTTP 200 + JSON-RPC error(-32000)；成功走
+    200 + JSON 响应。故 200 不等于「令牌正确」——需再看包体是否含 -32000 才能区分。"""
+    url = (os.environ.get("MEMORY_WORKER_ACP_URL") or os.environ.get("MEMORY_AGENT_ACP_URL")
+           or getattr(cfg, "memory_worker_acp_url", "") or "").rstrip("/")
+    token = (os.environ.get("MEMORY_WORKER_ACP_TOKEN") or os.environ.get("MEMORY_AGENT_ACP_TOKEN")
+             or getattr(cfg, "memory_worker_acp_token", "") or "")
+    if not url:
+        return {"ok": False, "error": "未配置 Memory-Agent /acp 地址（连接设置 → Memory-Agent）"}
+    if not url.endswith("/acp"):
+        url = url + "/acp"
+    if not token:
+        # 地址可能可达但无法确认，避免过度乐观
+        return {"ok": False, "error": "未配置 acp_ 令牌，无法验证对端鉴权；地址已填请补令牌"}
+    r = _http_probe(url, timeout=8.0,
+                    headers={"Authorization": f"Bearer {token}",
+                             "Content-Type": "application/json",
+                             "Accept": "application/json"},
+                    data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                     "params": {}}).encode("utf-8"))
+    if r.get("ok"):
+        body = r.get("body", "")
+        try:
+            obj = json.loads(body)
+            if isinstance(obj, dict) and isinstance(obj.get("error"), dict) \
+                    and obj["error"].get("code") == -32000:
+                return {"ok": False, "status": 200,
+                        "error": "服务可达，但令牌被拒（-32000 unauthorized），请检查 acp_ 令牌是否正确"}
+        except Exception:
+            pass
+        return {"ok": True, "status": r.get("status"),
+                "detail": "Memory-Agent /acp 可达且令牌被接受（initialize 返回 200）"}
+    if r.get("status") in (401, 403):
+        return {"ok": False, "status": r["status"], "error": "服务可达，但令牌无效或缺失"}
+    return {"ok": False, "error": r.get("error") or f"HTTP {r.get('status')}"}
+
+
 def test_connections(cfg, targets: Optional[List[str]] = None, gateway=None,
                      send_bark: bool = False) -> Dict[str, Any]:
     """按目标做只读连通性探测（bark 默认只校验配置，send_bark=True 才真发）。"""
@@ -407,4 +458,6 @@ def test_connections(cfg, targets: Optional[List[str]] = None, gateway=None,
             out["nr"] = _test_nr(cfg, gateway)
         elif t == "bark":
             out["bark"] = _test_bark(cfg, send_bark)
+        elif t == "memory":
+            out["memory"] = _test_memory(cfg, gateway)
     return out

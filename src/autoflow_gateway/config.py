@@ -129,8 +129,12 @@ class GatewayConfig:
     acp_path: str = field(default_factory=lambda: os.environ.get("AUTOFLOW_ACP_PATH", "/acp"))
     # autoflow → memory-worker 委派链路（autoflow_delegate_to_memory_worker 调用对端 /acp 用）。
     # 仅走 env/连接设置，绝不落仓库（P-2 门禁）。
-    memory_worker_acp_url: str = field(default_factory=lambda: os.environ.get("MEMORY_WORKER_ACP_URL", ""))
-    memory_worker_acp_token: str = field(default_factory=lambda: os.environ.get("MEMORY_WORKER_ACP_TOKEN", ""))
+    # 兼容别名 MEMORY_AGENT_ACP_*：实例原名 memory-worker、后因 GitHub 仓库名改 memory-agent，
+    # 用户可能用新名设变量；这里优先 MEMORY_WORKER_*、回退 MEMORY_AGENT_*，改名不读空。
+    memory_worker_acp_url: str = field(default_factory=lambda: os.environ.get("MEMORY_WORKER_ACP_URL")
+                                                             or os.environ.get("MEMORY_AGENT_ACP_URL", ""))
+    memory_worker_acp_token: str = field(default_factory=lambda: os.environ.get("MEMORY_WORKER_ACP_TOKEN")
+                                                              or os.environ.get("MEMORY_AGENT_ACP_TOKEN", ""))
 
     # ── LLM 钩子（autoflow 自带大模型能力，OpenAI 兼容 /chat/completions，多后端 fallback）──
     # 优先 llm_backends（JSON 数组：[{url,api_key,model,name?}...]）；缺失回落单 llm_api_key/url/model。
