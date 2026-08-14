@@ -2631,13 +2631,17 @@ async function loadLlmAgent() {
       <span class="badge env">内置大模型代理池</span>
       <button class="btn sm ghost" id="llmClear">清空对话</button>
     </div></div>
-    <div id="llmChat" class="chat" style="flex:1;overflow:auto;padding:8px 0"></div>
-    <div class="chat-input" style="display:flex;gap:8px;padding-top:10px">
-      <textarea id="llmInput" class="inp" rows="2" placeholder="例如：查一下书房电脑现在状态（Enter 发送，Shift+Enter 换行）"></textarea>
-      <button class="btn primary" id="llmSend">发送</button>
+    <div id="llmChat" class="chat"></div>
+    <div class="chat-input-bar" id="llmInputBar">
+      <button class="btn ghost sm" id="llmTools" title="工具">+</button>
+      <textarea id="llmInput" rows="1" placeholder="随便问点什么，/ 可查看命令，@ 可添加上下文..."></textarea>
+      <button class="btn primary send-btn" id="llmSend">➤</button>
     </div>`;
   const chat = $("#llmChat"), input = $("#llmInput"), send = $("#llmSend");
   const clear = $("#llmClear");
+  // 输入框随内容自动增高（最多 160px 后内部滚动）
+  function autoGrow(){ input.style.height="auto"; input.style.height=Math.min(input.scrollHeight,160)+"px"; }
+  input.addEventListener("input", autoGrow); autoGrow();
 
   function renderBubble(msg) {
     if (msg.role === "error") {

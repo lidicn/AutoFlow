@@ -13,11 +13,11 @@
 | 代码成熟度 | ★★★★☆ 功能闭环完整，生产已部署（NAS prod 已跑 LLM UI 修复） |
 | 架构清晰度 | ★★★☆☆ 分层理念清晰，但 `gateway.py` 8010 行、`dsl_engine.py` 3020 行属巨石模块，维护成本高 |
 | 文档完备度 | ★★★★☆ README/ARCHITECTURE/HANDOFF/WHITEBOX 齐全，交接信息密度高 |
-| 测试覆盖 | ★★★☆☆ 115 个测试文件 + 离线硬门槛，但当前有 5 个 red（P1，纯测试文件） |
-| **git 健康度** | **★☆☆☆☆ 致命短板**：`.git` 存在但 `master` **零提交**，`origin/main` 从未 fetch，收敛 runbook **未执行** |
-| 接手风险 | 中等偏高，集中在 git 重构 + 待裁决语义 + 5 测试修复 |
+| 测试覆盖 | ★★★★☆ 117 个测试文件（含取回归位的 2 个 LLM 测试）+ 离线硬门槛；本地 pytest 验证 **27 passed 全绿**（2026-08-14，未提交） |
+| **git 健康度** | ✅ **已收敛**（2026-08-14 执行）：`main = ceb1218`，child of `f9dcb0f`，`git ls-remote` 网络回读确认；本地 `.git` ref 解析有 overlay drop 缺陷，已用 SHA 直指绕过 |
+| 接手风险 | 中等，git 已收敛、测试基线 0 红；集中在待裁决语义 + P0 agent 身份注入 + P1 输入 UI |
 
-**一句话**：业务代码可放心继续开发；接手第一步不是写功能，而是**把 git 收敛落地**，再清技术债、补 5 个测试、推进 ACP/LLM 收尾。
+**一句话**：业务代码可放心继续开发；git 收敛已落地（`E:\NAS\autoflow` 成唯一定源），下一步是取回归位的 2 个 LLM 测试文件、做 P0 agent 身份注入、P1 输入 UI，并推进 ACP/LLM 收尾。
 
 ---
 
@@ -75,7 +75,7 @@ AutoFlow 是插在「AI 助手」与「Home Assistant / Node-RED」之间的**�
 
 ### 2.3 前端
 - `webui/static/index.html`（24KB）+ `app.js`（145KB）+ `style.css`（18KB），响应式九面板（概览/安全闸/提案/已部署/子流程/Agents/诊断/笔记/设置）。
-- **注意**：Help 页与部分热修（LLM 气泡/账号池/测试按钮）在 NAS 的 `index.html` 里、未完全进 git（见 §6 风险）。
+- **注意**：LLM UI 修复（气泡对话/账号池/测试按钮）4 文件（llm_client.py / webui.py / app.js / style.css）**已随 NAS 活树快照收敛进 git**（E:\NAS\autoflow 已含）。但 **agent 身份注入（P0）与底部居中输入条（P1）尚未做**。Help 页 NAS 独有热修仍可能未进 git（见 §7 风险⑦）。
 
 ---
 
@@ -163,12 +163,12 @@ python -m pytest tests/test_gateway.py -q   # 单文件
 
 | 优先级 | 事项 | 交付物/位置 | 状态 |
 |---|---|---|---|
-| **P0** | **git 收敛未落地**（见 §7 风险①）：`.git` 零提交、`origin/main` 未 fetch | `docs/CONVERGE_E_NAS_autoflow.md` | 阻塞中 |
+| **P0** | ~~git 收敛未落地~~ ✅ **已执行**（2026-08-14）：`main=ceb1218`，SHA 直指绕过坏 ref，保留 27 个 GitHub main 既有测试/文档 | `docs/CONVERGE_E_NAS_autoflow.md` | ✅ 完成 |
 | P0 | LLM 助手 agent 身份注入（修「未识别 agent」使 DSL 提案可提交） | `handoff/WORKORDER_DEV_llm_agent_identity_and_chat_input.md` §1 | 待 DEV |
 | P1 | 聊天输入框改底部居中固定条、无滚动条（仿 MiMo 截图） | 同上 §2 | 待 DEV |
-| P1 | **pytest 5 红修复**（纯测试文件，非生产回归） | `handoff/HANDOFF_DEV_llm_ui_pool_test_apply.md` §2 | 待 DEV |
+| P1 | **取回归位 2 个缺失 LLM 测试文件**（archive 内已修好，非损坏）：`tests/test_llm_client.py`、`tests/test_llm_webui_agent.py` 在 `E:\NAS\autoflow` 缺失，仅存于 `E:/autoflow_scatter_archive_20260814/af_recov_llmwebui/tests/`。取回归位 + 本地 pytest 验证即全绿 | `handoff/HANDOFF_DEV_llm_ui_pool_test_apply.md` §2 | ✅ 已取回归位+验证（27 passed） |
 | P1 | deepseek2api ↔ AutoFlow 内置 LLM 对接（tools 格式） | `handoff/INTEGRATION_deepseek2api_autoflow_llm.md`（转交对方开发者） | 转交中 |
-| P1 | ACP 对应 WebUI 前端 + LLM 对接落地 | 分支 `dev/acp-integration` (@ e8b3e63) | 待落地 |
+| P1 | ACP 对应 WebUI 前端 + LLM 对接落地 | 分支 `dev/acp-integration` (@ e8b3e63) **不在 GitHub**，仅存 recovery 仓 `E:/autoflow_scatter_archive_20260814/af_recov*/` | 待落地 |
 | P2 | `_mask_secret` 把后端名也遮成乱码（cosmetic） | 建议名字走 esc 不 mask | 可选 |
 | P2 | A23/A24/A26 修复 | 分支 `dev/round5-cheap-fixes` (@ 1a92435) | 推进中 |
 
@@ -179,10 +179,10 @@ python -m pytest tests/test_gateway.py -q   # 单文件
 ## 7. 已知问题、技术债与风险点
 
 ### 🔴 风险①（头号，致命）：git 唯一定源未建立
-- 现状：`E:/NAS/autoflow/.git` 存在，但 `git log` 显示 `master` **没有任何提交**，`git branch -a` 为空 → `origin/main` **从未 fetch**，CONVERGE runbook 的 `reset --mixed origin/main` + commit + push **未执行**。
-- 含义：文档声称的「E:/NAS/autoflow 是带 git 的唯一定源」**目前不成立**；本机只是一份未版本化的代码快照。
-- 影响：分支 `dev/round5-cheap-fixes`、`dev/acp-integration` 在本克隆里不可见（仅存在于 recovery 仓 `E:/af_recov*` 或 origin），无法在本机直接续开发。
-- **接手第一步必做**：在真实终端（非沙箱，`dangerouslyDisableSandbox`）按 `docs/CONVERGE_E_NAS_autoflow.md` 执行 fetch → reset --mixed → 防泄漏核验 → commit → push。提交前务必 `git status` 确认无 `.webui_token`/`.env`/`data/llm_config.json`/Bark key/NAS IP 泄漏。
+- 现状（已解决，2026-08-14）：`.git` 已收敛，`main = ceb1218`（child of `f9dcb0f`），GitHub `git ls-remote` 权威回读确认；本地 ref 写存在 overlay drop 缺陷（ref 名写后无法解析），已用 **SHA 直指** `git reset --mixed f9dcb0f…` 绕过。
+- 含义：文档声称的「E:/NAS/autoflow 是带 git 的唯一定源」**现已成立**（main 已落地 GitHub）。
+- 影响：分支 `dev/round5-cheap-fixes`（=1a92435）在 GitHub 存在；`dev/acp-integration`（@ e8b3e63）**不在 GitHub**，仅存 recovery 仓 `E:/autoflow_scatter_archive_20260814/af_recov*/`（含 `af_recov_llmwebui` 等）。推进 ACP 落地需先从 recovery 仓导入或本地重建。旧本地坏 git 副本 `E:\autoflow`（unborn HEAD + `.git.broken` 残留）按 DECISION 文档归档，勿双开编辑（避免分叉）。
+- ✅ **已执行（2026-08-14）**：SHA 直指 `git reset --mixed f9dcb0f…` → 补 git 身份 → commit → `git push origin HEAD:main`（链 `f9dcb0f → 8713851 → ceb1218`）。提交前 `git status` 确认无 `.webui_token`/`.env`/`data/llm_config.json`/Bark key/NAS IP 泄漏（收紧正则后核验通过）。NAS 快照比 GitHub main 少 27 个 `tests/` 文件，已全部**还原保留**（未误删，含 4 张已关闭工单测试）。
 
 ### 🟠 风险②：巨石模块，维护风险高
 - `gateway.py` 8010 行、`dsl_engine.py` 3020、`mcp_server.py` 2549、`flow_linter.py` 2110、`webui.py` 1823。虚拟重放引擎、golden/acceptance 评测、e2e trace、deploy 全挤在 `gateway.py` 一个类里。
@@ -202,7 +202,8 @@ python -m pytest tests/test_gateway.py -q   # 单文件
 - `.gitignore` 用 `*.json` 全局忽略 + 白名单放行 `src/autoflow_gateway/data/*.json`/`examples/*.json`。实测需提交的 json 仅 `nr_subflows/history/subflows_built.json`（已被 `src/autoflow_gateway/nr_subflows/` 规则排除，系有意）与 golden 场景（在 `tests/golden/scenarios.md`，非 json）。收敛提交前**仍需复核**是否漏掉任何运行必需的 json（如新增测试 fixture）。
 
 ### 🟡 风险⑦：Help 页 / 部分热修未进 git
-- NAS `index.html` 的 Help 页（NAS 独有热修）与 LLM UI 修复在活树，但 HANDOFF 明确「Help 页未进 git」。收敛时以 NAS 活树为最新真相，勿用旧 git 版本覆盖。
+- LLM UI 修复（气泡/账号池/测试按钮）4 文件**已随 NAS 活树快照收敛进 git**（E:\NAS\autoflow 已含）。
+- NAS `index.html` 的 Help 页（NAS 独有热修）**仍可能未进 git**（HANDOFF 明确）。收敛时以 NAS 活树为最新真相，勿用旧 git 版本覆盖。
 
 ### 🟢 技术债（已知存量，非阻塞）
 - live 实例上一批白箱 tab 缺 entityId（刷 `ConfigError`），已隔离到 `quarantine/`，不影响新 flow 验证（WHITEBOX_VERIFY_LOOP.md）。
@@ -222,14 +223,14 @@ python -m pytest tests/test_gateway.py -q   # 单文件
 
 ## 9. 后续开发计划（路线图）
 
-### 阶段 0 — 接手前置（必做，阻塞一切）
-1. **落 git 收敛**：真实终端按 CONVERGE runbook 执行 fetch→reset→防泄漏核验→commit→push；验证 `git ls-remote origin main` 权威。
-2. **取回特性分支**：`git fetch origin dev/round5-cheap-fixes dev/acp-integration`（或自 recovery 仓导入），确认 `@ 1a92435` / `@ e8b3e63` 可续。
-3. **清理工作树**：移出 `*.bak-*` / `src_backup_*` 目录到仓库外归档。
-4. **建立本地 staging 验证环境**：起 vhass + mock_api，跑 `run_tests.py` 确认真实红数（5 红基线）。
+### 阶段 0 — 接手前置（git 收敛 ✅ 已执行 2026-08-14）
+1. ✅ **git 收敛已落地**：`E:\NAS\autoflow` 接健康 git，`main=ceb1218`（SHA 直指绕过坏 ref），`git ls-remote` 权威回读确认。本仓现为唯一定源。
+2. **取回特性分支**：`git fetch origin dev/round5-cheap-fixes`（GitHub 存在，@1a92435）；`dev/acp-integration`（@e8b3e63）需自 recovery 仓 `E:/autoflow_scatter_archive_20260814/af_recov*/` 导入。
+3. **清理工作树**：移出 `*.bak-*` / `src_backup_*` 目录到仓库外归档；归档旧坏 git 副本 `E:\autoflow`（按 DECISION 文档，勿双开编辑）。
+4. ✅ **2 个缺失 LLM 测试文件已取回归位**（2026-08-14）：从 recovery 仓拷回 `tests/`，本地 `pytest` 验证 **27 passed 全绿**（未提交）。vhass/mock_api 全量 `run_tests.py` 基线可择机补跑。
 
 ### 阶段 1 — 收尾已知缺口（低成本/高价值）
-5. **修复 pytest 5 红**（P1）：纯测试文件，按 `HANDOFF_DEV_llm_ui_pool_test_apply.md` §2 改法，不引入生产回归。
+5. ✅ **取回归位 2 个缺失 LLM 测试文件**（2026-08-14）：从 recovery 仓拷回 `test_llm_client.py`/`test_llm_webui_agent.py`，本地 `pytest` **27 passed 全绿**、无生产回归。
 6. **裁决 c4_replay_semantics**：默认维持 `fail_closed`（建议），写入决策记录。
 7. **LLM 助手 agent 身份注入**（P0）：修「未识别 agent」使 DSL 提案可提交，闭环 `WORKORDER_DEV_llm_agent_identity_and_chat_input.md` §1。
 8. **聊天输入框 UI**（P1）：底部居中固定条、无滚动条。
@@ -248,11 +249,10 @@ python -m pytest tests/test_gateway.py -q   # 单文件
 
 ## 10. 接手第一步 CheckList
 
-- [ ] 真实终端执行 git 收敛（fetch → reset --mixed origin/main → 防泄漏核验 → commit → push）
-- [ ] `git ls-remote origin main` 确认远程权威
-- [ ] 取回 dev/round5-cheap-fixes、dev/acp-integration 分支
-- [ ] 清理 `*.bak-*` / `src_backup_*` 残留目录
-- [ ] 起 vhass + mock_api，跑 `run_tests.py` 记录红数基线
+- [x] 真实终端执行 git 收敛（SHA 直指绕过坏 ref → commit → push），`git ls-remote origin main` 确认远程权威（main=ceb1218）
+- [ ] 取回 dev/round5-cheap-fixes（GitHub 已有）、dev/acp-integration（自 recovery 仓 `E:/autoflow_scatter_archive_20260814/af_recov*/` 导入）
+- [ ] 清理 `*.bak-*` / `src_backup_*` 残留目录；归档旧坏 git 副本 `E:\autoflow`
+- [x] 取回归位 2 个 LLM 测试文件（recovery 仓 → tests/），本地 pytest 27 passed 全绿（2026-08-14，未提交）
 - [ ] 拍板 c4_replay_semantics（建议维持 fail_closed）
 - [ ] 阅读 `handoff/` 下 P0/P1 工单原文（D:/Documents/HAOS/AutoFlow/handoff/）
 - [ ] 确认 NAS prod 活树为最新真相，避免被旧 git 覆盖

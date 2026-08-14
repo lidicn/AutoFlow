@@ -535,11 +535,27 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             }})
         if not tools:
             return _js({"ok": False, "error": "无可用工具（部署/自检刀已按纪律隐藏）"})
+        # 内置 LLM 助手 agent：直连 FastMCP.call_tool 不经过 HTTP 鉴权中间件，
+        # 故在此按用户名解析/创建一个内置 agent，并在 executor 调用前注入 current_agent，
+        # 使 autoflow_propose_dsl 等工具能读到有效身份，修复「未识别 agent」。
+        agent_store = AgentStore(cfg)
+        llm_agent_name = "__builtin_llm_assistant__"
+        llm_agent = agent_store.get_agent_by_name(llm_agent_name)
+        if llm_agent is None:
+            llm_agent, _llm_agent_code = agent_store.create_agent(
+                name=llm_agent_name,
+                tier="prod",
+                notes="AutoFlow 内置 LLM 助手（WebUI 用户态）",
+                mode="black",
+            )
         steps = []
 
         async def executor(name: str, arguments: dict) -> str:
             if name in knives:
                 return f"[拒绝：{name} 属部署/自检刀，WebUI 助手不可调用]"
+            # 在工具执行前把内置 agent 注入 current_agent（FastMCP.call_tool 保留 contextvar）
+            var = mcp_server.get_current_agent_var()
+            tok = var.set(llm_agent)
             try:
                 res = await mcp.call_tool(name, arguments or {})
                 parts = []
@@ -551,6 +567,8 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                 out = "\n".join(parts)
             except Exception as e:
                 out = f"[工具 {name} 执行出错: {e}]"
+            finally:
+                var.reset(tok)
             steps.append({"tool": name, "args": arguments, "result": (out or "")[:4000]})
             return out
 
