@@ -2685,8 +2685,9 @@ function _saveLlmChat() {
 
 async function loadLlmAgent() {
   const v = $("#view-llm_agent");
+  let r;
   try {
-    const r = await api("GET", "/llm/config");
+    r = await api("GET", "/llm/config");
     if (!r.ok) throw new Error(r.data?.error || "加载失败");
     if (!r.data?.enabled) {
       v.innerHTML = `<div class="view-head"><h2>LLM 助手</h2></div>
