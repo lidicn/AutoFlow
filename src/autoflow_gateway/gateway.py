@@ -492,6 +492,10 @@ def _vg_eval_switch(node, msg, warnings=None, dead_rules=None, report=None):
 
     taken = []
     matched = False
+    # 【V-F3】尊重节点的 checkall 标志：NR 默认 checkall=true（多输出，逐条判定）；
+    # 显式 checkall=false 时命中即停（与真实 NR 语义对齐，避免对显式单命中流过度激活）。
+    # 默认(缺省/"true")行为与旧实现一致，零回归。
+    checkall = str(node.get("checkall", True)).lower() != "false"
     for i, rule in enumerate(rules):
         t = rule.get("t")
         # ── G3（报告 A30 闸门侧）：编译器已判「恒假/不可达」的分支，闸门不得保守视为命中 ──
@@ -519,10 +523,14 @@ def _vg_eval_switch(node, msg, warnings=None, dead_rules=None, report=None):
             if _vg_val_eq(val, rule.get("v"), rule.get("vt")):
                 taken.append(i)
                 matched = True
+                if not checkall:
+                    break
         elif t == "neq":
             if not _vg_val_eq(val, rule.get("v"), rule.get("vt")):
                 taken.append(i)
                 matched = True
+                if not checkall:
+                    break
         elif t in ("jsonata", "jsonata_exp") or (
                 t not in ("else", "otherwise") and rule.get("vt") == "jsonata"):
             # A15 关键：NR switch 的 JSONata 规则类型是 **jsonata_exp**（编译器亦按此产出，
@@ -536,11 +544,15 @@ def _vg_eval_switch(node, msg, warnings=None, dead_rules=None, report=None):
                 if matched_rule:
                     taken.append(i)
                     matched = True
+                    if not checkall:
+                        break
             else:
                 # 无法本地求值的复杂 jsonata：保守视为命中（走 THEN 体），
                 # 由调用方经 warnings 记录，避免误杀结构正确的 DSL。
                 taken.append(i)
                 matched = True
+                if not checkall:
+                    break
                 if report is not None:
                     report.setdefault("conservative", []).append(
                         {"node_id": node.get("id"), "rule_index": i,
@@ -5629,7 +5641,12 @@ class Gateway:
         has_effect_nodes = any(
             nd.get("type") == "api-call-service" or _vg_is_external_call(nd.get("type"))
             for nd in flow.get("nodes", []))
+        # 【V-F4】function 为黑箱，其潜在副作用 vhass 无法建模；若 flow 仅含 function
+        # （无显式 api-call-service 效果），闸门无法证实其是否产生副作用。
+        has_function_nodes = any(
+            nd.get("type") == "function" for nd in flow.get("nodes", []))
         replay_zero_steps = []
+        conservative_hits = []  # 【V-F1】跨步收集「保守命中」的 JSONata 分支
         for step in steps:
             # 2a) 应用本步世界事件（多步场景逐步推进现实态）
             for eid, st in (step.get("world") or {}).items():
@@ -5649,6 +5666,8 @@ class Gateway:
                 active = {n["id"] for n in flow.get("nodes", [])
                           if n.get("type") == "api-call-service"
                           or _vg_is_external_call(n.get("type"))}
+            if step_report.get("conservative"):
+                conservative_hits.extend(step_report["conservative"])
             # 2c) 重放激活意图（link out/subflow 作外部调用记录）
             replayed = []
             external = []
@@ -5798,12 +5817,25 @@ class Gateway:
 
         # A22：存在「被跳过/未建模/重放归零 warn_only」的验证层时，即便断言全过也不算充分验证，
         # verdict 降级为「未充分验证」（而非「放行」），消除「零验证报 pass」假象。
+        # 【V-F1】复杂 JSONata 无法本地求值却「保守命中」→ 条件未经逻辑校验即视为通过，
+        # 属未覆盖层，须降级（否则 fully_verified=True 假绿）。
+        # 【V-F4】function-only 流（黑箱副作用不可建模）且无显式 api-call-service 效果 →
+        # 闸门无法证实其是否产生副作用，fully_verified 不可视为完整验证。
+        _function_only = has_function_nodes and not has_effect_nodes
         _unverified = (
             bool(_unmodeled) or
-            (bool(replay_zero_steps) and _rz_policy == "warn_only")
+            (bool(replay_zero_steps) and _rz_policy == "warn_only") or
+            bool(conservative_hits) or
+            _function_only
         )
+        if _function_only:
+            warnings.append(
+                "flow 含 function 节点（黑箱，其潜在副作用 vhass 无法建模），且未显式声明 "
+                "api-call-service 效果 → 闸门无法证实其是否产生副作用，fully_verified 不可"
+                "视为完整验证（V-F4 诚实性缺口）。")
         if _unverified:
-            warnings.append("验证存在未覆盖层（闸跳过/未建模服务/重放归零 warn_only），"
+            warnings.append("验证存在未覆盖层（闸跳过/未建模服务/重放归零 warn_only/"
+                            "保守命中 JSONata/function 黑箱副作用），"
                             "结论未充分验证，请勿视同已通过。")
 
         # 3) 汇总返回（单步与旧结构兼容；多步额外给 steps）

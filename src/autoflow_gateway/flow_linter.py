@@ -644,6 +644,100 @@ def _collect_defined_fields(nodes: List[Dict[str, Any]]) -> set:
     return defined
 
 
+def _compute_reliable_fields(nodes: List[Dict[str, Any]]) -> set:
+    """固定点计算运行时『必定可得』的 msg 字段（闸门诚实性用，根治 V-F5 决定性假绿）。
+
+    与 _collect_defined_fields 的区别：后者把 change 声明字段**直接当可靠**；
+    本函数进一步要求 change 的【源】也可靠（源只引用可靠字段或字面量），否则该
+    change 写入的字段不计入可靠 → 下游 switch 读它时被判「无法求值」，由闸门(G3)
+    按不命中处理、触发重放归零 fail-closed。
+
+    基线(base，直接声明、必定可得)：
+      · "state"（取值节点恒提供）
+      · api-current-state 输出属性 payload.<x> / <x>
+      · inject 显式声明的字段（props / json payload 键）
+    change 节点 set 规则：源(to/toType) 只引用可靠字段或字面量 → 写入字段升级可靠；
+    迭代至不动点，支持 change→change 链路。function 为黑箱、其写入字段不可静态判定，
+    不计入可靠（由 R2 单独提示），避免把『无法静态确认』伪装成可靠。
+    """
+    base: set = {"state"}
+    for n in nodes:
+        if n.get("type") == "api-current-state":
+            for op in (n.get("outputProperties") or []):
+                p = op.get("property") or ""
+                if p.startswith("payload.") and p != "payload.state":
+                    base.add(p[len("payload."):])
+                elif p and p != "payload" and "." not in p:
+                    base.add(p)
+        elif n.get("type") == "inject":
+            for op in (n.get("props") or []):
+                p = op.get("p") or ""
+                if p and p != "payload" and "." not in p:
+                    base.add(p)
+            pt = n.get("payloadType")
+            payload = n.get("payload")
+            if pt == "json" and isinstance(payload, str):
+                try:
+                    obj = json.loads(payload)
+                except Exception:
+                    obj = None
+                if isinstance(obj, dict):
+                    for k in obj.keys():
+                        if isinstance(k, str) and k and "." not in k:
+                            base.add(k)
+    # change 写入字段及其源字段 token
+    writes: List[Tuple[str, set]] = []
+    for n in nodes:
+        if n.get("type") != "change":
+            continue
+        for r in (n.get("rules") or []):
+            if r.get("t") != "set":
+                continue
+            p = r.get("p")
+            if not p:
+                continue
+            if p.startswith("payload."):
+                field = p[len("payload."):]
+            elif p != "payload" and "." not in p:
+                field = p
+            else:
+                continue
+            to = r.get("to")
+            tot = r.get("tot")
+            if tot in (None, "", "msg"):
+                # to 是 msg 路径（payload.y / y）；flow./global. 作用域变量不可静态
+                # 追踪 → 视为可靠源（不追溯）。
+                src: set = set()
+                if isinstance(to, str):
+                    if re.match(r"^(flow|global)\.", to):
+                        src = set()
+                    else:
+                        for m in re.finditer(r"[A-Za-z_一-鿿][\w一-鿿]*", to):
+                            tok = m.group(0)
+                            if tok in ("payload", "msg", "flow", "global"):
+                                continue
+                            src.add(tok)
+                writes.append((field, src))
+            elif tot == "jsonata":
+                toks = {m.group(1) for m in _FIELD_TOKEN_RE.finditer(to or "")
+                        if m.group(1) not in _JSONATA_KEYWORDS}
+                writes.append((field, toks))
+            else:
+                # str/num/json/bool/date/bin/re/env/flow/global 等字面量/作用域 → 可靠源
+                writes.append((field, set()))
+    reliable = set(base)
+    progress = True
+    while progress:
+        progress = False
+        for field, src in writes:
+            if field in reliable:
+                continue
+            if not src or src <= reliable:
+                reliable.add(field)
+                progress = True
+    return reliable
+
+
 def collect_undefined_field_refs(
         nodes: List[Dict[str, Any]]) -> Dict[str, Dict[int, List[str]]]:
     """R31 的**结构化**索引：`{switch节点id: {规则下标: [未定义字段名, ...]}}`。
@@ -656,7 +750,9 @@ def collect_undefined_field_refs(
     运行态 JSONata 求值得 undefined → NR switch 该规则**不命中** → THEN 体永不执行。
     这是**静态可判定**的恒假，闸门必须与编译器结论一致（G3 / 报告 A30 闸门侧）。
     """
-    defined = _collect_defined_fields(nodes)
+    # 【V-F5】改用「运行时必定可得」字段集（含 change 上游回溯），而非仅看声明名。
+    # change 从未声明源取值 → 其写入字段不计入 reliable → 下游 switch 读它被判不可求值。
+    reliable = _compute_reliable_fields(nodes)
     idx: Dict[str, Dict[int, List[str]]] = {}
     _PROP_PATH_RE = re.compile(r"^[\w一-鿿]+(?:\.[\w一-鿿]+)*$")
     for n in nodes:
@@ -675,7 +771,7 @@ def collect_undefined_field_refs(
         if prop not in ("payload", "msg", "flow", "global") and \
                 _PROP_PATH_RE.match(prop):
             leaf = prop.split(".")[-1]
-            if leaf not in defined and leaf not in _JSONATA_KEYWORDS:
+            if leaf not in reliable and leaf not in _JSONATA_KEYWORDS:
                 for i, r in enumerate(rules):
                     if (r.get("t") or "") in ("else", "otherwise"):
                         continue
@@ -691,7 +787,7 @@ def collect_undefined_field_refs(
             toks: List[str] = []
             for m in _FIELD_TOKEN_RE.finditer(expr):
                 tok = m.group(1)
-                if tok in _JSONATA_KEYWORDS or tok in defined or tok in toks:
+                if tok in _JSONATA_KEYWORDS or tok in reliable or tok in toks:
                     continue
                 toks.append(tok)
             if toks:

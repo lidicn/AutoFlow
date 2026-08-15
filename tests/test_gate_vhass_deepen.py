@@ -417,5 +417,159 @@ class TestW1ZeroOutEdgeNoFailOpen(unittest.TestCase):
         self.assertFalse(r["passed"])
 
 
+# ═════════════ V-F1：保守命中 JSONata 不得谎报 fully_verified ═════════════
+class TestVF1ConservativeNotFullyVerified(unittest.TestCase):
+    """V-F1：复杂 JSONata 无法本地求值却『保守命中』→ 动作被重放但条件未经逻辑校验 →
+    fully_verified 不得为 True（须降级『未充分验证』）。"""
+
+    @staticmethod
+    def _flow_conservative():
+        rules = [{"t": "jsonata_exp", "v": "$exists(光照) and $custom(光照)",
+                  "vt": "jsonata"}]
+        return {"nodes": [
+            {"id": "trg", "type": "server-state-changed",
+             "entities": {"entity": ["binary_sensor.motion"], "substring": [], "regex": []},
+             "ifState": "on", "wires": [["rd"]]},
+            {"id": "rd", "type": "api-current-state", "entity_id": "sensor.lux",
+             "halt_if": "", "outputs": 1,
+             "outputProperties": [
+                 {"property": "payload", "propertyType": "msg",
+                  "value": '$type(payload) = "object" ? payload : {}', "valueType": "jsonata"},
+                 {"property": "payload.光照", "propertyType": "msg",
+                  "value": "", "valueType": "entityState"}],
+             "wires": [["sw"]]},
+            {"id": "sw", "type": "switch", "name": "分支", "property": "payload",
+             "propertyType": "msg", "checkall": "true", "rules": rules,
+             "outputs": len(rules), "wires": [["svc1"]]},
+            {"id": "svc1", "type": "api-call-service", "domain": "light",
+             "service": "turn_on", "entityId": ["light.desk"], "data": "{}",
+             "wires": [[]]},
+        ]}
+
+    def test_conservative_hit_downgrades_fully_verified(self):
+        r = _gw().run_staging_gate(
+            "", [{"entity_id": "light.desk", "state": "on"}],
+            vhass_store=_store(), flow=self._flow_conservative())
+        self.assertIn("light.turn_on(light.desk)", r["replayed_services"],
+                      "保守命中须仍走 THEN 体（结构正确流不误杀）")
+        self.assertFalse(r.get("fully_verified"),
+                         "V-F1 核心：条件未经校验的保守命中不得 fully_verified=True")
+        self.assertEqual(r["verdict"], "未充分验证",
+                         "须降级为『未充分验证』而非『放行』")
+        self.assertTrue(
+            any("保守" in w or "未充分验证" in w or "未覆盖层" in w
+                for w in r["warnings"]),
+            f"须显式告警，实得 {r['warnings']}")
+
+
+# ═════════════ V-F3：尊重 checkall 语义（命中即停 vs 多输出） ═════════════
+class TestVF3CheckallSemantics(unittest.TestCase):
+    """V-F3：尊重节点 checkall 标志。checkall=false 时命中即停（只走第一条匹配分支），
+    与真实 NR 语义对齐；默认/true 仍多输出（不变、零回归）。"""
+
+    @staticmethod
+    def _flow_multi(checkall):
+        rules = [
+            {"t": "eq", "v": "a", "vt": None},
+            {"t": "neq", "v": "z", "vt": None},     # payload.mode="a" 时恒真 → 多输出
+            {"t": "else", "v": "true", "vt": "jsonata"},
+        ]
+        return {"nodes": [
+            {"id": "trg", "type": "inject", "props": [{"p": "payload"}],
+             "payload": '{"mode": "a"}', "payloadType": "json", "wires": [["sw"]]},
+            {"id": "sw", "type": "switch", "property": "payload.mode",
+             "propertyType": "msg", "checkall": checkall, "rules": rules,
+             "outputs": len(rules), "wires": [["svcA"], ["svcB"], []]},
+            {"id": "svcA", "type": "api-call-service", "domain": "light",
+             "service": "turn_on", "entityId": ["light.a"], "data": "{}", "wires": [[]]},
+            {"id": "svcB", "type": "api-call-service", "domain": "light",
+             "service": "turn_on", "entityId": ["light.b"], "data": "{}", "wires": [[]]},
+        ]}
+
+    def test_checkall_false_stops_at_first_match(self):
+        active = _vg_evaluate_active_intents(self._flow_multi("false"), _world, None, [])
+        self.assertIn("svcA", active, "第一条规则命中")
+        self.assertNotIn("svcB", active, "checkall=false 须命中即停，不得激活第二条（V-F3）")
+
+    def test_checkall_true_activates_all_matches(self):
+        active = _vg_evaluate_active_intents(self._flow_multi("true"), _world, None, [])
+        self.assertIn("svcA", active)
+        self.assertIn("svcB", active, "checkall=true 须多输出（默认语义不变）")
+
+
+# ═════════════ V-F4：function 黑箱副作用诚实降级 ═════════════
+class TestVF4FunctionBlackboxHonesty(unittest.TestCase):
+    """V-F4：function-only 流（黑箱副作用不可建模）且无显式 api-call-service 效果 →
+    fully_verified 不得为 True（须降级『未充分验证』）。"""
+
+    @staticmethod
+    def _flow_function_only():
+        return {"nodes": [
+            {"id": "trg", "type": "inject", "props": [{"p": "payload"}],
+             "payload": "{}", "payloadType": "json", "wires": [["fn"]]},
+            {"id": "fn", "type": "function", "func": "msg.payload.x = 1; return msg;",
+             "wires": [[]]},
+        ]}
+
+    def test_function_only_not_fully_verified(self):
+        r = _gw().run_staging_gate(
+            "", [], vhass_store=_store(), flow=self._flow_function_only())
+        self.assertFalse(r.get("fully_verified"),
+                         "V-F4：function 黑箱副作用不可建模，不得 fully_verified=True")
+        self.assertEqual(r["verdict"], "未充分验证")
+        self.assertTrue(any("function" in w for w in r["warnings"]))
+
+
+# ═════════════ V-F5：change 喂未声明值 → switch 决定性假绿 ═════════════
+class TestVF5ChangeUpstreamUnverified(unittest.TestCase):
+    """V-F5 决定性假绿：change 从『未声明源』取值写入 payload.mode，下游 switch 读
+    payload.mode 恒不命中 → 0 重放却因种子态满足后置条件而假绿。修复后 change 上游被
+    回溯，payload.mode 不计入可靠字段 → switch 判定不可求值 → 重放归零 fail-closed 拦截。"""
+
+    @staticmethod
+    def _flow_change_feed(to_expr, tot):
+        rules = [{"t": "eq", "v": "target", "vt": None}]
+        return {"nodes": [
+            {"id": "trg", "type": "inject", "props": [{"p": "payload"}],
+             "payload": "{}", "payloadType": "json", "wires": [["ch"]]},
+            {"id": "ch", "type": "change",
+             "rules": [{"t": "set", "p": "payload.mode", "pt": "msg",
+                        "to": to_expr, "tot": tot}],
+             "wires": [["sw"]]},
+            {"id": "sw", "type": "switch", "name": "分支", "property": "payload.mode",
+             "propertyType": "msg", "checkall": "true", "rules": rules,
+             "outputs": len(rules), "wires": [["svc1"]]},
+            {"id": "svc1", "type": "api-call-service", "domain": "light",
+             "service": "turn_on", "entityId": ["light.desk"], "data": "{}",
+             "wires": [[]]},
+        ]}
+
+    def test_collect_flags_unreliable_change_source(self):
+        idx = collect_undefined_field_refs(
+            self._flow_change_feed("payload.undeclared_src", "msg")["nodes"])
+        self.assertIn("sw", idx, "change 喂未声明值 → switch 须被判不可求值")
+        self.assertTrue(idx["sw"], "须定位到具体规则")
+
+    def test_change_fed_undeclared_is_blocked_not_false_green(self):
+        flow = self._flow_change_feed("payload.undeclared_src", "msg")
+        r = _gw().run_staging_gate("", [], vhass_store=_store(), flow=flow)
+        self.assertEqual(r["replayed_services"], [], "前提：本步确实 0 重放")
+        self.assertTrue(r.get("replay_zero"), "须识别为重放归零（change 上游未声明）")
+        self.assertFalse(r["passed"], "0 重放 + 不可求值 = 什么都没验证，不得假绿（V-F5）")
+        self.assertFalse(r.get("fully_verified"))
+        self.assertEqual(r["verdict"], "拦截")
+
+    def test_reliable_literal_source_still_activates(self):
+        """对照组：change 从『字面量源』取值 → 字段可靠 → 正常命中，不误杀。"""
+        flow = self._flow_change_feed("target", "str")
+        idx = collect_undefined_field_refs(flow["nodes"])
+        self.assertNotIn("sw", idx, "字面量源 → switch 不应被判不可求值")
+        r = _gw().run_staging_gate(
+            "", [{"entity_id": "light.desk", "state": "on"}],
+            vhass_store=_store(), flow=flow)
+        self.assertIn("light.turn_on(light.desk)", r["replayed_services"],
+                      "可靠源 → 分支须照常命中并重放")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
