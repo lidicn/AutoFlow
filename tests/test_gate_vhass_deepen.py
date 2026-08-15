@@ -374,5 +374,48 @@ class TestW3SwitchUnevaluableNoSilentPass(unittest.TestCase):
         self.assertTrue(r["passed"])
 
 
+# ═══════════════════ W1：零出边节点（wires:[]）不得让闸崩溃 fail-open ═══════════════════
+class TestW1ZeroOutEdgeNoFailOpen(unittest.TestCase):
+    """白箱手写 flow 里一个尾节点写成 wires:[]（非规范 [[]]）时，
+    _vg_evaluate_active_intents 的 outs[0] 下标越界会抛 IndexError → 被 verify_flow
+    吞 → 闸 ran=false → A18 降级 warn（fail-open），幽灵实体反而拿到放行。
+    修复后（gateway.py:880 `outs = out_wires.get(nid) or [[]]`）不再崩溃，幽灵实体被正常拦下。
+    """
+
+    @staticmethod
+    def _ghost_flow(tail_wires):
+        return {
+            "id": "f", "label": "w1", "nodes": [
+                {"id": "n1", "type": "inject", "z": "1",
+                 "props": [{"p": "payload"}], "payload": "{}", "payloadType": "json",
+                 "wires": [["n2"]]},
+                {"id": "n2", "type": "api-call-service", "z": "1",
+                 "domain": "light", "service": "turn_on",
+                 "data": {"entity_id": "light.ghost_999_does_not_exist"},
+                 "wires": [["n3"]]},
+                {"id": "n3", "type": "debug", "z": "1", "wires": tail_wires},
+            ],
+        }
+
+    def test_zero_outedge_debug_tail_does_not_fail_open_ghost(self):
+        """W1a 复刻：尾节点 wires:[]（崩溃形状）→ 幽灵实体仍须被拦下（verdict=拦截）。"""
+        r = _gw().run_staging_gate(
+            "", [{"entity_id": "light.desk", "state": "on"}],
+            vhass_store=_store(), flow=self._ghost_flow([]))
+        self.assertNotEqual(r["verdict"], "warn",
+                            "零出边节点不得让闸崩溃后 fail-open 降级 warn")
+        self.assertEqual(r["verdict"], "拦截",
+                         "幽灵实体必须被拦下（W1 核心安全断言）")
+        self.assertFalse(r["passed"], "幽灵实体必须被拦下")
+
+    def test_canonical_wires_still_blocks_ghost(self):
+        """对照组：规范 wires:[[]] 形状行为不变，幽灵实体同样被拦（确认修复未误伤）。"""
+        r = _gw().run_staging_gate(
+            "", [{"entity_id": "light.desk", "state": "on"}],
+            vhass_store=_store(), flow=self._ghost_flow([[]]))
+        self.assertEqual(r["verdict"], "拦截")
+        self.assertFalse(r["passed"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

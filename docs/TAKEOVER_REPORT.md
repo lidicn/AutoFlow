@@ -213,11 +213,10 @@ python -m pytest tests/test_gateway.py -q   # 单文件
 
 ## 8. 待裁决项（需你拍板）
 
-### ⚠️ c4_replay_semantics（`_replay_zero_policy()`，gateway.py:720）
+### ✅ c4_replay_semantics 已定稿（`_replay_zero_policy()`，gateway.py:751）
 - **现状**：默认 `fail_closed`。即闸门因「unevaluable JSONata」或「分支被判恒假」导致本步 **0 个 HA 意图 + 0 个外部调用**被重放时，**不得报验证通过**——因为 0 重放=什么都没验证，静默 pass 是假过。
-- **可选**：`AUTOFLOW_REPLAY_ZERO_POLICY=warn_only` → 只告警、保留放行（可用性优先）。
-- **这是唯一明确待你终裁的语义变更**。终裁后**只改 `_replay_zero_policy()` 默认值或环境变量取值，不动闸门主体**（代码已留 hook）。
-- **我的建议**：保持 `fail_closed` 默认（与零信任定位一致），仅在 staging 调试期按需设 `warn_only`。
+- **可选**：`AUTOFLOW_REPLAY_ZERO_POLICY=warn_only` → 只告警、保留放行（可用性优先，staging 调试期逃生门）。
+- **决议（2026-08-15）**：**按 `fail_closed` 定稿关闭**。`warn_only` 保留为 env 逃生门（翻转面极窄且 `fully_verified` 恒 false，不会伪造「已验证」）。终裁后**只调本函数默认值或 env 取值，不动闸门主体**（代码已留 hook，见 `gateway.py:751` 注释）。证据见测试专员 `TEST_RESULT_001.md` §1.5。
 
 ---
 
@@ -263,8 +262,8 @@ python -m pytest tests/test_gateway.py -q   # 单文件
 - [x] NAS 实测部署 ✅（2026-08-14）：`autoflow-nas-deploy` 同步 3 文件 + restart + 运行时内省验收通过；网关侧 `/acp` 已探活
 - [x] A9 配置断裂已修并部署（2026-08-14）：WebUI 连接设置新增 Memory-Agent 分组（热生效）+ config 兼容 `MEMORY_AGENT_*` 别名；运行中网关已实测服务该分组。**待用户填 `/acp` 地址+`acp_` 令牌后做端到端委派验证**
 - [ ] 修复 2 个基线既有 red（`test_verify_flow`、`test_vhass`，`ceb1218` 基线即有、与 B/C 无关）— 建议另立工单
-- [ ] 裁决 c4_replay_semantics：默认维持 `fail_closed`（建议），写入决策记录
-- [ ] 拍板 c4_replay_semantics（建议维持 fail_closed）
+- [x] 裁决 c4_replay_semantics：默认维持 `fail_closed`（2026-08-15 已定稿关闭，证据 TEST_RESULT_001 §1.5）
+- [x] 拍板 c4_replay_semantics：按 `fail_closed` 定稿（warn_only 保留为 env 逃生门）
 - [ ] 阅读 `handoff/` 下 P0/P1 工单原文（D:/Documents/HAOS/AutoFlow/handoff/）
 - [ ] 确认 NAS prod 活树为最新真相，避免被旧 git 覆盖
 

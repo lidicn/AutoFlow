@@ -1540,7 +1540,8 @@ def autoflow_set_tab_state(flow_id: str, enabled: bool, reason: str = "") -> str
       * 禁用『核心受保护 tab』（心跳/HA 桥接）会被拦截（防误关全家瘫痪）；启用核心 tab 不受限。
       * 提交后返回 {ok, pending_id, needs_approval:true}；WebUI 批准后才能真正切 NR 的 tab.disabled。
     仅管理员/原生手写面板可见；黑箱身份不可见（_DEPLOY_KNIVES）。
-    注意：这是「切开关」不是「删 flow」——想彻底移除用 autoflow_undeploy。"""
+    注意：这是「切开关」不是「删 flow」——要彻底移除已部署的 flow，请在 WebUI 提案面板
+    撤回/驳回对应提案（网关侧不暴露 MCP 删除工具，删除仅 WebUI 可操作）。"""
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})

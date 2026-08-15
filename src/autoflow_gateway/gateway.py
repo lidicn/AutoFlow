@@ -754,10 +754,13 @@ def _replay_zero_policy() -> str:
     fail_closed（默认）：闸门无法本地判定条件（unevaluable JSONata）或分支被判恒假，
       导致本步 **0 个 HA 意图 + 0 个外部调用** 被重放时，不得报「验证通过」——
       0 重放意味着**什么都没验证**，静默 pass 就是假过。
-    warn_only：只给显式告警、保留放行（可用性优先）。
+    warn_only：只给显式告警、保留放行（可用性优先，env 逃生门）。
 
-    这是 `WORKORDER_DEV_c4_replay_semantics.md`（未触发/unevaluable 分支统一语义）
-    的**对接 hook**：终裁下来后只改这里的默认值/取值，不动闸门主体。
+    **决议（2026-08-15 · c4_replay_semantics 终裁）**：按 `fail_closed` 定稿关闭。
+    证据见 TEST_RESULT_001 §1.5——fail_closed 阻止「0 重放 + 断言绿」的假绿变 pass，
+    `warn_only` 翻转面极窄（1/6）且 `fully_verified` 恒为 false、verdict 降级为
+    「未充分验证」而非「放行」，可作 staging 调试期逃生门。代码已留 hook：仅调本函数
+    默认值或 env `AUTOFLOW_REPLAY_ZERO_POLICY`，不动闸门主体。
     """
     v = (os.environ.get("AUTOFLOW_REPLAY_ZERO_POLICY") or "").strip().lower()
     return v if v in ("fail_closed", "warn_only") else "fail_closed"
@@ -877,7 +880,12 @@ def _vg_evaluate_active_intents(flow, world, virtual_time=None, warnings=None,
         if node is None:
             return
         t = node["type"]
-        outs = out_wires.get(nid, [[]])
+        # 【W1 修复】节点 wires 可能为 []（白箱手写/非规范形状），out_wires[nid] 即存成
+        # 空列表；若用 .get(nid, [[]]) 取默认则因 key 已存在返回 []，下方 outs[0]
+        # 下标越界 IndexError → 被 verify_flow try/except 吞 → 闸 ran=false → fail-open
+        # 降级 warn（幽灵实体反而拿到放行）。统一兜底成单空出边 [[]]（与 NR「1 输出口
+        # 未连线」语义等价），任何 outs[0] 访问都安全、且对规范流零行为差异。
+        outs = out_wires.get(nid) or [[]]
         if t == "api-call-service":
             active.add(nid)
             # 继续向下游传播：命中分支上的外部调用(link out/subflow)需标为可达
