@@ -595,7 +595,8 @@ _FIELD_TOKEN_RE = re.compile(r"(?<![.\w$一-鿿])([A-Za-z_一-鿿][\w一-鿿]*)(
 
 
 def _collect_defined_fields(nodes: List[Dict[str, Any]]) -> set:
-    """收集编译产物中「已声明可用」的字段名：取值字段(payload.<x>) + 变量(flow.<x>)。"""
+    """收集编译产物中「已声明可用」的字段名：取值字段(payload.<x>) + 变量(flow.<x>)
+    + 触发 inject 显式声明的字段（如 `触发: inject(payload={"pc":"off"})` 声明 pc）。"""
     defined: set = {"state"}  # payload.state 由取值节点恒提供
     for n in nodes:
         if n.get("type") == "api-current-state":
@@ -622,6 +623,24 @@ def _collect_defined_fields(nodes: List[Dict[str, Any]]) -> set:
                         defined.add(p[len("payload."):])
                     elif p != "payload" and "." not in p:
                         defined.add(p)
+        elif n.get("type") == "inject":
+            # 触发 inject 显式声明的字段也属「已声明」，否则 W3 case C 的 R31 检查会
+            # 把「引用 inject 字段的 eq 分支」误判为未定义（见 gateway._vg_eval_switch）。
+            for op in (n.get("props") or []):
+                p = op.get("p") or ""
+                if p and p != "payload" and "." not in p:
+                    defined.add(p)
+            pt = n.get("payloadType")
+            payload = n.get("payload")
+            if pt == "json" and isinstance(payload, str):
+                try:
+                    obj = json.loads(payload)
+                except Exception:
+                    obj = None
+                if isinstance(obj, dict):
+                    for k in obj.keys():
+                        if isinstance(k, str) and k and "." not in k:
+                            defined.add(k)
     return defined
 
 
@@ -639,11 +658,30 @@ def collect_undefined_field_refs(
     """
     defined = _collect_defined_fields(nodes)
     idx: Dict[str, Dict[int, List[str]]] = {}
+    _PROP_PATH_RE = re.compile(r"^[\w一-鿿]+(?:\.[\w一-鿿]+)*$")
     for n in nodes:
         if n.get("type") != "switch":
             continue
         nid = n.get("id") or "?"
-        for i, r in enumerate(n.get("rules") or []):
+        rules = n.get("rules") or []
+        # ── W3 case C：switch 的 `property` 引用未声明字段（如 property="luminance"
+        # 或 property="payload.luminance"）→ 运行态该字段为 undefined → 所有非 else
+        # 规则都静默不命中 → 0 重放却可能 fully_verified=True（假绿）。整支 switch 无法
+        # 求值，故把全部非 else 规则记为恒假，与编译器 R31 结论一致，交给闸门按
+        # 「不命中」处理（G3）→ 触发重放归零 fail-closed。
+        # 排除根路径 payload/msg/flow/global（指整条消息或作用域，恒可用），否则会误杀
+        # 「property=payload + jsonata 规则」这类正常写法（见 报告 A / R31 case A）。
+        prop = n.get("property") or ""
+        if prop not in ("payload", "msg", "flow", "global") and \
+                _PROP_PATH_RE.match(prop):
+            leaf = prop.split(".")[-1]
+            if leaf not in defined and leaf not in _JSONATA_KEYWORDS:
+                for i, r in enumerate(rules):
+                    if (r.get("t") or "") in ("else", "otherwise"):
+                        continue
+                    idx.setdefault(nid, {})[i] = [leaf]
+                continue  # 本 switch 整体已处理，跳到下一节点
+        for i, r in enumerate(rules):
             if (r.get("t") or "") in ("else", "otherwise"):
                 continue  # else 规则不是条件，编译器也给它带 vt=jsonata
             vt = r.get("vt") or r.get("t")

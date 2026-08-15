@@ -312,5 +312,67 @@ class TestR31FalsePositiveGuard(unittest.TestCase):
         self.assertIn("亮度", _collect_defined_fields(nodes))
 
 
+# ═════════════ W3 回归护栏：闸门诚实性（0 重放不得谎报 fully_verified） ═════════════
+def _flow_typed_switch(switch_property, rule_t, rule_v, with_else=False):
+    """在 _flow 骨架基础上，把 switch 换成类型化/引用未声明属性的规则，复刻 W3。"""
+    f = _flow("光照", "payload.光照", with_else=with_else)
+    sw = f["nodes"][2]
+    sw["property"] = switch_property
+    sw["propertyType"] = "msg"
+    rules = [{"t": rule_t, "v": rule_v}]
+    wires = [["svc1"]]
+    if with_else:
+        rules.append({"t": "else", "v": "true", "vt": "jsonata"})
+        wires.append([])
+    sw["rules"] = rules
+    sw["outputs"] = len(rules)
+    sw["wires"] = wires
+    return f
+
+
+class TestW3SwitchUnevaluableNoSilentPass(unittest.TestCase):
+
+    def test_typed_lt_rule_is_blocked_not_fully_verified(self):
+        """W3 case B：类型化 switch 规则（lt）闸门无法求值 → 0 重放不得报 fully_verified。"""
+        flow = _flow_typed_switch("luminance", "lt", "22", with_else=False)
+        r = _gw().run_staging_gate("", [], vhass_store=_store(), flow=flow)
+        self.assertEqual(r["replayed_services"], [], "前提：本步确实 0 重放")
+        self.assertTrue(r.get("replay_zero"), "须识别为重放归零（unevaluable 成因）")
+        self.assertFalse(r["passed"],
+                         "0 重放 + 无法求值 = 什么都没验证，fail-closed 不得报通过（W3）")
+        self.assertFalse(r.get("fully_verified"),
+                         "W3 核心危害：不得 0 重放却 fully_verified=True")
+        self.assertEqual(r["verdict"], "拦截")
+        self.assertTrue(
+            any(("无法本地求值" in w or "不支持的 switch 规则类型" in w
+                 or "未定义字段" in w or "恒假分支" in w or "重放归零" in w)
+                for w in r["warnings"]),
+            f"须显式告警，实得 {r['warnings']}")
+
+    def test_eq_on_undeclared_property_is_blocked(self):
+        """W3 case C：eq 引用未声明属性 → 0 重放不得报 fully_verified。"""
+        flow = _flow_typed_switch("未声明字段", "eq", "22", with_else=False)
+        r = _gw().run_staging_gate("", [], vhass_store=_store(), flow=flow)
+        self.assertEqual(r["replayed_services"], [])
+        self.assertTrue(r.get("replay_zero"))
+        self.assertFalse(r["passed"])
+        self.assertFalse(r.get("fully_verified"))
+        self.assertTrue(
+            any(("无法本地求值" in w or "未声明的属性" in w or "未定义字段" in w
+                 or "恒假分支" in w or "重放归零" in w)
+                for w in r["warnings"]),
+            f"须显式告警，实得 {r['warnings']}")
+
+    def test_known_false_jsonata_still_passes(self):
+        """对照组：可求值的 JSONata 条件不成立 → 仍不触发归零（确认未误伤 A15 合法用例）。"""
+        flow = _flow("光照", "payload.光照")
+        flow["nodes"][2]["rules"][0]["v"] = "$number(payload.光照) > 9999"
+        r = _gw().run_staging_gate("", [], vhass_store=_store(), flow=flow)
+        self.assertEqual(r["replayed_services"], [])
+        self.assertFalse(r.get("replay_zero"),
+                         "可求值的条件不成立 ≠ 闸门失能，不应触发 fail-closed")
+        self.assertTrue(r["passed"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -320,6 +320,7 @@ def _vg_resolve_path(msg, path):
             return None
     return cur
 
+
 def _vg_set_path(msg, path, val):
     """按点路径写 msg，返回是否真正写入。
 
@@ -458,13 +459,37 @@ def _vg_eval_switch(node, msg, warnings=None, dead_rules=None, report=None):
 
     dead_rules：`{switch_id: {规则下标: [未定义字段]}}`（来自 flow_linter.R31 静态判定）。
     命中其中的规则一律按**不命中**处理——见 G3 注释。
-    report：可选 dict，回填 {"dead": [...], "conservative": [...]} 供闸门归因。
+    report：可选 dict，回填 {"dead": [...], "conservative": [...], "unevaluable": [...]}
+            供闸门归因。
+
+    【W3·闸门诚实性】本求值器只实现了 eq/neq/jsonata(jsonata_exp)/else/otherwise 五类规则；
+    NR switch 的 lt/lte/gt/gte/btwn/cont/regex/true/false/null/nnull/empty/nempty/istype/hask
+    等类型化规则**没有任何 elif 接住** → 规则静默不命中 → 下游动作永不激活 → 0 重放。
+    若此时 flow 又「声明了动作」，闸门实际什么都没验证，却可能因 _cause 为空而误报
+    fully_verified=True（假绿）。同理，eq/neq 引用**未声明属性**时 val 解析不到值，也属
+    「闸无法求值」。这两类一律回填 report["unevaluable"]，由 G2 重放归零检测按
+    「无法验证」处置（fail_closed 下 block），绝不静默放过。
     """
     prop = node.get("property", "payload")
     rules = node.get("rules", []) or []
     val = _vg_resolve_path(msg, prop)
     node_dead = (dead_rules or {}).get(node.get("id") or "", {}) or {}
     nlabel = node.get("name") or node.get("id") or "switch"
+
+    def _mark_unevaluable(i, kind):
+        if report is None:
+            return
+        report.setdefault("unevaluable", []).append({
+            "node_id": node.get("id"), "node_name": node.get("name"),
+            "rule_index": i, "kind": kind, "expr": rule.get("v", ""),
+        })
+        if warnings is not None:
+            warnings.append(
+                f"switch「{nlabel}」第 {i + 1} 条分支闸门【无法本地求值】"
+                f"（{kind}）：该分支行为不可验证，下游动作按「未激活」处理，"
+                f"其 THEN 体不在重放/断言范围；依赖该分支的期望项记为 N/A（不算通过）。"
+                f"请改用闸门支持的 eq/neq/JSONata 条件，或显式声明所引用的字段。")
+
     taken = []
     matched = False
     for i, rule in enumerate(rules):
@@ -524,6 +549,12 @@ def _vg_eval_switch(node, msg, warnings=None, dead_rules=None, report=None):
                     warnings.append(
                         f"switch 规则含无法本地求值的 JSONata「{rule.get('v','')}」，"
                         f"保守视为命中（未按逻辑校验）")
+        elif t not in ("else", "otherwise"):
+            # 【W3】类型化规则（lt/lte/gt/gte/btwn/cont/regex/true/false/null/
+            # nnull/empty/nempty/istype/hask 等）：闸门不支持 → 无法求值 → 记 unevaluable。
+            # 不视为命中（避免把「未知规则」当 True 放行），由 G2 重放归零检测拦下。
+            # （else/otherwise 不在此处理，留给函数末尾的「无命中则走 else」逻辑。）
+            _mark_unevaluable(i, f"不支持的 switch 规则类型 `{t}`")
     if rules and rules[-1].get("t") in ("else", "otherwise") and not matched:
         taken.append(len(rules) - 1)
     return taken
@@ -4210,6 +4241,15 @@ class Gateway:
                 # 保守视为命中的 JSONata 分支 A15 / 字段静默丢写）。passed=True 只说明
                 # 「没抓到反例」，不等于「验证过」，故单独抬出来供聚合层降级。
                 "warnings": list(staging_gate.get("warnings") or []),
+                # 【A4】可观测性：把 run_staging_gate 内部已算出的诚实性字段透出 MCP 面，
+                # 否则调用方只能从中文 detail 字符串做子串匹配判断「是否真的重放过」。
+                # 纯加字段、零判定风险。
+                "fully_verified": bool(staging_gate.get("fully_verified")),
+                "replay_zero": bool(staging_gate.get("replay_zero")),
+                "replay_zero_policy": staging_gate.get("replay_zero_policy"),
+                "replayed_services": list(staging_gate.get("replayed_services") or []),
+                "external_calls": list(staging_gate.get("external_calls") or []),
+                "dead_branches": list(staging_gate.get("dead_branches") or []),
             }
 
         # ── e2e 实机追踪层 ──
@@ -5713,6 +5753,8 @@ class Gateway:
                 _cause.append("恒假分支（R31 未定义字段）")
             if step_report.get("conservative"):
                 _cause.append("无法本地求值的 JSONata")
+            if step_report.get("unevaluable"):
+                _cause.append("闸门无法求值的分支条件（引用未声明属性 / 不支持的类型化规则）")
             _zero = has_effect_nodes and not replayed and not external and bool(_cause)
             if _zero:
                 replay_zero_steps.append(len(step_results))
