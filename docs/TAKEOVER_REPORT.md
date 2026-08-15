@@ -241,7 +241,9 @@ python -m pytest tests/test_gateway.py -q   # 单文件
 11. **A9 双向联调 ✅ 已完成（2026-08-14 23:33）**：经排查，网关此前**无任何生效入口**接收 memory-agent 出向委派配置——① WebUI「连接设置」`FIELD_SPECS` 缺 memory-worker 字段（`load_saved` 按 `_SPEC_BY_KEY` 过滤会丢弃手动塞入的 key）；② `docker-compose.yml` 未注入、`.env` 未挂进容器；③ 实例由 memory-worker 改名 memory-agent 后，用户极可能用 `MEMORY_AGENT_ACP_*` 变量名，而 `config.py` 只读 `MEMORY_WORKER_ACP_*`，名字对不上→永远读空。已修：`connections.py` 新增 **Memory-Agent (ACP 委派)** 分组（`MEMORY_WORKER_ACP_URL`/`TOKEN`，WebUI 可填、热更新、落盘 `connections.json`，前端数据驱动自动渲染）+ 出向探针 `_test_memory`；`config.py` 让 `memory_worker_acp_*` 优先 `MEMORY_WORKER_*` 并回退 `MEMORY_AGENT_*`（对齐改名）。前端进一步在 **ACP 对等令牌页**直接加了「出向委派配置」卡片（URL/令牌输入 + 保存 + 测试连接），避免用户在「连接设置」里找。已 commit `89cfcdf`（后端）+ `9770c89`（前端）并部署 NAS。
     - **用户填值**：URL=`http://192.168.2.200:8086`，令牌 47 字符，WebUI「测试连接」通过（initialize 返回 200，令牌被接受）。
     - **端到端闭环验证**：NAS 容器内直接调用 `delegate_to_memory_worker("请回答一个简短的 ping 测试...", cfg=cfg)`，返回 `{"ok": true, "status": "completed", "text": "链路连通性测试通过..."}` —— **autoflow ↔ memory-agent ACP 委派链路双向打通**。
-11. **deepseek2api 对接**：tools 格式对齐，转交对方开发者后做联调验收。
+11. ✅ **LLM 助手 UI 升级（Build/模型选择/ACP 直连）**（2026-08-15，`8d4a42d`）：前端输入条「Build」由占位按钮改为下拉（Autoflow / memory-agent ACP）；「选择模型」改为从 `/llm/config` backends 动态填充的真实下拉；选择 **memory-agent ACP** 时消息直接经 `delegate_to_memory_worker` 外联 memory-agent，模型下拉自动禁用。后端 `/llm/chat` 新增 `mode=acp` 分支与 `backend_index` 限定路由。同时调大对话框与输入条高度/圆角/阴影以匹配参考图。已部署 NAS 并验证：ACP 模式返回 memory-agent 回复，Autoflow 默认模式仍正常。
+12. **deepseek2api 对接**：tools 格式对齐，转交对方开发者后做联调验收。
+13. **A23/A24/A26**（dev/round5-cheap-fixes）：按 `--no-ff` 合并，`push` 后刷新 tracking refs。
 12. **A23/A24/A26**（dev/round5-cheap-fixes）：按 `--no-ff` 合并，`push` 后刷新 tracking refs。
 
 ### 阶段 3 — 稳健性（按需）
