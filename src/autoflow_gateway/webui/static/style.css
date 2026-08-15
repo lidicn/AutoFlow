@@ -342,13 +342,16 @@ body {
 .chat .step code, .bubble .step code { font-size: 13px; }
 
 /* ===== LLM 助手页：底部居中固定输入条（仿 MiMo），聊天区独立滚动、无额外页面滚动条 ===== */
-#view-llm_agent {
+#view-llm_agent:not([hidden]) {
   display: flex;
   flex-direction: column;
   height: calc(100vh - 36px - var(--bottomnav-h)); /* 占满主内容区（扣除顶部与底部导航） */
   overflow: hidden;
   position: relative; /* 输入条 absolute 定位基准，避免 fixed 跑到全屏 */
 }
+/* 关键：显式 display 会覆盖 [hidden] 属性，必须显式把 hidden 时的 display 关掉，
+   否则切换 tab 后 #view-llm_agent 仍常驻可见，造成“串到其他页面”。 */
+#view-llm_agent[hidden] { display: none; }
 #view-llm_agent .chat {
   flex: 1;
   overflow-y: auto;
