@@ -493,12 +493,32 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     async def llm_chat(request: Request):
         """服务端跑 agent 循环：取用户面 MCP 工具 → chat_with_tools 多轮 → 经 FastMCP call_tool 执行回填 → 终态文本。
 
+        新增模式切换：
+          · mode=acp：直接把用户消息经 ACP 委派给 memory-agent，不跑本地 agent 循环。
+          · backend_index：在 autoflow 模式下指定使用第 N 个后端（供 WebUI「选择模型」）。
+
         工具暴露遵循身份分层纪律：排除 _DEPLOY_KNIVES（部署/自检刀），WebUI 助手绝不可触。"""
         b = await _body(request)
         user_msg = (b.get("message") or "").strip()
         history = b.get("history") or []
+        mode = (b.get("mode") or "autoflow").strip().lower()
+        backend_index = b.get("backend_index")
         if not user_msg:
             return _js({"ok": False, "error": "message 必填"}, 400)
+
+        # ── ACP 委派模式：直接外联 memory-agent ──
+        if mode == "acp":
+            from .acp_client import delegate_to_memory_worker
+            res = delegate_to_memory_worker(user_msg, context=None, cfg=cfg)
+            if not res.get("ok"):
+                return _js({"ok": False, "error": res.get("error") or "memory-agent ACP 调用失败"})
+            steps = [{
+                "tool": "delegate_to_memory_worker",
+                "args": {"task": user_msg[:200]},
+                "result": (res.get("text") or "")[:4000],
+            }]
+            return _js({"ok": True, "text": res.get("text") or "", "steps": steps})
+
         d = load_llm_config(cfg)
         if not d.get("enabled", False):
             return _js({"ok": False, "error": "LLM 未启用：请在 WebUI「LLM 设置」页开启后重试",
@@ -514,6 +534,9 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             return _js({"ok": False, "error": f"LLM 路由初始化失败: {e}"})
         if not router.configured:
             return _js({"ok": False, "error": "LLM 未配置：后端凭据不完整", "hint": "llm_not_configured"})
+        # 若前端指定了后端索引，只使用对应后端
+        if isinstance(backend_index, int) and 0 <= backend_index < len(router._providers):
+            router._providers = [router._providers[backend_index]]
         # 取用户面工具（过滤部署/自检刀）
         try:
             from . import mcp_server

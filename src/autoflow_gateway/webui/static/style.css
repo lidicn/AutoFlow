@@ -345,7 +345,7 @@ body {
 #view-llm_agent {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 53px - 18px); /* 顶栏 - content padding */
+  height: calc(100vh - 36px); /* 占满主内容区 */
   overflow: hidden;
 }
 #view-llm_agent .chat {
@@ -360,57 +360,62 @@ body {
   left: 50%;
   bottom: calc(var(--bottomnav-h) + 16px); /* 底部导航上方 */
   transform: translateX(-50%);
-  width: min(960px, calc(100vw - var(--sidebar-w) - 48px));
+  width: min(1024px, calc(100vw - var(--sidebar-w) - 48px));
   z-index: 30;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 28px;
-  box-shadow: 0 8px 30px rgba(16,24,40,.12);
-  padding: 12px 14px;
+  border-radius: 32px;
+  box-shadow: 0 10px 36px rgba(16,24,40,.14);
+  padding: 16px 18px;
   display: flex;
   align-items: flex-end;
-  gap: 10px;
+  gap: 12px;
 }
 #view-llm_agent .chat-input-bar .input-tools {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   flex-shrink: 0;
-  padding-bottom: 6px;
+  padding-bottom: 8px;
 }
-#view-llm_agent .chat-input-bar .input-tools button,
-#view-llm_agent .chat-input-bar .input-tools .tool-btn {
-  background: transparent;
-  border: none;
-  color: var(--text-dim);
-  font-size: 14px;
-  padding: 6px 8px;
-  border-radius: 10px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-#view-llm_agent .chat-input-bar .input-tools button:hover,
-#view-llm_agent .chat-input-bar .input-tools .tool-btn:hover {
+#view-llm_agent .chat-input-bar .input-tools select.tool-select {
+  appearance: none;
+  -webkit-appearance: none;
   background: var(--surface-2);
+  border: 1px solid var(--border);
   color: var(--text);
+  font-size: 13px;
+  padding: 7px 22px 7px 10px;
+  border-radius: 14px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath fill='%236B7280' d='M0 0h10L5 6z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  max-width: 160px;
+}
+#view-llm_agent .chat-input-bar .input-tools select.tool-select:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+#view-llm_agent .chat-input-bar .input-tools select.tool-select:focus {
+  outline: none;
+  border-color: var(--primary);
 }
 #view-llm_agent .chat-input-bar textarea {
   flex: 1;
   border: none;
   background: transparent;
   resize: none;
-  max-height: 160px;
-  min-height: 28px;
-  padding: 8px 4px;
+  max-height: 200px;
+  min-height: 44px;
+  padding: 10px 4px;
   font-size: 15px;
-  line-height: 1.5;
+  line-height: 1.55;
   outline: none;
 }
 #view-llm_agent .chat-input-bar .send-btn {
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
   padding: 0;
   display: inline-flex;
@@ -419,7 +424,7 @@ body {
   font-size: 16px;
 }
 /* 聊天消息底部留空，避免被固定输入条遮挡 */
-#view-llm_agent .chat { padding-bottom: 90px; }
+#view-llm_agent .chat { padding-bottom: 120px; }
 @media (max-width: 768px) {
   #view-llm_agent .chat-input-bar {
     left: 12px;
@@ -427,5 +432,10 @@ body {
     transform: none;
     width: auto;
     bottom: calc(var(--bottomnav-h) + 8px);
+    padding: 12px 14px;
+  }
+  #view-llm_agent .chat-input-bar .input-tools select.tool-select {
+    max-width: 120px;
+    padding-right: 18px;
   }
 }

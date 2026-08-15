@@ -2700,6 +2700,13 @@ async function loadLlmAgent() {
     return;
   }
   if (_llmHistory === null) _llmHistory = _loadLlmChat();
+  // 后端列表用于「选择模型」下拉
+  const llmBackends = ((r.data && r.data.backends) || []).map((b, i) => ({
+    i, name: b.name || b.model || `后端 ${i + 1}`, model: b.model || "", enabled: b.enabled !== false,
+  })).filter((b) => b.enabled);
+  const modelOptions = llmBackends.length
+    ? `<option value="-1">默认模型</option>` + llmBackends.map((b) => `<option value="${b.i}">${esc(b.name)} (${esc(b.model)})</option>`).join("")
+    : `<option value="-1">默认模型</option>`;
   v.innerHTML = `<div class="view-head"><h2>LLM 助手</h2>
     <div style="display:flex;gap:8px;align-items:center">
       <span class="badge env">内置大模型代理池</span>
@@ -2708,15 +2715,28 @@ async function loadLlmAgent() {
     <div id="llmChat" class="chat"></div>
     <div class="chat-input-bar" id="llmInputBar">
       <div class="input-tools">
-        <button class="tool-btn" id="llmTools" title="工具">+</button>
-        <button class="tool-btn" id="llmBuild" title="Build">Build</button>
-        <button class="tool-btn" id="llmModel" title="选择模型">选择模型</button>
+        <select class="tool-select" id="llmBuild" title="构建/路由模式">
+          <option value="autoflow">Autoflow</option>
+          <option value="acp">memory-agent ACP</option>
+        </select>
+        <select class="tool-select" id="llmModel" title="选择模型">${modelOptions}</select>
       </div>
-      <textarea id="llmInput" rows="1" placeholder="随便问点什么，/ 可查看命令，@ 可添加上下文..."></textarea>
+      <textarea id="llmInput" rows="2" placeholder="随便问点什么，/ 可查看命令，@ 可添加上下文..."></textarea>
       <button class="btn primary send-btn" id="llmSend">➤</button>
     </div>`;
   const chat = $("#llmChat"), input = $("#llmInput"), send = $("#llmSend");
   const clear = $("#llmClear");
+  const buildSel = $("#llmBuild"), modelSel = $("#llmModel");
+  // 模式切换时同步提示与可用状态
+  function refreshLlmInputState() {
+    const isAcp = buildSel && buildSel.value === "acp";
+    if (modelSel) modelSel.disabled = isAcp;
+    input.placeholder = isAcp
+      ? "已选择 memory-agent ACP，消息将直接委派给 memory-agent..."
+      : "随便问点什么，/ 可查看命令，@ 可添加上下文...";
+  }
+  if (buildSel) buildSel.addEventListener("change", refreshLlmInputState);
+  refreshLlmInputState();
   // 输入框随内容自动增高（最多 160px 后内部滚动）
   function autoGrow(){ input.style.height="auto"; input.style.height=Math.min(input.scrollHeight,160)+"px"; }
   input.addEventListener("input", autoGrow); autoGrow();
@@ -2769,12 +2789,16 @@ async function loadLlmAgent() {
   async function sendMsg() {
     const text = input.value.trim();
     if (!text) return;
+    const mode = buildSel ? buildSel.value : "autoflow";
+    const backendIndex = modelSel ? parseInt(modelSel.value, 10) : -1;
     input.value = "";
     renderBubble({ role: "user", content: text });
     _llmHistory.push({ role: "user", content: text }); _saveLlmChat();
-    send.disabled = true; send.textContent = "思考中…";
+    send.disabled = true; send.textContent = mode === "acp" ? "委派中…" : "思考中…";
     try {
-      const r = await api("POST", "/llm/chat", { message: text, history: _llmHistory.slice(0, -1) }, { timeout: 120000 });
+      const body = { message: text, history: _llmHistory.slice(0, -1), mode };
+      if (mode === "autoflow" && backendIndex >= 0) body.backend_index = backendIndex;
+      const r = await api("POST", "/llm/chat", body, { timeout: 300000 });
       if (!r.ok) throw new Error(r.data?.error || "调用失败");
       const steps = (r.data && r.data.steps) || [];
       const aiMsg = { role: "assistant", content: r.data.text || "", tool_calls: steps };
@@ -2792,10 +2816,6 @@ async function loadLlmAgent() {
   if (input) input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMsg(); }
   });
-  const buildBtn = $("#llmBuild"), modelBtn = $("#llmModel"), toolsBtn = $("#llmTools");
-  if (buildBtn) buildBtn.onclick = () => toast("Build 模式暂未接入，后续可在此直接生成/调试子流程。");
-  if (modelBtn) modelBtn.onclick = () => toast("模型选择暂未接入，当前使用 LLM 设置页配置的默认模型。");
-  if (toolsBtn) toolsBtn.onclick = () => toast("工具面板暂未接入，当前 LLM 已自动调用网关工具。");
 }
 
 // 启动
