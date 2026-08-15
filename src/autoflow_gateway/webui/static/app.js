@@ -698,7 +698,12 @@ async function loadDeployed() {
 }
 async function undeployProposal(id) {
   if (!confirm("确定撤回该网关部署？\n若你在此 tab 中另有自己的节点，将被保留，仅移除网关写入的节点。")) return;
-  const r = await api("POST", `/deployed/${id}/undeploy`, {});
+  let r = await api("POST", `/deployed/${id}/undeploy`, {});
+  if (!r.ok && r.data?.code === "nr_unreachable") {
+    if (confirm("NR 当前不可达，无法确认 flow 状态。\n若你确认已在 NR 手动删除该 flow，是否只清理网关注册表？")) {
+      r = await api("POST", `/deployed/${id}/undeploy`, { force: true });
+    }
+  }
   if (r.ok) {
     const d = r.data || {};
     if (d.action === "trimmed_tab") {

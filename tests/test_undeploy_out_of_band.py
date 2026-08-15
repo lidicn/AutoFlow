@@ -50,10 +50,10 @@ class FakeNR:
         self._deleted_oob.discard(fid)
         return {"id": fid, "created": created, "raw": {"ok": True}}
 
-    def update_flow(self, fid, flow, force=False):
-        return self.create_or_update_flow(fid, flow, force=force)
+    def update_flow(self, fid, flow, force=False, allow_prod=False):
+        return self.create_or_update_flow(fid, flow, force=force, allow_prod=allow_prod)
 
-    def delete_flow(self, fid, force=False):
+    def delete_flow(self, fid, force=False, allow_prod=False):
         if self.delete_always_fail:
             raise RuntimeError(f"DELETE /flow/{fid} -> 500 (模拟 NR 删除失败)")
         if fid in self._deleted_oob:

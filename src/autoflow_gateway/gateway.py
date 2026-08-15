@@ -5276,16 +5276,36 @@ class Gateway:
         # 读活 flow（可能用户已手动改/加节点）
         live = None
         nr_unreachable = False
+        nr_err = None
         try:
             live = self.nr.get_flow(flow_id)
-        except Exception:
-            nr_unreachable = True
-            live = None
+        except Exception as e:
+            nr_err = str(e)
+            # 404 / not found 表示 flow 已不存在 → 视为 already_gone，不依赖 force
+            if "404" in nr_err or "not found" in nr_err.lower():
+                live = None
+                nr_unreachable = False
+            else:
+                nr_unreachable = True
+                live = None
 
         if live is None:
             if nr_unreachable:
                 # NR 不可达：无法确认 flow 是否还在 → 保留账本，报错让用户重试。
                 # 不清账本（否则会孤儿化：flow 仍在 NR、账本说 not_ours → 永久撤不掉）。
+                if force:
+                    # force 强制清账本：用户确认 NR 侧已手动删除或实例不可达
+                    self.state.remove_flow(flow_id)
+                    src = meta.get("source_proposal")
+                    if src:
+                        try:
+                            ProposalStore(self.cfg).clear_deployed(src)
+                        except Exception:
+                            pass
+                    return {"ok": True, "action": "already_gone", "flow_id": flow_id,
+                            "label": label, "gateway_nodes_removed": 0,
+                            "user_nodes_preserved": 0,
+                            "note": "NR 不可达，force=true 强制清账本；请确认 NR 侧无残留"}
                 return {"ok": False,
                         "error": "NR 不可达，无法确认 flow 状态，账本保留以便重试。"
                                  "若确认已手动删除，可 force=true 强制清账本。",
@@ -5353,12 +5373,9 @@ class Gateway:
                 nr_err = f"NR 更新失败: {e}"
             action = "trimmed_tab"
 
-        # 仅当 NR 侧操作成功（或 force 强制）才清账本；否则保留账本让用户重试，避免孤儿化。
-        if not nr_ok and not force:
-            return {"ok": False,
-                    "error": f"NR 侧撤回失败，账本保留以便重试：{nr_err}",
-                    "code": "nr_op_failed", "flow_id": flow_id,
-                    "gateway_nodes_removed": 0, "user_nodes_preserved": u_preserved}
+        # NR 侧删除/更新失败后，仍清账本：避免 mutation 半残导致网关注册表永远卡死。
+        # 原则：get_flow 阶段已确认这是本网关部署的 tab；mutation 失败通常是 NR 侧
+        # 瞬时/权限问题，保留 ledger 会让用户无法重试/重部署。返回 nr_warning 供人审。
         self.state.remove_flow(flow_id)
         src = meta.get("source_proposal")
         if src:
@@ -5367,11 +5384,10 @@ class Gateway:
             except Exception:
                 pass
         if not nr_ok:
-            # force 路径：NR 失败但用户强制清账本
             return {"ok": True, "action": action, "flow_id": flow_id, "label": label,
                     "gateway_nodes_removed": g_removed, "user_nodes_preserved": u_preserved,
                     "nr_warning": nr_err,
-                    "note": "force 强制清账本；NR 侧可能仍有残留，请手动确认已移除"}
+                    "note": "NR 侧撤回调用失败，已清网关账本；NR 可能有残留，请手动确认"}
         return {"ok": True, "action": action, "flow_id": flow_id, "label": label,
                 "gateway_nodes_removed": g_removed, "user_nodes_preserved": u_preserved}
 
