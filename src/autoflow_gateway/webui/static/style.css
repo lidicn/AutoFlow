@@ -345,8 +345,9 @@ body {
 #view-llm_agent {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 36px); /* 占满主内容区 */
+  height: calc(100vh - 36px - var(--bottomnav-h)); /* 占满主内容区（扣除顶部与底部导航） */
   overflow: hidden;
+  position: relative; /* 输入条 absolute 定位基准，避免 fixed 跑到全屏 */
 }
 #view-llm_agent .chat {
   flex: 1;
@@ -356,11 +357,11 @@ body {
   max-height: none;     /* 取消当前 60vh 限制 */
 }
 #view-llm_agent .chat-input-bar {
-  position: fixed;
+  position: absolute;
   left: 50%;
-  bottom: calc(var(--bottomnav-h) + 16px); /* 底部导航上方 */
+  bottom: 16px;
   transform: translateX(-50%);
-  width: min(1024px, calc(100vw - var(--sidebar-w) - 48px));
+  width: min(1024px, calc(100% - 48px));
   z-index: 30;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -431,7 +432,7 @@ body {
     right: 12px;
     transform: none;
     width: auto;
-    bottom: calc(var(--bottomnav-h) + 8px);
+    bottom: 16px;
     padding: 12px 14px;
   }
   #view-llm_agent .chat-input-bar .input-tools select.tool-select {
