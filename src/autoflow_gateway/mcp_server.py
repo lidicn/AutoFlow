@@ -53,6 +53,16 @@ def _gw():
 def _js(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=2)
 
+def _with_ok(r, ok: bool = True):
+    """给只读类工具的原始数据字典补上统一的 ok 字段（仅当尚未包含时），
+    消除 MCP 工具返回格式不一致——两份测试报告共同核实的真 bug：
+    list_entities / dsl_help / list_templates / list_pending / list_automations
+    此前缺 ok 字段，导致客户端需为不同工具写不同解析逻辑。
+    非字典或已含 ok 的字典原样返回，避免重复包裹或吞掉错误结构。"""
+    if isinstance(r, dict) and "ok" not in r:
+        return {"ok": ok, **r}
+    return r
+
 def _task_pool_disabled() -> str:
     """任务池关闭时的统一返回（WebUI 开关控制）。"""
     return _js({"ok": False, "error": "DSL 验证任务池已关闭（由 WebUI 开关控制），暂不可用。"
@@ -121,7 +131,7 @@ def autoflow_list_entities(domain: str = "", area: str = "", keyword: str = "",
     （如 light→["on","off"]、cover→["open","closed"]），写 flow 立即知道目标状态怎么填。
     并透明回报 matched_count / returned / truncated / next_offset，方便翻页。"""
     r = _gw().list_entities(domain or None, area or None, keyword or None, limit, offset)
-    return _js(r)
+    return _js(_with_ok(r))
 
 # ───────────── 读：强制刷新 HA 实体目录（缓存填充，解除建 flow 死锁）─────────────
 @mcp.tool()
@@ -155,23 +165,23 @@ def autoflow_list_automations(keyword: str = "", only: str = "all",
     返回每个自动化 {id, title, state, source(编译器/原生手写), spec(可读说明), created_at, flow_id?}；
     并透明回报 matched_count / returned / truncated / next_offset。"""
     r = _gw().list_automations(keyword or None, only, limit, offset)
-    return _js(r)
+    return _js(_with_ok(r))
 
 # ───────────── DSL 自助指南 ─────────────
 @mcp.tool()
 def autoflow_dsl_help() -> str:
     """写 DSL 时随时调用：返回完整语法 + 可用子流程清单(含参数) + 写作范例 + 提交方式。
     这是 agent 边写边查的权威参考，内容随代码同步更新。"""
-    return _js(_gw().dsl_help())
+    return _js(_with_ok(_gw().dsl_help()))
 
 # ───────────── 模板库（读：list / render）─────────────
 @mcp.tool()
 def autoflow_list_templates() -> str:
     """列出可用 DSL 模板。返回 {templates:[{name,description,tags,params}]}。
     先 list 拿到 name + params，再用 autoflow_render_template 填空生成合规 DSL，避免从零写、降幻觉。"""
-    return _js({"templates": list_templates(),
+    return _js(_with_ok({"templates": list_templates(),
                 "next": "用 autoflow_render_template(name, values_json) 填空生成 DSL；"
-                        "语法/子流程清单调 autoflow_dsl_help()；生成后交 autoflow_propose_dsl 提交。"})
+                        "语法/子流程清单调 autoflow_dsl_help()；生成后交 autoflow_propose_dsl 提交。"}))
 
 @mcp.tool()
 def autoflow_render_template(name: str, values_json: str = "{}") -> str:
@@ -407,8 +417,8 @@ def autoflow_list_pending() -> str:
                 pending.append(entry)
     except Exception:
         pass
-    return _js({"agent_id": aid, "pending": pending,
-                "settled": settled, "settled_total": settled_total})
+    return _js(_with_ok({"agent_id": aid, "pending": pending,
+                "settled": settled, "settled_total": settled_total}))
 
 @mcp.tool()
 def autoflow_set_plan(current: str = "", overall: str = "",
