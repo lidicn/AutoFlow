@@ -6757,7 +6757,8 @@ class Gateway:
 
     def modify_flow(self, flow_id: str, dsl: Optional[str] = None,
                    node_patches: Optional[List[Dict]] = None,
-                   agent_id: str = "unknown-agent", force: bool = False) -> Dict[str, Any]:
+                   agent_id: str = "unknown-agent", force: bool = False,
+                   allow_prod: bool = False) -> Dict[str, Any]:
         """外科式改 flow（C3）：不重写整条流，只做最小改动。白箱身份专用。
 
         - dsl 给定：用新 DSL 重新编译，复用目标 flow 的 id/label 原地更新
@@ -6890,7 +6891,8 @@ class Gateway:
                     "error": self._ha_server_unresolved_msg(_unresolved)}
         # 部署（force 覆盖，复用 deploy 链路）
         try:
-            res = self.nr.create_or_update_flow(flow_id, target, force=True)
+            res = self.nr.create_or_update_flow(flow_id, target, force=True,
+                                                allow_prod=allow_prod)
             real_fid = res.get("id") or flow_id
         except Exception as e:
             return {"ok": False, "stage": "deploy", "error": f"部署失败：{e}"}
@@ -6932,7 +6934,7 @@ class Gateway:
 
     def apply_flow(self, flow_id: str = "", correction: Optional[Dict] = None,
                    mode: str = "A", agent_id: str = "unknown-agent",
-                   auto_approve: bool = False,
+                   auto_approve: bool = False, allow_prod: bool = False,
                    trace_id: Optional[str] = None) -> Dict[str, Any]:
         """把「观测→修正」落回系统的唯一编排入口（apply 闭环核心）。
 
@@ -7048,7 +7050,7 @@ class Gateway:
 
         # 走既有外科式改流链路（含节点注册表闸门 + 部署）
         res = self.modify_flow(flow_id, dsl=dsl, node_patches=node_patches,
-                               agent_id=agent_id)
+                               agent_id=agent_id, allow_prod=allow_prod)
         ok = bool(res.get("ok"))
         self._selfheal_budget_record(agent_id, flow_id, ok)
         audit.update(ok=ok, applied=ok, pending=False, stage="modify_flow",
@@ -7153,7 +7155,8 @@ class Gateway:
         )
 
     def apply_rollback(self, trace_id: str, agent_id: str = "unknown-agent",
-                       auto_approve: bool = False) -> Dict[str, Any]:
+                       auto_approve: bool = False,
+                       allow_prod: bool = False) -> Dict[str, Any]:
         """把某次 apply（trace_id）改动的 flow 还原到 apply 前的快照（自愈闭环·回滚）。
 
         - 从 data/apply_traces/<trace_id>.json 找回 flow_id 与 snapshot_path；
@@ -7206,7 +7209,8 @@ class Gateway:
             out.update(stage="node_gate", error=str(e))
             return out
         try:
-            res = self.nr.create_or_update_flow(flow_id, target, force=True)
+            res = self.nr.create_or_update_flow(flow_id, target, force=True,
+                                                allow_prod=allow_prod)
         except Exception as e:
             out.update(stage="deploy", error=f"还原部署失败：{e}")
             self._selfheal_budget_record(agent_id, flow_id, False)

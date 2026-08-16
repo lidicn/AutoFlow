@@ -1441,7 +1441,7 @@ def autoflow_apply(mode: str, correction_json: str, flow_id: str = "",
         return _js({"ok": False, "error": "correction_json 必须是 JSON 对象（{...}）"})
     return _js(_gw().apply_flow(flow_id=flow_id, correction=correction, mode=mode,
                                 agent_id=agent.agent_id, auto_approve=auto_approve,
-                                trace_id=trace_id or None))
+                                allow_prod=True, trace_id=trace_id or None))
 
 @mcp_admin.tool()
 @mcp.tool()
@@ -1461,7 +1461,7 @@ def autoflow_apply_rollback(trace_id: str, auto_approve: bool = False) -> str:
         return _js({"ok": False, "error": "当前身份为『黑箱』(mode=black)；"
                     "apply 回滚属原生手写能力，请改用『原生手写身份码』调用本工具。"})
     return _js(_gw().apply_rollback(trace_id, agent_id=agent.agent_id,
-                                    auto_approve=auto_approve))
+                                    auto_approve=auto_approve, allow_prod=True))
 
 @mcp_admin.tool()
 @mcp.tool()
