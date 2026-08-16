@@ -571,5 +571,88 @@ class TestVF5ChangeUpstreamUnverified(unittest.TestCase):
                       "可靠源 → 分支须照常命中并重放")
 
 
+# ═══════════════════ V-NEW-2：function-only 流须经闸门（V-F4 不再死代码）═══════════════════
+class TestVNEW2FunctionGateRuns(unittest.TestCase):
+    """TEST_RESULT_003 发现 V-NEW-2：纯 function 流因 caller 的 has_ha_actions 不含
+    function，staging 闸从不运行 → V-F4 的 _function_only 降级永远不可达（死代码）。
+    修复：caller 的 has_ha_actions 纳入 function，且在无自动后置条件时强制跑闸。
+    本测试固化【caller】行为：verify_flow 对 function-only 流须真正调用 run_staging_gate。
+    （修复前 has_ha_actions 不含 function → 闸被跳过 → 此断言失败。）"""
+
+    def _func_flow(self):
+        return {
+            "id": "f_func_only", "label": "function-only",
+            "nodes": [
+                {"id": "trg", "type": "inject", "payload": "", "payloadType": "str",
+                 "wires": [["fn"]]},
+                {"id": "fn", "type": "function", "func": "return msg;", "wires": [[]]},
+            ],
+        }
+
+    def test_verify_flow_runs_gate_for_function_only(self):
+        called = {}
+        real = Gateway.run_staging_gate
+
+        def _spy(self_, dsl, expected, **kw):
+            called["yes"] = True
+            return real(self_, dsl, expected, **kw)
+
+        Gateway.run_staging_gate = _spy
+        try:
+            Gateway().verify_flow(self._func_flow(), run_gate=True)
+        finally:
+            Gateway.run_staging_gate = real
+        self.assertTrue(called.get("yes"),
+                        "function-only 流必须触发 staging 闸（V-NEW-2 修复点）")
+
+
+# ═══════════════════ V-NEW-1：声明效果却 0 重放 → 降级不拦截 ════════════════════
+class TestVNEW1DeclaredEffectUnreplayed(unittest.TestCase):
+    """TEST_RESULT_003 发现 V-NEW-1：flow 声明了效果节点（api-call-service），但本步 0 重放
+    且不可归因于恒假分支 / 保守命中 / 不可求值（典型如条件流分支未命中、种子态已满足后置）
+    → 旧实现 _cause 不含此类 → _zero=False → fully_verified 假绿。
+    修复：_unverified 增「声明效果但 0 重放」条款，降级 verdict=未充分验证（不拦截），
+    与 A22/V-F1/V-F4 同构，消除 fully_verified 过度宣称，不误伤合法条件流负向验证。"""
+
+    def _store_on(self):
+        st = _store()
+        st.entities["light.desk"]["state"] = "on"   # 种子态已满足后置 → 断言通过但效果未重放
+        return st
+
+    def _flow_branch_false(self):
+        # 复用 _flow：motion 触发 → api-current-state 取 lux 写入 payload.光照 →
+        # switch 判 $number(payload.光照) > 999（种子 lux=10 → 恒 false，且字段已声明非未定义）
+        # → THEN(开灯)不激活 → 0 重放；种子态 light.desk 已=on 满足预期。
+        flow = _flow("光照", "payload.光照", with_else=False)
+        flow["nodes"][2]["rules"][0]["v"] = "$number(payload.光照) > 999"
+        return flow
+
+    def test_declared_effect_unreplayed_downgrades_not_blocks(self):
+        r = _gw().run_staging_gate(
+            "", [{"entity_id": "light.desk", "state": "on"}],
+            vhass_store=self._store_on(), flow=self._flow_branch_false())
+        self.assertTrue(r["passed"], "分支未命中 → 不应拦截（合法条件流）")
+        self.assertEqual(r["verdict"], "未充分验证",
+                         "声明效果却 0 重放 → 须降级为未充分验证（V-NEW-1）")
+        self.assertFalse(r["fully_verified"],
+                         "fully_verified 不得为假绿（V-NEW-1 消除过度宣称）")
+        self.assertTrue(
+            any("V-NEW-1" in w for w in r.get("warnings", [])),
+            f"须带 V-NEW-1 诚实性告警：{r.get('warnings')}")
+
+    def test_triggered_positive_path_still_verified(self):
+        """对照组：分支命中（lux>5）→ 开灯重放 → 后置 on 达成 → 充分验证（不误伤）。"""
+        flow = _flow("光照", "payload.光照", with_else=False)
+        flow["nodes"][2]["rules"][0]["v"] = "$number(payload.光照) > 5"  # 10>5 → 命中
+        r = _gw().run_staging_gate(
+            "", [{"entity_id": "light.desk", "state": "on"}],
+            vhass_store=_store(), flow=flow)
+        self.assertIn("light.turn_on(light.desk)", r["replayed_services"],
+                      "分支命中须重放开灯")
+        self.assertTrue(r["passed"])
+        self.assertNotEqual(r["verdict"], "未充分验证",
+                            "正向下发路径须充分验证，不被 V-NEW-1 误伤")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

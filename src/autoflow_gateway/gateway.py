@@ -4665,7 +4665,8 @@ class Gateway:
         # Step 6: 可选 staging 闸门（仅当 flow 含 HA 动作节点且有实体可断言时；dry-run 跳过）
         gate = {"skipped": True, "reason": "无 HA 动作或无预期条件"}
         has_ha_actions = any(
-            n.get("type") in ("api-call-service", "server-state-changed", "api-current-state")
+            n.get("type") in ("api-call-service", "server-state-changed",
+                              "api-current-state", "function")
             for n in nodes
         )
         _gate_unverifiable: List[str] = []
@@ -4674,7 +4675,12 @@ class Gateway:
             # 【A18】与 verify_flow 同源修复：改走 flow= 直通口 + 正确 kwarg（旧写法
             # expected_postconditions= 是 TypeError，dsl 又是伪造的注释文本，两头必死）。
             expected_auto, _gate_unverifiable = _auto_expected_from_nodes(nodes)
-            if not expected_auto:
+            # 【V-NEW-2 / V-F4】纯 function 流无 api-call-service → expected_auto 为空，
+            # 但 function 黑箱副作用仍须经闸门诚实性判定（_function_only），故强制跑闸；
+            # 其余无自动后置条件的（纯 link out / subflow 属 Tier A 人工验证，按设计跳过）。
+            _force_run = bool(expected_auto) or any(
+                n.get("type") == "function" for n in nodes)
+            if not _force_run:
                 gate = {"skipped": True,
                         "reason": ("flow 含 HA 动作，但没有任何后置条件可自动推导，闸未运行："
                                    + "；".join(sorted(set(_gate_unverifiable)) or ["未知原因"]))}
@@ -4970,7 +4976,8 @@ class Gateway:
         #   3) 期望提取只认 turn_on/turn_off，非 on/off 动作一律提不出 → 现按 vhass
         #      建模表推导，推不出的如实登记为「不可验证」并让顶层降级 warn。
         has_ha_actions = any(
-            n.get("type") in ("api-call-service", "server-state-changed", "api-current-state")
+            n.get("type") in ("api-call-service", "server-state-changed",
+                              "api-current-state", "function")
             for n in nodes
         )
         staging_required = bool(run_gate and has_ha_actions)
@@ -4981,7 +4988,12 @@ class Gateway:
             gate = {"skipped": True, "reason": "flow 无 HA 动作节点，没有后置条件可断言"}
         else:
             expected_auto, unverifiable = _auto_expected_from_nodes(nodes)
-            if expected_auto:
+            # 【V-NEW-2 / V-F4】纯 function 流无 api-call-service → expected_auto 为空，
+            # 但 function 黑箱副作用仍须经闸门诚实性判定（_function_only），故强制跑闸；
+            # 其余无自动后置条件的（纯 link out / subflow 属 Tier A 人工验证）按设计跳过。
+            _force_run = bool(expected_auto) or any(
+                n.get("type") == "function" for n in nodes)
+            if _force_run:
                 try:
                     gate = self.run_staging_gate(dsl="", expected=expected_auto, flow=flow)
                     if unverifiable:
@@ -5647,6 +5659,7 @@ class Gateway:
             nd.get("type") == "function" for nd in flow.get("nodes", []))
         replay_zero_steps = []
         conservative_hits = []  # 【V-F1】跨步收集「保守命中」的 JSONata 分支
+        _declared_effect_unreplayed_steps = []  # 【V-NEW-1】声明效果却 0 重放且不可归因于已知原因
         for step in steps:
             # 2a) 应用本步世界事件（多步场景逐步推进现实态）
             for eid, st in (step.get("world") or {}).items():
@@ -5790,6 +5803,13 @@ class Gateway:
                     "原因：" + "、".join(_cause) +
                     "。闸门实际未验证任何行为，不构成『通过』。"
                     "请补 否则: 分支 / 改用闸门可求值的条件 / 修正分支字段名。")
+            # 【V-NEW-1 窄修】声明了效果节点，但本步 0 重放且不可归因于
+            # 恒假分支 / 保守命中 / 不可求值（即「声明了却什么都没验证」，
+            # 典型如条件流分支未命中、种子态已满足后置）→ 闸门实际未验证其效果。
+            # 降级 verdict=未充分验证（与 A22/V-F1/V-F4 同构，不拦截），消除
+            # fully_verified 过度宣称；不误伤合法条件流的负向验证（无运动→灯恒 off）。
+            if has_effect_nodes and not replayed and not external and not bool(_cause):
+                _declared_effect_unreplayed_steps.append(len(step_results))
             step_results.append({
                 "world": step.get("world", {}),
                 "replayed_services": replayed,
@@ -5822,17 +5842,24 @@ class Gateway:
         # 【V-F4】function-only 流（黑箱副作用不可建模）且无显式 api-call-service 效果 →
         # 闸门无法证实其是否产生副作用，fully_verified 不可视为完整验证。
         _function_only = has_function_nodes and not has_effect_nodes
+        _declared_effect_unreplayed = bool(_declared_effect_unreplayed_steps)
         _unverified = (
             bool(_unmodeled) or
             (bool(replay_zero_steps) and _rz_policy == "warn_only") or
             bool(conservative_hits) or
-            _function_only
+            _function_only or
+            _declared_effect_unreplayed
         )
         if _function_only:
             warnings.append(
                 "flow 含 function 节点（黑箱，其潜在副作用 vhass 无法建模），且未显式声明 "
                 "api-call-service 效果 → 闸门无法证实其是否产生副作用，fully_verified 不可"
                 "视为完整验证（V-F4 诚实性缺口）。")
+        if _declared_effect_unreplayed:
+            warnings.append(
+                "flow 声明了效果节点（api-call-service / 子流程），但本步 0 个 HA 意图、"
+                "0 个外部调用被重放，且不可归因于恒假分支 / 保守命中 / 不可求值 → 闸门实际"
+                "未验证其效果，fully_verified 不可视为完整验证（V-NEW-1 诚实性缺口）。")
         if _unverified:
             warnings.append("验证存在未覆盖层（闸跳过/未建模服务/重放归零 warn_only/"
                             "保守命中 JSONata/function 黑箱副作用），"
