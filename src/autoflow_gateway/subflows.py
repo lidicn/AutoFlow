@@ -58,6 +58,11 @@ class SubflowSpec:
     # 用户可从示例主动导入），但不在全新/重置用户的默认预置面板出现。
     # 例：demo_notify 是 link_out 编译路径的教学示例，注册但不预载。
     preload: bool = True
+    # V-NEW-3：子流程的【已声明输出字段】名清单（msg.payload 返回结构的顶层键）。
+    # 供 flow_linter._compute_reliable_fields 建模——否则下游 switch 读子流程输出字段
+    # 会被误判「未定义」→ 恒假分支 → 子流程流被过度拦截。空 = 不建模（unknown 子流程
+    # 默认保持过度拦截，安全侧）。link_out 型（fire-and-forget 无返回值）留空。
+    outputs: list = field(default_factory=list)
 
     def resolve_args(self, raw: dict[str, str],
                      dynamic: Optional[set] = None) -> dict[str, Any]:
@@ -690,6 +695,23 @@ def flow_uses_history_subflow(nodes) -> bool:
 from .api_specs import API_SPECS  # noqa: E402  (循环导入：subflows 先定义 Param/SubflowSpec/SUBFLOWS)
 for _api_spec in API_SPECS:
     SUBFLOWS[_api_spec.name] = _api_spec.to_subflow_spec()
+
+
+# ── V-NEW-3：声明 history 子流程的输出字段（msg.payload 返回结构顶层键）──
+# 这些字段名取自各 subflow 的 notes 文档（data/subflows/subflows.json）。
+# 让 flow_linter._compute_reliable_fields 能建模「子流程输出 → 下游 switch 读它」，
+# 消除子流程流被误判未定义字段而过度拦截。只声明有文档依据的字段，未知子流程留空（安全侧）。
+_SUBFLOW_OUTPUTS: dict[str, list] = {
+    "history_state_at": ["found", "entity", "at_iso", "value", "attribute", "unit", "nearest_ts"],
+    "history_occurred": ["occurred", "entity", "start_iso", "end_iso", "count", "state",
+                          "events", "first_ts", "last_ts"],
+    "history_duration": ["total_seconds", "total_human", "entity", "start_iso", "end_iso",
+                          "state", "ratio"],
+    "history_aggregate": ["value", "unit", "entity", "start_iso", "end_iso", "metric", "attribute"],
+}
+for _n, _o in _SUBFLOW_OUTPUTS.items():
+    if _n in SUBFLOWS:
+        SUBFLOWS[_n].outputs = _o
 
 
 def get_subflow(name: str, registry_store=None) -> Optional[SubflowSpec]:

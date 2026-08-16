@@ -660,6 +660,20 @@ def _compute_reliable_fields(nodes: List[Dict[str, Any]]) -> set:
     迭代至不动点，支持 change→change 链路。function 为黑箱、其写入字段不可静态判定，
     不计入可靠（由 R2 单独提示），避免把『无法静态确认』伪装成可靠。
     """
+    # V-NEW-3：子流程实例的【已声明输出字段】纳入 reliable base（消除子流程流过度拦截）。
+    # 按实例 type（subflow:<id> / subflow）+ name 解析已注册 SubflowSpec，取其 outputs。
+    # 惰性导入 subflows（避免与 gateway 的循环依赖）；取不到则留空（安全侧：不建模=过度拦截）。
+    _sf_by_name: dict = {}
+    _sf_by_id: dict = {}
+    try:
+        from . import subflows as _sf_mod
+        for _sn, _ss in _sf_mod.SUBFLOWS.items():
+            _sf_by_name[_sn] = _ss
+            _sid = (_ss.call or {}).get("subflow_id")
+            if _sid:
+                _sf_by_id[_sid] = _ss
+    except Exception:
+        _sf_by_name, _sf_by_id = {}, {}
     base: set = {"state"}
     for n in nodes:
         if n.get("type") == "api-current-state":
@@ -685,6 +699,17 @@ def _compute_reliable_fields(nodes: List[Dict[str, Any]]) -> set:
                     for k in obj.keys():
                         if isinstance(k, str) and k and "." not in k:
                             base.add(k)
+        # V-NEW-3：子流程实例输出字段（msg.payload 顶层键）视为必定可得。
+        elif str(n.get("type", "")).startswith("subflow:") or n.get("type") == "subflow":
+            _st = n.get("type")
+            _sid = (_st[len("subflow:"):] if str(_st).startswith("subflow:")
+                    else (n.get("name") or ""))
+            _spec = (_sf_by_name.get(_sid) or _sf_by_id.get(_sid)
+                     or _sf_by_name.get(n.get("name") or ""))
+            if _spec and getattr(_spec, "outputs", None):
+                for _f in _spec.outputs:
+                    if _f and "." not in _f:
+                        base.add(_f)
     # change 写入字段及其源字段 token
     writes: List[Tuple[str, set]] = []
     for n in nodes:
