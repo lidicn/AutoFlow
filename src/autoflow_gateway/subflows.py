@@ -702,12 +702,12 @@ for _api_spec in API_SPECS:
 # 让 flow_linter._compute_reliable_fields 能建模「子流程输出 → 下游 switch 读它」，
 # 消除子流程流被误判未定义字段而过度拦截。只声明有文档依据的字段，未知子流程留空（安全侧）。
 _SUBFLOW_OUTPUTS: dict[str, list] = {
-    "history_state_at": ["found", "entity", "at_iso", "value", "attribute", "unit", "nearest_ts"],
+    "history_state_at": ["found", "entity", "at_iso", "value", "attribute", "unit", "nearest_ts", "source"],
     "history_occurred": ["occurred", "entity", "start_iso", "end_iso", "count", "state",
                           "events", "first_ts", "last_ts"],
     "history_duration": ["total_seconds", "total_human", "entity", "start_iso", "end_iso",
                           "state", "ratio"],
-    "history_aggregate": ["value", "unit", "entity", "start_iso", "end_iso", "metric", "attribute"],
+    "history_aggregate": ["value", "unit", "entity", "start_iso", "end_iso", "metric", "attribute", "samples", "error"],
 }
 for _n, _o in _SUBFLOW_OUTPUTS.items():
     if _n in SUBFLOWS:
