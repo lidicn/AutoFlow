@@ -531,8 +531,17 @@ def parse(text: str) -> Scene:
 
         # ── 结构化 dedent：按缩进弹出已结束的块帧 ──
         if indent == 0:
-            # 回到最外层：除 块关键字(分支/否则如果/否则) 外，一律关闭已开块
-            if kw not in _BLOCK_KW:
+            if kw in _BLOCK_KW:
+                # 块关键字（分支/否则如果/否则）：关闭所有【嵌套】块帧（indent > 0），
+                # 但保留顶层 block 帧（indent == 0）供同级 分支/否则 续接多路分支。
+                # 否则嵌套场景下「外层 否则/分支」仍会把内层 switch 帧当 top ——
+                # 外层 否则 被误挂到内层 switch 上（双层 否则 误接线 bug：
+                # 外层 switch 缺 else 输出、外层 false 路径不可达）。
+                while _ctx[-1] is not _TOP and _ctx[-1].indent > 0:
+                    _ctx.pop()
+            else:
+                # 非块关键字：回到最外层，关闭所有已开块（原行为，避免叶子步骤
+                # 误挂到仍压栈的块帧 else_body，如 门+否则 后的顶层 动作）。
                 while _ctx[-1] is not _TOP:
                     _ctx.pop()
         else:
