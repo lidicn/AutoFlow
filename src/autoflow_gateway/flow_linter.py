@@ -287,9 +287,72 @@ def _upstream_has_payload_setter(
 
 
 # ── JSONata 启发式语法检查（NR 同款引擎才 100% 准；这里做宽松预检）──
+# ── Defect A 修复（iss_60e4d57ce8 / high）──────────────────────────────────
+# 旧版 _check_jsonata 只做括号/引号配平启发式，漏检「悬空/缺操作数的二元运算符」
+# （如用户实锤的 `payload.occurred == true and == "on"`：第二个 `==` 缺左操作数）。
+# 该畸形表达式配平通过 → R30 不告警 → 部署 200 → 运行态才抛 `Invalid JSONata`，
+# 且 get_flow 读回的正是这串残表达式（假绿）。现升级为「操作数感知」校验：
+# 剥掉字符串/注释后，扫描所有二元运算符，确认每个都有左右操作数。
+# 仍零新依赖、低风险，与 R30 error 级 fail-closed 一致。
+
+# 始终二元的符号运算符（绝无一元用法，且不会是路径通配符）。长优先。
+_SYM_OPS = ["===", "!==", ">=", "<=", ">>", "<<", "==", "!=", ">", "<",
+            ":=", "->", "=>"]
+# 词运算符（前后需有空白边界，避免误伤 `payload.in` 之类字段路径）。
+_WORD_OPS = ["and", "or", "in", "div", "mod"]
+
+def _strip_strings_and_comments(s: str) -> str:
+    """去掉字符串字面量（" 与 '）与 //、/* */ 注释，避免运算符出现在字面量内被误判。
+
+    字符串整体替换为一个占位符 ``S``（代表一个操作数，而非空格），这样
+    ``== "on"`` 在剥离后变成 ``== S``，下游邻接检查能看到「该运算符确实有右操作数」，
+    不会因为字符串被吃成空格而把下一个词运算符（and/or）误判为本运算符的右操作数。
+    """
+    out = []
+    i, n = 0, len(s)
+    while i < n:
+        ch = s[i]
+        # 行注释 //
+        if ch == "/" and i + 1 < n and s[i + 1] == "/":
+            while i < n and s[i] != "\n":
+                i += 1
+            continue
+        # 块注释 /* */
+        if ch == "/" and i + 1 < n and s[i + 1] == "*":
+            i += 2
+            while i < n and not (s[i] == "*" and i + 1 < n and s[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        # 字符串字面量：整串替换为一个占位符 S
+        if ch in ('"', "'"):
+            out.append("S")
+            i += 1
+            while i < n:
+                c = s[i]
+                if c == "\\":
+                    i += 2
+                    continue
+                if c == ch:
+                    i += 1
+                    break
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _check_jsonata(expr: str) -> Tuple[bool, str]:
-    """返回 (ok, 说明)。启发式：括号/方括号/花括号平衡、引号平衡、无 .. 双点。
-    允许 NR 扩展语法 `:=` 绑定（standalone jsonata 不支持，但 NR 内置支持）。"""
+    """返回 (ok, 说明)。
+
+    两层校验：
+      1) 括号/方括号/花括号平衡、引号平衡、无 .. 双点（沿用旧启发式）。
+      2) 操作数感知：剥掉字符串/注释后扫描二元运算符，确认每个都有左右操作数
+         （抓 `... and == "on"` 这类悬空/缺操作数畸形，部署前拦下，避免运行态
+         Invalid JSONata + 假绿）。
+    允许 NR 扩展语法 `:=` 绑定（standalone jsonata 不支持，但 NR 内置支持）。
+    """
     if not isinstance(expr, str) or not expr.strip():
         return True, ""
     s = expr
@@ -322,6 +385,50 @@ def _check_jsonata(expr: str) -> Tuple[bool, str]:
         return False, f"括号未闭合：多余 '{stack[-1]}'"
     if ".." in s:
         return False, "出现 '..' 连续点（JSONata 路径不允许）"
+
+    stripped = _strip_strings_and_comments(s)
+
+    # 空括号 () 非法（{} [] 为空对象/数组合法，不拦）
+    if re.search(r"\(\s*\)", stripped):
+        return False, "出现空括号 '()'（表达式不完整，运行态会被 JSONata 引擎拒绝）"
+
+    # 构造运算符匹配（符号优先长匹配；词运算符加负向前后顾，
+    # 避免误伤 `payload.in` / `within` 之类字段路径或标识符中的 and/or/in）。
+    sym_alt = "|".join(re.escape(o) for o in _SYM_OPS)
+    word_alt = "|".join(re.escape(o) for o in _WORD_OPS)
+    op_re = re.compile(rf"(?:{sym_alt}|(?<![\\w.])\b(?:{word_alt})\b(?![\\w.]))")
+    # 运算符首字符集合（用于判断「紧邻另一个运算符」）
+    _OP_FIRST = set("=!><:/-")
+
+    # 收集所有运算符区间
+    ops = [(m.start(), m.end(), m.group()) for m in op_re.finditer(stripped)]
+    for start, end, op in ops:
+        # 左操作数：运算符在开头，或紧邻 '(' / ',' / 另一运算符首字符，
+        # 或紧邻词运算符（含空白边界，说明前一个词运算符缺右操作数）
+        if start == 0:
+            return False, (f"运算符 '{op}' 缺少左操作数"
+                           f"（表达式 '{expr}' 语法不完整，运行态会被 JSONata 引擎拒绝）")
+        left_char = stripped[start - 1]
+        # 取左侧最近的非空白 token（用于识别 `and`/`or` 等词运算符紧邻）
+        left_tok = stripped[:start].rstrip().split()[-1] if stripped[:start].rstrip() else ""
+        left_bad = (left_char in "(," or left_char in _OP_FIRST
+                    or left_tok in _SYM_OPS or left_tok in _WORD_OPS)
+        if left_bad:
+            return False, (f"运算符 '{op}' 缺少左操作数"
+                           f"（可能是前一个运算符/词运算符缺操作数，导致本运算符悬空；"
+                           f"表达式 '{expr}' 运行态会被 JSONata 引擎拒绝）")
+        # 右操作数：运算符在结尾，或紧邻 ')' / ',' / 另一运算符首字符，
+        # 或紧邻词运算符
+        if end >= len(stripped):
+            return False, (f"运算符 '{op}' 缺少右操作数"
+                           f"（表达式 '{expr}' 语法不完整，运行态会被 JSONata 引擎拒绝）")
+        right_char = stripped[end]
+        right_tok = stripped[end:].lstrip().split()[0] if stripped[end:].lstrip() else ""
+        right_bad = (right_char in ")," or right_char in _OP_FIRST
+                     or right_tok in _SYM_OPS or right_tok in _WORD_OPS)
+        if right_bad:
+            return False, (f"运算符 '{op}' 缺少右操作数"
+                           f"（表达式 '{expr}' 语法不完整，运行态会被 JSONata 引擎拒绝）")
     return True, ""
 
 
@@ -397,6 +504,78 @@ def _lint_link_out_request_side(nodes: List[Dict[str, Any]],
     return out
 
 
+# ── Defect B 守卫（iss_60e4d57ce8 / high）──────────────────────────────────────
+# history_* 子流程（NR 类型 `subflow:af_hist_*`）把答案写回 msg.payload，串行调用会
+# 互相覆盖；若同一个 switch 同时引用 ≥2 个不同 history 子流程的【专属输出字段】，运行态
+# 只有一个结果留在 payload → 另一字段恒 undefined → 条件永假、动作永不执行（静默失败）。
+# 编译期（dsl_engine C_HISTORY_CLOBBER）已 fail-loud；此处补部署闸层面的防御纵深。
+# 映射仅收录各 history 子流程的【专属字段】（排除 entity/state/value 等跨域通用名），
+# 与 subflows._SUBFLOW_OUTPUTS 保持一致，避免误伤普通 取值 字段（如 payload.state）。
+_HISTORY_FIELD_TO_SUBFLOW = {
+    # history_state_at
+    "found": "history_state_at", "nearest_ts": "history_state_at", "at_iso": "history_state_at",
+    # history_occurred
+    "occurred": "history_occurred", "events": "history_occurred",
+    "first_ts": "history_occurred", "last_ts": "history_occurred",
+    # history_duration
+    "total_seconds": "history_duration", "total_human": "history_duration", "ratio": "history_duration",
+    # history_aggregate
+    "samples": "history_aggregate",
+}
+
+
+def _jsonata_payload_fields(expr: str) -> set:
+    """从 JSONata 表达式中抽取被引用的 payload.<field> 字段名集合。"""
+    s = _strip_strings_and_comments(expr or "")
+    return set(re.findall(r"payload\.([A-Za-z_]\w*)", s))
+
+
+def _lint_history_clobber(nodes: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """R36：检测『同一 switch 同时引用 ≥2 个不同 history_* 子流程字段』的静默失败模式。
+
+    仅当流中确实 ≥2 个 history 子流程调用节点时才检查（避免无谓扫描）。
+    命中 → error 级（fail-loud，与 R30 一致），阻断部署。
+    """
+    out: List[Dict[str, str]] = []
+    hist_nodes = [n for n in nodes
+                  if isinstance(n.get("type"), str) and n["type"].startswith("subflow:af_hist_")]
+    if len(hist_nodes) < 2:
+        return out
+    for n in nodes:
+        if n.get("type") != "switch":
+            continue
+        nid = n.get("id") or "?"
+        referenced = set()
+        for r in (n.get("rules") or []):
+            vt = r.get("vt") or r.get("t")
+            if vt in ("jsonata", "jsonata_exp"):
+                for f in _jsonata_payload_fields(r.get("v") or ""):
+                    owner = _HISTORY_FIELD_TO_SUBFLOW.get(f)
+                    if owner:
+                        referenced.add(owner)
+            else:
+                prop = r.get("property") or ""
+                if prop.startswith("payload."):
+                    owner = _HISTORY_FIELD_TO_SUBFLOW.get(prop[8:])
+                    if owner:
+                        referenced.add(owner)
+        if len(referenced) >= 2:
+            names = "、".join(sorted(referenced))
+            out.append({
+                "level": "error", "rule": "R36", "node_id": nid, "node_type": "switch",
+                "message": (
+                    f"switch 同时引用了 {names} 等多个 history_* 子流程的输出字段。"
+                    f"history_* 子流程把答案写回 msg.payload，串行调用会互相覆盖——"
+                    f"运行态同一时刻仅最后一个子流程的结果留在 msg.payload，"
+                    f"前面子流程的字段恒为 undefined → 分支条件永假、动作永不执行（运行期不报错）。"
+                    f"请改为：① 嵌套——在第一个 history 查询命中后的『分支』内再调第二个；"
+                    f"或 ② 用『提取』/change 把首个结果暂存到 flow/global 变量，再调第二个查询，"
+                    f"且下游 switch 读 flow.<变量> 而非 payload.<字段>。"
+                ),
+            })
+    return out
+
+
 # ── 主 lint ──
 def lint_flow(flow: Dict[str, Any], b1_unreachable: bool = False) -> List[Dict[str, str]]:
     """对 flow JSON（{nodes:[...]}）做静态 lint，返回 issue 列表。
@@ -462,6 +641,8 @@ def lint_flow(flow: Dict[str, Any], b1_unreachable: bool = False) -> List[Dict[s
     issues.extend(_lint_key_empty_params(nodes))
     # R33：整条流无 effectful 节点（纯 stub / pass-through）→ warning（fail-open，不阻塞）
     issues.extend(_lint_noop_flow(nodes))
+    # R36：同一 switch 引用 ≥2 个不同 history_* 子流程字段（后者覆盖前者 → 静默永假）
+    issues.extend(_lint_history_clobber(nodes))
     # R37（round4 R7）：link-out 请求侧错挂「取返回值/提取」节点（无回执 → 静默取错值）
     issues.extend(_lint_link_out_request_side(nodes, nodes_by_id))
     # B1（R14）：不可达节点 / 死代码（正向全图可达性）。默认关闭（见 b1_unreachable 说明）。

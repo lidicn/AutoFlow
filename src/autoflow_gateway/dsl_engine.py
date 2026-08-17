@@ -19,8 +19,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from .subflows import get_subflow, SubflowSpec
-from .flow_linter import lint_flow, _check_jsonata
+from .subflows import get_subflow, SubflowSpec, HISTORY_SUBFLOW_IDS
+from .flow_linter import lint_flow, _check_jsonata, _strip_strings_and_comments
 
 
 # ── 实体解析钩子（友好名/语义标签 → entity_id）─────────────────────────────
@@ -155,6 +155,7 @@ C_UNKNOWN_STEP = "C_UNKNOWN_STEP"        # 暂不支持的步骤类型
 C_SEMANTIC_GAP = "C_SEMANTIC_GAP"        # 语义缺口（高声拒绝，避免静默降级）
 C_SELFCHECK = "C_SELFCHECK"              # 编译自检发现错误级问题
 C_JSONATA_SYNTAX = "C_JSONATA_SYNTAX"    # 分支/条件 JSONata 语法断裂（WB24-N5 收口：编译期预检，防静默恒假）
+C_HISTORY_CLOBBER = "C_HISTORY_CLOBBER"  # Defect B（iss_60e4d57ce8）：串行调用多个 history_* 子流程互相覆盖 msg.payload → 下游分支永假、静默失败
 C_COMPARE_TYPE_WARN = "C_COMPARE_TYPE_WARN"  # 数值比较未包 $number()（state 为字符串，比较可能恒假）
 C_ENTITY_UNRESOLVED = "C_ENTITY_UNRESOLVED"  # 中文/友好实体名未解析为 entity_id（原样写入 NR 必然找不到实体）
 C_PARSE = "C_PARSE"                      # 兜底（未归类解析错误）
@@ -2135,6 +2136,71 @@ def _emit_trigger(em: _Emitter, trg: Trigger, target: str) -> str:
     return nid
 
 
+# ── Defect B 守卫（iss_60e4d57ce8 / high）──────────────────────────────────────
+# history_* 子流程把答案写回 msg.payload，串行调用会互相覆盖；下游 switch 若引用被
+# 覆盖的较早子流程字段 → 条件永假、动作永不执行（运行期不报错，黑箱静默 bug）。
+# 编译期 fail-loud 拦截。映射仅收录各 history 子流程的【专属字段】
+# （排除 entity/state/value 等跨域通用名），避免误伤普通 取值 字段（如 payload.state）。
+# 与 subflows._SUBFLOW_OUTPUTS 的专属字段保持一致。
+_HISTORY_FIELD_TO_SUBFLOW = {
+    # history_state_at
+    "found": "history_state_at", "nearest_ts": "history_state_at", "at_iso": "history_state_at",
+    # history_occurred
+    "occurred": "history_occurred", "events": "history_occurred",
+    "first_ts": "history_occurred", "last_ts": "history_occurred",
+    # history_duration
+    "total_seconds": "history_duration", "total_human": "history_duration", "ratio": "history_duration",
+    # history_aggregate
+    "samples": "history_aggregate",
+}
+
+
+def _is_history_subflow_call(st) -> bool:
+    """st 是否为 history_* 子流程调用（替换式写 msg.payload 的 subflow 实例）。"""
+    if not isinstance(st, SubflowCall):
+        return False
+    try:
+        spec = get_subflow(st.name)
+    except Exception:
+        return False
+    call = getattr(spec, "call", None) or {}
+    return call.get("type") == "subflow" and call.get("subflow_id") in HISTORY_SUBFLOW_IDS
+
+
+def _jsonata_payload_fields(expr: str) -> set:
+    """从 JSONata 表达式中抽取被引用的 payload.<field> 字段名集合。"""
+    s = _strip_strings_and_comments(expr or "")
+    return set(re.findall(r"payload\.([A-Za-z_]\w*)", s))
+
+
+def _check_history_clobber_in_switch(st, live_history: Optional[str]) -> None:
+    """Defect B：若本 switch 引用了 ≥2 个不同 history 子流程字段，或引用了
+    已被后续 history 调用覆盖的较早子流程字段 → 编译期 fail-loud。
+
+    live_history：当前线性序列中最近一次 history_* 调用的子流程名（其字段在 payload 中）。
+    """
+    referenced = set()
+    for br in (getattr(st, "branches", None) or []):
+        for f in _jsonata_payload_fields(getattr(br, "condition", "") or ""):
+            owner = _HISTORY_FIELD_TO_SUBFLOW.get(f)
+            if owner:
+                referenced.add(owner)
+    if not referenced or live_history is None:
+        # 本序列无 history 调用 → 引用历史字段属未定义字段域（R31 另管），不在此拦截
+        return
+    if referenced != {live_history}:
+        names = "、".join(sorted(referenced))
+        raise DSLError(
+            f"分支 引用了 history_* 子流程 {names} 的输出字段，但当前线性序列中最近一次 "
+            f"history 查询是 {live_history}，前者结果已被后者串行覆盖"
+            f"（history_* 子流程把答案写回 msg.payload，后调用者抹掉前调用者）。"
+            f"运行态该字段恒为 undefined → 分支条件永假、动作永不执行（且不报错）。"
+            f"请改为：① 嵌套——在第一个 history 查询命中后的『分支』内再调第二个；"
+            f"或 ② 用『提取: 变量 = payload.<字段>』先把首个结果暂存到变量，再调第二个查询，"
+            f"下游分支读该变量而非 payload.<字段>。",
+            getattr(st, "line", None), code=C_HISTORY_CLOBBER)
+
+
 def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200):
     """顺序编排步骤。sources 为上游节点 id 列表（fan-in）；首节点接收全部上游连线，
     之后顺次链接。遇 并行 块做 fan-out。连续的 提取 步骤合并进同一个 change 节点。
@@ -2151,6 +2217,7 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200):
     # 这里，而不是挂在 switch 的输出上（详见下方注释）。
     last_upstream: list = []
     pending_extract: Optional[str] = None  # 当前正在累积的「提取」change 节点 id
+    live_history: Optional[str] = None      # 本线性序列最近一次 history_* 调用名（其字段在 payload）
     for st in steps:
         if isinstance(st, Parallel):
             pending_extract = None
@@ -2200,6 +2267,12 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200):
                  "to": _sanitize_jsonata(st.expr), "tot": "jsonata"})
             continue
         pending_extract = None
+        # Defect B 守卫（iss_60e4d57ce8）：跟踪本线性序列 history_* 调用顺序，
+        # 供后续 switch 引用检查捕获「后者覆盖前者」的静默失败。
+        if isinstance(st, SubflowCall) and _is_history_subflow_call(st):
+            live_history = st.name
+        elif isinstance(st, Switch):
+            _check_history_clobber_in_switch(st, live_history)
         head_id, tail_id = _emit_step(em, st, x=x)
         # 修复：Comment 不参与连线，仅作可视化说明
         if isinstance(st, Comment):

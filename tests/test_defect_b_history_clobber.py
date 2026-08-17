@@ -1,0 +1,99 @@
+"""Defect B（iss_60e4d57ce8 / high）回归测试。
+
+根因：history_* 子流程把答案写回 msg.payload，串行调用会互相覆盖；下游 switch 若
+同时引用两个 history 子流程的字段（前者已被后者抹掉）→ 条件永假、动作永不执行、
+运行期不报错（黑箱静默 bug）。
+
+守卫：
+- 编译期（dsl_engine）：串行调用后 switch 引用被覆盖的较早子流程字段 → DSLError C_HISTORY_CLOBBER
+- 部署闸（flow_linter R36）：同一 switch 引用 ≥2 个不同 history 子流程专属字段 → error
+
+运行：python -m pytest tests/test_defect_b_history_clobber.py
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from autoflow_gateway.dsl_engine import compile_dsl, DSLError
+from autoflow_gateway.flow_linter import lint_flow
+
+_HEADER = "触发: inject\n"
+
+# 坏：串行两个 history_*，下游 switch 同时引用两者字段
+BAD = _HEADER + (
+    "调用子流程: history_occurred(entity=light.study, start=8h前, end=现在)\n"
+    "调用子流程: history_duration(entity=light.study, start=8h前, end=现在, state=on)\n"
+    "分支: payload.occurred == true and payload.total_seconds > 3600\n"
+    "  动作: light.turn_on(light.monitor)\n"
+)
+
+# 好：嵌套（第一个 history 命中后的分支内再调第二个）
+NESTED = _HEADER + (
+    "调用子流程: history_occurred(entity=light.study, start=8h前, end=现在)\n"
+    "分支: payload.occurred == true\n"
+    "  调用子流程: history_duration(entity=light.study, start=8h前, end=现在, state=on)\n"
+    "  分支: payload.total_seconds > 3600\n"
+    "    动作: light.turn_on(light.monitor)\n"
+)
+
+# 好：串行但下游 switch 只引用最新子流程的字段（无冲突）
+SERIAL_LATEST = _HEADER + (
+    "调用子流程: history_occurred(entity=light.study, start=8h前, end=现在)\n"
+    "调用子流程: history_duration(entity=light.study, start=8h前, end=现在, state=on)\n"
+    "分支: payload.total_seconds > 3600\n"
+    "  动作: light.turn_on(light.monitor)\n"
+)
+
+
+def test_compile_blocks_serial_history_clobber():
+    try:
+        compile_dsl(BAD)
+    except DSLError as e:
+        assert e.code == "C_HISTORY_CLOBBER", f"应抛 C_HISTORY_CLOBBER，实际 {e.code}"
+        return
+    raise AssertionError("坏 DSL 未被编译期拦截（应抛 C_HISTORY_CLOBBER）")
+
+
+def test_compile_allows_nested_history():
+    flow = compile_dsl(NESTED)
+    assert flow and flow.get("nodes"), "嵌套 history DSL 应编译通过"
+
+
+def test_compile_allows_serial_referencing_latest_only():
+    flow = compile_dsl(SERIAL_LATEST)
+    assert flow and flow.get("nodes"), "只引用最新 history 字段的串行 DSL 应编译通过"
+
+
+def _hist_node(nid, suffix):
+    return {"id": nid, "type": f"subflow:af_hist_{suffix}", "z": "f1", "wires": [[]]}
+
+
+def _switch(ref_fields):
+    # 构造一个引用若干 payload.<field> 的 jsonata switch 规则
+    expr = " and ".join(f"payload.{f} == true" for f in ref_fields)
+    return {"id": "s1", "type": "switch", "z": "f1",
+            "rules": [{"t": "jsonata_exp", "v": expr}]}
+
+
+def test_lint_r36_flags_two_history_fields():
+    nodes = [_hist_node("h1", "occurred"), _hist_node("h2", "duration"),
+             _switch(["occurred", "total_seconds"])]
+    issues = lint_flow({"nodes": nodes})
+    assert any(i["rule"] == "R36" for i in issues), f"应报 R36，实际 {[i['rule'] for i in issues]}"
+
+
+def test_lint_r36_no_false_positive_generic_field():
+    # 仅 1 个 history 节点 + switch 引用 payload.state（跨域通用名，不在专属映射中）
+    nodes = [_hist_node("h1", "occurred"),
+             {"id": "s1", "type": "switch", "z": "f1",
+              "rules": [{"t": "eq", "v": "on", "vt": "str", "property": "payload.state"}]}]
+    issues = lint_flow({"nodes": nodes})
+    assert not any(i["rule"] == "R36" for i in issues), f"不应误报 R36，实际 {[i['rule'] for i in issues]}"
+
+
+def test_lint_r36_no_false_positive_single_history():
+    # 单 history 节点 + switch 仅引用其自身字段（无第二个子流程可冲突）
+    nodes = [_hist_node("h1", "occurred"), _switch(["occurred"])]
+    issues = lint_flow({"nodes": nodes})
+    assert not any(i["rule"] == "R36" for i in issues), f"单一 history 不应误报 R36，实际 {[i['rule'] for i in issues]}"
