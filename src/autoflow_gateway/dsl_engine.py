@@ -1603,6 +1603,9 @@ class _Emitter:
         # WB25-NEW-2：取值 字段名集合（落点 msg.payload.<field>）。分支 JSONata / eq 规则
         # 引用裸字段名时据此对齐到 payload.<field>，避免读空（见 _emit_switch）。
         self.read_fields: set = set()
+        # round3：emit 阶段产出的 lint 警告（如顺序 history_* 互相覆盖）临时挂这里，
+        # 由 compile() 在 emit 后并入 flow["lint"]（emit 阶段没有 issues 列表可写）。
+        self.lint_warnings: list = []
 
     def add(self, ntype: str, **fields) -> str:
         self._n += 1
@@ -1888,6 +1891,9 @@ def compile(scene: Scene, target: str = "staging") -> dict:
         "line": i.line,
         "node_id": None,
     } for i in issues if i.level == "warning" and i.code)
+    # round3：并入 emit 阶段产出的 warning（如线性链顺序 2×history_* 互相覆盖），
+    # 此前这些告警挂在 em.lint_warnings 上无处落地，用户看不到。
+    lint.extend(em.lint_warnings)
     return {
         "id": flow_id,
         "label": scene.name,
@@ -2328,9 +2334,26 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200):
                  "to": _sanitize_jsonata(st.expr), "tot": "jsonata"})
             continue
         pending_extract = None
-        # Defect B 守卫（iss_60e4d57ce8）：跟踪本线性序列 history_* 调用顺序，
-        # 供后续 switch 引用检查捕获「后者覆盖前者」的静默失败。
+        # Defect B（iss_3e5f462d01 / iss_60e4d57ce8）：history_* 子流程把答案「替换式」写回
+        # msg.payload，后调用者整体覆盖前调用者。纯线性序列里顺序调 2 个不同 history_* 时，
+        # 第二个会静默抹掉第一个的输出 → 后续若读第一个字段则恒 undefined、分支永假且不报错。
+        # switch 内的引用检查(_check_history_clobber_in_switch)已 fail-loud；此处补「线性链顺序
+        # 2×history」的 warning 级告警（不强制 fail，引导改用嵌套 / 提取暂存）。
         if isinstance(st, SubflowCall) and _is_history_subflow_call(st):
+            if live_history is not None and live_history != st.name:
+                em.lint_warnings.append({
+                    "level": "warning",
+                    "rule": C_HISTORY_CLOBBER,
+                    "message": (
+                        f"顺序调用了多个 history_* 子流程（先 {live_history}，后 {st.name}）。"
+                        f"history_* 把答案替换式写回 msg.payload，后调用者会整体覆盖前调用者 → "
+                        f"{live_history} 的输出字段在后续节点中恒为 undefined（分支永假、不报错）。"
+                        f"请改为：① 嵌套——在第一个 history 查询命中后的『分支』内再调第二个；"
+                        f"或 ② 用『提取: 变量 = payload.<字段>』把首个结果暂存到变量后再调第二个。"
+                    ),
+                    "line": getattr(st, "line", None),
+                    "node_id": None,
+                })
             live_history = st.name
         elif isinstance(st, Switch):
             _check_history_clobber_in_switch(st, live_history)
@@ -2703,9 +2726,14 @@ def _emit_subflow(em: _Emitter, st: SubflowCall) -> str:
 
 
 def _emit_debug(em: _Emitter, st: Debug) -> str:
+    # round3 Bug D（iss_b5310ef607）：debug 节点 NR 默认 passthrough=false，
+    # 即「不把消息转发到输出口」→ 非终端 观测 变成 sink，其后所有节点（分支/动作/观测）
+    # 永远收不到 msg、静默不执行。这是 HIGH 隐蔽 footgun（接线看着正确，运行态断流）。
+    # 修正：显式 passthrough=true，恢复标准 NR debug 的 pass-through 转发，
+    # 使「观测 打印X → 再 分支 判断」等串行写法重新可用（终端观测转发到空口也无害）。
     return em.add("debug", name=st.name or "观测",
                   active=True, tosidebar=True, console=False, tostatus=False,
-                  complete="payload", targetType="msg")
+                  complete="payload", targetType="msg", passthrough=True)
 
 
 def _emit_comment(em: _Emitter, st: Comment) -> str:
