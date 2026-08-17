@@ -156,6 +156,8 @@ C_SEMANTIC_GAP = "C_SEMANTIC_GAP"        # 语义缺口（高声拒绝，避免�
 C_SELFCHECK = "C_SELFCHECK"              # 编译自检发现错误级问题
 C_JSONATA_SYNTAX = "C_JSONATA_SYNTAX"    # 分支/条件 JSONata 语法断裂（WB24-N5 收口：编译期预检，防静默恒假）
 C_HISTORY_CLOBBER = "C_HISTORY_CLOBBER"  # Defect B（iss_60e4d57ce8）：串行调用多个 history_* 子流程互相覆盖 msg.payload → 下游分支永假、静默失败
+C_HISTORY_DURATION_FIELD = "C_HISTORY_DURATION_FIELD"  # round2 Bug C：history_duration 输出是 total_seconds，用户误写 payload.duration → $number(duration) 恒 NaN → 条件静默失效（已自动重映射为 total_seconds）
+C_PARALLEL_PAYLOAD_ISOLATION = "C_PARALLEL_PAYLOAD_ISOLATION"  # round2 Bug D：并行块只扇出「单步叶子」，无 per-branch 子链、无 join → 子流输出被丢弃、块内/块后 观测 只看到入口原始 msg
 C_COMPARE_TYPE_WARN = "C_COMPARE_TYPE_WARN"  # 数值比较未包 $number()（state 为字符串，比较可能恒假）
 C_ENTITY_UNRESOLVED = "C_ENTITY_UNRESOLVED"  # 中文/友好实体名未解析为 entity_id（原样写入 NR 必然找不到实体）
 C_PARSE = "C_PARSE"                      # 兜底（未归类解析错误）
@@ -1445,6 +1447,16 @@ def validate(scene: Scene) -> list[Issue]:
                                         code=C_SUBFLOW_ARG))
             elif isinstance(st, Switch):
                 for b in st.branches:
+                    # round2 Bug C：history_duration 输出字段是 total_seconds，
+                    # 用户误写 payload.duration → $number(duration) 恒 NaN → 条件静默失效。
+                    # 编译期已自动重映射为 total_seconds，此处高声告警引导改法。
+                    if _remap_history_aliases(b.condition) != b.condition:
+                        issues.append(Issue(
+                            "warning",
+                            f"分支: 『{b.condition}』引用了 payload.duration，但 history_duration 子流程的"
+                            f"输出字段是 payload.total_seconds（并非 duration）。已自动重映射为 total_seconds；"
+                            f"建议显式改用 payload.total_seconds 以消除歧义 [C_HISTORY_DURATION_FIELD]",
+                            code=C_HISTORY_DURATION_FIELD))
                     # WB24-N5 收口：仅对走 jsonata 兜底的分支条件做语法预检
                     # （简单等式走 eq/ne 规则，无 JSONata 语法问题）
                     rule = _parse_switch_rule(b.condition)
@@ -1503,6 +1515,35 @@ def validate(scene: Scene) -> list[Issue]:
                         "（动作/取值/调用子流程/分支/延时等）。空并行块会被静默丢弃（不产生任何节点），"
                         "请删除该空块或在其中填入要并行执行的步骤。"))
                 else:
+                    # round2 Bug D（C_PARALLEL_PAYLOAD_ISOLATION）：DSL 的 并行 块只把
+                    # 每个子步骤作为【独立叶子】从同一上游扇出，没有「per-branch 子链」、
+                    # 也没有隐式 join。后果（已由编译产物图实测坐实）：
+                    #   · 子流程调用(history_*/其它 subflow)在并行块内时，其输出口 wires=[[]]
+                    #     永不接下游 → 子流结果被静默丢弃，块后/块内顺序节点都消费不到；
+                    #   · 观测(debug) 作为并行子步时，直接接到入口(如 inject 时间戳)，
+                    #     看到的是原始 msg，而非任何 sibling 子流的输出。
+                    # 这是一个模型局限（非回归），本轮以「告警 + 引导」处置，避免静默 footgun；
+                    # 真实需要「并行分支消费子流输出」请改回线性链（子流输出可正常透传），
+                    # 或靠子流内部自带 debug 观测。
+                    _has_subflow = any(isinstance(c, SubflowCall) for c in st.children)
+                    _has_debug = any(isinstance(c, Debug) for c in st.children)
+                    if _has_subflow or _has_debug:
+                        tips = []
+                        if _has_subflow:
+                            tips.append("并行块内的『调用子流程』输出会被丢弃（无 join，"
+                                        "子流结果不向前传播）——若需消费该结果，请把它移出并行块、"
+                                        "放到线性链中（子流输出可正常透传）")
+                        if _has_debug:
+                            tips.append("并行块内的『观测』直接接到块入口(如 inject 时间戳)，"
+                                        "只能看到原始 msg，看不到同块内子流程的输出——"
+                                        "要观测子流结果请改用子流『内部自带 debug』")
+                        issues.append(Issue(
+                            "warning",
+                            "并行 块内存在「子流程调用 / 观测」：并行块只扇出单步叶子、无 per-branch 子链、"
+                            "无隐式 join，子流输出会被丢弃、块内/块后观测只能看到入口原始 msg"
+                            "（与『串行顺序执行』语义不同，易静默取错值）[C_PARALLEL_PAYLOAD_ISOLATION]。"
+                            + "；".join(tips) + "。",
+                            code=C_PARALLEL_PAYLOAD_ISOLATION))
                     walk(st.children)
     walk(scene.body)
     # WB25-NEW-1：同字段跨不同实体 → 落点撞车，编译期强拦
@@ -1836,13 +1877,24 @@ def compile(scene: Scene, target: str = "staging") -> dict:
         if seg_idx + 1 < len(segments):
             src_offset = scene._first_break_count or len(all_src_ids)
     layout_flow(em.nodes)  # BFS 分层自动布局（坐标系）
+    lint = _self_lint(em.nodes)
+    # round2：把 validate() 的结构化 warning（如 C_HISTORY_DURATION_FIELD）并入 flow["lint"]，
+    # 使编译期告警在部署前可见。此前 validate 的 warning 被丢弃（仅 error 会抛），
+    # 导致 C_HISTORY_DURATION_FIELD 等结构化告警流失、用户无感。
+    lint.extend({
+        "level": i.level,
+        "rule": i.code or "C_WARNING",
+        "message": i.message,
+        "line": i.line,
+        "node_id": None,
+    } for i in issues if i.level == "warning" and i.code)
     return {
         "id": flow_id,
         "label": scene.name,
         "disabled": False,
         "info": f"compiled by dsl_engine (target={target})",
         "nodes": em.nodes,
-        "lint": _self_lint(em.nodes),
+        "lint": lint,
     }
 
 
@@ -2898,6 +2950,62 @@ def _parse_state_condition(cond: str) -> Optional[tuple]:
     return None
 
 
+# ── round2 Bug B/C 辅助：复合布尔条件识别 + history 字段别名重映射 ──
+# Bug C：history_duration 子流程输出字段实为 total_seconds，用户常误写 payload.duration
+# → $number(duration) 恒 NaN → 条件静默失效。编译期把 payload./msg./flow. 前缀的
+# duration 自动重映射为 total_seconds，使既有错误写法也能跑通，并配合 validate() 告警。
+_HISTORY_FIELD_ALIASES = {"duration": "total_seconds"}
+
+
+def _remap_history_aliases(s: str) -> str:
+    """把 payload.duration / msg.duration / flow.duration 重映射为 total_seconds。"""
+    if not s:
+        return s
+    for wrong, right in _HISTORY_FIELD_ALIASES.items():
+        s = re.sub(r'(payload\.|msg\.|flow\.)' + re.escape(wrong) + r'(?!\w)',
+                   r'\g<1>' + right, s)
+    return s
+
+
+def _has_top_level_bool_op(expr: str) -> bool:
+    """round2 Bug B：判断分支条件是否含【顶层】and/or（复合布尔条件）。
+
+    复合条件必须走 jsonata 规则，不能按首个 == 拆成 eq 规则
+    （否则后半段被吞进 value 字符串 → 静默恒 false）。
+    先剥离字符串/注释，再在括号深度 0 处查找 ' and ' / ' or ' / '&&' / '||'。"""
+    s = expr.strip()
+    i, n = 0, len(s)
+    depth = 0
+    in_str = False
+    q = None
+    while i < n:
+        c = s[i]
+        if in_str:
+            if c == "\\":
+                i += 2
+                continue
+            if c == q:
+                in_str = False
+            i += 1
+            continue
+        if c in "\"'":
+            in_str = True
+            q = c
+            i += 1
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0:
+            rest = s[i:]
+            if rest[:5] == " and " or rest[:4] == " or " \
+               or rest[:2] == "&&" or rest[:2] == "||":
+                return True
+        i += 1
+    return False
+
+
 def _parse_switch_rule(cond: str) -> dict:
     """把分支条件翻译为 switch 规则。简单等式 → eq 规则（与 NR 原生一致）；
     否则 → jsonata 规则。返回含 t/v/vt/property 的 dict。
@@ -2908,7 +3016,13 @@ def _parse_switch_rule(cond: str) -> dict:
     真实部署的分支彻底失效。现用 [^=!]+ 阻止 lhs 吞运算符，并支持 != / <> 翻译为 ne。"""
     # [^=!]+ 防止 lhs 吞掉等式/不等运算符；运算符组显式匹配 ==|!=|<>|=。
     # 注意分组：g1=lhs, g2=运算符, g3=可选引号, g4=值；\3 回引引号（勿写成 \2）。
-    m = re.match(r'^([^=!]+?)\s*(==|!=|<>|=)\s*("?)([^"]*)\3$', cond.strip())
+    cond_stripped = cond.strip()
+    # round2 Bug B：复合布尔条件（顶层 and/or）必须走 jsonata 规则，不能按首个 ==
+    # 拆成 eq（否则后半段被吞进 value 字符串 → 静默恒 false）。
+    if _has_top_level_bool_op(cond_stripped):
+        return {"t": "jsonata_exp", "v": _remap_history_aliases(_sanitize_jsonata(cond_stripped)),
+                "vt": "jsonata", "property": "payload"}
+    m = re.match(r'^([^=!]+?)\s*(==|!=|<>|=)\s*("?)([^"]*)\3$', cond_stripped)
     if m:
         lhs = m.group(1).strip()
         if lhs.startswith("msg."):       # 去掉 msg. 前缀（property 相对 msg）
@@ -2927,8 +3041,10 @@ def _parse_switch_rule(cond: str) -> dict:
             vt, v = "num", rhs
         else:
             vt, v = "str", rhs
-        return {"t": t, "v": v, "vt": vt, "property": lhs}
-    return {"t": "jsonata_exp", "v": _sanitize_jsonata(cond.strip()), "vt": "jsonata", "property": "payload"}
+        # round2 Bug C：history_duration 输出是 total_seconds，纠正误写 payload.duration
+        return {"t": t, "v": v, "vt": vt, "property": _remap_history_aliases(lhs)}
+    return {"t": "jsonata_exp", "v": _remap_history_aliases(_sanitize_jsonata(cond_stripped)),
+            "vt": "jsonata", "property": "payload"}
 
 
 def _emit_raw(em: _Emitter, st: RawNode) -> str:
