@@ -6120,15 +6120,43 @@ class Gateway:
 
     def _compare_trace(self, flow: Dict, trace: List[Dict],
                        expected_path: Optional[List] = None) -> Dict[str, Any]:
-        """把真实 trace 与期望路径比对，产出断点报告。"""
+        """把真实 trace 与期望路径比对，产出断点报告。
+
+        D8/round6：switch 的未命中分支 ≠ 断点——若某 switch 有其它分支被 reached，
+        其未命中分支是【正常条件分支选择】，归入 unhit_branches，不计入 missing、
+        不影响 verdict（否则任何带条件分支的 flow 都会被误报「断点」）。
+        D9/round6：对 reached 的 api-call-service 做参数审计（domain/service/
+        entityId/data/dataType + 字符串化动态参数检测）——e2e 此前只看节点到达，
+        D6 类「参数被字符串化」完全逃逸；现把参数快照附进报告供 agent/人工审查。
+        D10/round6：expected_path 条目支持 id 或 name 两种写法（name 按节点 label
+        反查 id），统一在 id 空间比对——旧实现 nodes.get(name) 查不到节点导致
+        inject 等 sink 过滤失效、missing/extra 语义矛盾。
+        """
         nodes = {n["id"]: n for n in flow.get("nodes", []) if "id" in n}
         trace = trace or []
         reached = [t.get("node") for t in trace
                    if t and t.get("node") and not t.get("error")]
         errors = [t for t in trace if t and t.get("error")]
+        # D10：expected_path 条目规范化——支持 id 或 name（name 反查节点 id）
+        def _norm_ep(p):
+            if isinstance(p, str):
+                if p in nodes:
+                    return p
+                for _nid, _n in nodes.items():
+                    if _n.get("name") == p:
+                        return _nid
+                return p  # 找不到：保留原样，进 missing 合理提示
+            if isinstance(p, dict):
+                pid = p.get("id")
+                if pid in nodes:
+                    return pid
+                for _nid, _n in nodes.items():
+                    if _n.get("name") == p.get("name"):
+                        return _nid
+                return pid or ""
+            return ""
         if expected_path:
-            expected_ids = [p if isinstance(p, str) else p.get("id")
-                            for p in expected_path]
+            expected_ids = [_norm_ep(p) for p in expected_path]
         else:
             expected_ids = self._derive_planned_path(flow)
         # 只比对【可插桩】节点：inject/debug/link/catch 等不加 tap，永远不会
@@ -6137,14 +6165,50 @@ class Gateway:
         expected_ids = [e for e in expected_ids
                         if (nodes.get(e) or {}).get("type") not in E2E_SINK_TYPES]
         reached_set = set(reached)
-        missing = [e for e in expected_ids if e not in reached_set]
+        raw_missing = [e for e in expected_ids if e not in reached_set]
+        # D8：switch 未命中分支 → unhit_branches（正常条件分支选择，非断点）
+        sw_branches: Dict[str, set] = {}
+        for _n in flow.get("nodes", []):
+            if _n.get("type") != "switch":
+                continue
+            _tgts: set = set()
+            for _w in (_n.get("wires") or []):
+                if isinstance(_w, list):
+                    _tgts.update(_w)
+            sw_branches[_n["id"]] = _tgts
+        unhit_branches: List[str] = []
+        missing: List[str] = []
+        for e in raw_missing:
+            owners = [sid for sid, tgts in sw_branches.items() if e in tgts]
+            # 该 switch 有其它分支被 reached → 未命中属条件分支选择
+            if owners and any((sw_branches[o] - {e}) & reached_set for o in owners):
+                unhit_branches.append(e)
+            else:
+                missing.append(e)
         extra = [e for e in reached if e not in set(expected_ids)]
-        failed_at = None
-        for e in expected_ids:
-            if e not in reached_set:
-                failed_at = e
-                break
+        failed_at = missing[0] if missing else None
         verdict = "通过" if (not missing and not errors) else "断点"
+        # D9：动作参数审计——对 reached 的 api-call-service 输出参数快照 +
+        # 字符串化动态参数检测（dataType=json 但值含 "payload.x" 引号包裹的动态引用）
+        param_audit = []
+        _dyn_lit_re = re.compile(r'"((?:payload|msg|flow|global)\.[A-Za-z_一-鿿][\w一-鿿]*)"')
+        for _rid in reached:
+            _n = nodes.get(_rid)
+            if not _n or _n.get("type") != "api-call-service":
+                continue
+            _data = _n.get("data") or ""
+            _susp = []
+            if _n.get("dataType") == "json" and isinstance(_data, str):
+                for _m in _dyn_lit_re.finditer(_data):
+                    _susp.append(_m.group(1))
+            param_audit.append({
+                "node": self._node_label(nodes, _rid),
+                "node_id": _rid,
+                "domain": _n.get("domain"), "service": _n.get("service"),
+                "entityId": _n.get("entityId"),
+                "data": _data, "dataType": _n.get("dataType"),
+                "suspicious_stringified_params": _susp,
+            })
         return {
             "verdict": verdict,
             "reached": [self._node_label(nodes, i) for i in reached],
@@ -6153,9 +6217,16 @@ class Gateway:
             "expected_count": len(expected_ids),
             "missing": [self._node_label(nodes, i) for i in missing],
             "missing_ids": missing,
+            "unhit_branches": [self._node_label(nodes, i) for i in unhit_branches],
+            "unhit_branch_ids": unhit_branches,
             "extra": [self._node_label(nodes, i) for i in extra],
             "failed_at": self._node_label(nodes, failed_at),
             "failed_at_id": failed_at,
+            "param_audit": param_audit,
+            "param_warnings": [
+                {"node": a["node"], "node_id": a["node_id"], "params": a["suspicious_stringified_params"]}
+                for a in param_audit if a["suspicious_stringified_params"]
+            ],
             "runtime_errors": [
                 {"node": self._node_label(nodes, e.get("node")),
                  "node_id": e.get("node"),
@@ -6305,7 +6376,7 @@ class Gateway:
                 reasons=[f"实体校验未通过：{', '.join(unknown)}（请通过发现工具确认正确实体后重试）"])
         # 3) 插桩 + server 占位符回填
         fid = self._gen_raw_flow_id("e2e", flow)
-        remapped, _, _ = self._remap_raw_flow_ids(flow, fid)
+        remapped, id_map, _ = self._remap_raw_flow_ids(flow, fid)
         inst = dict(remapped)
         inst["id"] = fid
         _, unresolved = self._inject_ha_server(inst)
@@ -6375,7 +6446,26 @@ class Gateway:
         if not isinstance(trace, list):
             trace = []
         # 7) 比对 → 断点报告（用 remapped 原 flow 比，id 空间与 trace 一致）
-        report = self._compare_trace(remapped, trace, expected_path)
+        #    D10/round6：expected_path 原始节点 id 经 id_map 映射到重映射 id 空间
+        #    （此前 DSL 版漏做映射，显式 expected_path 恒匹配不上 → missing 含
+        #    全部条目、reached 与 missing 语义矛盾）。
+        exp = expected_path
+        if isinstance(exp, str):
+            try:
+                exp = json.loads(exp)
+            except Exception:
+                exp = None
+        if isinstance(exp, list):
+            def _map_ep(e):
+                if isinstance(e, str):
+                    return id_map.get(e, e)
+                if isinstance(e, dict):
+                    e = dict(e)
+                    if e.get("id") in id_map:
+                        e["id"] = id_map[e["id"]]
+                return e
+            exp = [_map_ep(x) for x in exp]
+        report = self._compare_trace(remapped, trace, exp)
         # 8) 可选：HA 副作用后置校验
         post = None
         if expected_postconditions:

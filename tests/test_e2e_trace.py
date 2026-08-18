@@ -77,7 +77,7 @@ class FakeNRLayer:
         self._trace = []
         return {}
 
-    def delete_flow(self, fid, force=False):
+    def delete_flow(self, fid, force=False, allow_prod=False):
         self.flows.pop(fid, None)
         self.deleted.append(fid)
         return {"deleted": True}
