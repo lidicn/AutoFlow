@@ -1078,7 +1078,11 @@ def autoflow_validate_flow(flow_json: str) -> str:
     # switch wires≠rules/空 flow）现在也会被 deploy_raw 以 stage=schema_block 硬拦，
     # 必须计入 will_deploy_block——此前它们只进 errors 不进 blocking，导致坏流拿到
     # will_deploy_block=false 的绿灯，一部署就炸。非致命 schema error 仍只报告不阻塞。
-    _BLOCK_RULES = {"R13", "R15", "R20", "R17", "R22", "R30", "R32"}
+    # D15/round9：R10（多数组连线——第 2+ 数组目标永不触发）与 R19（entity_id
+    # 字段名写错——部署即报 Joi 校验错）同为 error 级且后果严重（功能失效/部署失败），
+    # 与 R13/R15/R17/R20 一致纳入阻断；旧实现漏了它们 → validate 报 error 却
+    # will_deploy_block=false，deploy_raw 放行坏流。
+    _BLOCK_RULES = {"R10", "R13", "R15", "R20", "R17", "R19", "R22", "R30", "R32"}
     blocking = list(schema_blocking_issues(schema_issues)) + [
         v for v in lint_issues
         if v.get("level") == "error" and v.get("rule") in _BLOCK_RULES]

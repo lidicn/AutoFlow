@@ -160,6 +160,8 @@ C_HISTORY_DURATION_FIELD = "C_HISTORY_DURATION_FIELD"  # round2 Bug C：history_
 C_PARALLEL_PAYLOAD_ISOLATION = "C_PARALLEL_PAYLOAD_ISOLATION"  # round2 Bug D：并行块只扇出「单步叶子」，无 per-branch 子链、无 join → 子流输出被丢弃、块内/块后 观测 只看到入口原始 msg
 C_PARALLEL_SEQUENTIAL = "C_PARALLEL_SEQUENTIAL"  # round4 D3：并行块后仍有同级串行步骤 → 被静默并入并行（无汇聚原语，至少高声警告）
 C_PARALLEL_EMPTY = "C_PARALLEL_EMPTY"        # round4 D4 兜底：并行块为空（正常由 validate 拦截，此处防御）
+C_SUBFLOW_ASYNC_SERIAL = "C_SUBFLOW_ASYNC_SERIAL"  # round8 D14：link_out 异步子流程后仍有同级串行步骤 → 无回执无法等完成，后续从调用前并行执行（至少高声警告）
+C_EXPECTED_FORMAT = "C_EXPECTED_FORMAT"      # round9 D16：预期块结构化格式（entity:/attributes: 独立行）不支持，明确报错而非静默生成无意义断言
 C_COMPARE_TYPE_WARN = "C_COMPARE_TYPE_WARN"  # 数值比较未包 $number()（state 为字符串，比较可能恒假）
 C_ENTITY_UNRESOLVED = "C_ENTITY_UNRESOLVED"  # 中文/友好实体名未解析为 entity_id（原样写入 NR 必然找不到实体）
 C_PARSE = "C_PARSE"                      # 兜底（未归类解析错误）
@@ -782,6 +784,13 @@ def _parse_trigger(s: str, line: int) -> Trigger:
                 dow = ",".join(str((n + 1) % 7) for n in nums)
             return Trigger(kind="time", cron=f"{mn} {hr} * * {dow}", raw=s)
         return Trigger(kind="time", cron=_parse_cron_zh(s), raw=s)
+    # D12/round8：『定时』是时间触发的修饰词（触发: 定时 每天 22:30）。旧实现
+    # 把它留在 raw 里，_emit_trigger 的 name=f"定时 {raw}" 会拼成『定时 定时 …』。
+    # 此处剥离前缀（仅行首），raw 保持干净；cron 解析不受影响（_parse_cron_zh 查 每天/每周/周末）。
+    for _tpfx in ("定时", "定时器", "schedule"):
+        if s.lower().startswith(_tpfx):
+            s = s[len(_tpfx):].strip()
+            break
     if ("每天" in s or "每周" in s or "周末" in s) or re.search(r"\d{1,2}:\d{2}", s):
         return Trigger(kind="time", cron=_parse_cron_zh(s), raw=s)
     # event 实体触发（门锁开门/门窗打开/按钮点击等）：单 token、无状态部分。
@@ -921,7 +930,14 @@ def _parse_action(s: str, line: int) -> Action:
     # 解析 k=v 参数；entity_id/target/entity 的数组值 [a,b] 也展开为多目标
     for p in kv_tokens:
         p = p.strip()
-        if not p or "=" not in p:
+        if not p:
+            continue
+        if "=" not in p:
+            # D13/round8：多实体位置参数（light.turn_on(A, B)）——逗号分隔的
+            # 第二个及后续实体。旧实现把无 '=' 的 token 直接 continue 静默丢弃
+            # → 用户期望一个动作控制多个实体（HA 支持 entity_id 数组），实际只
+            # 控制第一个、无任何警告。现追加为额外目标（与数组写法 [a, b] 等价）。
+            targets.append(p)
             continue
         k, v = p.split("=", 1)
         k, v = k.strip(), v.strip()
@@ -1232,20 +1248,43 @@ def _parse_expected_condition(s: str) -> dict:
       light.xxx = on              实体变为某状态
       light.xxx：off              中文冒号
       light.xxx on                空格分隔（无标点）
+      state: light.xxx = on       D16/round9：剥『state:』前缀（旧实现把它拼进
+                                   entity_id → 实体不存在、断言永远失败）
       subflow: demo_notify          子流程被调用
       调用子流程: demo_notify
       demo_notify 被调用
+
+    ★ D16/round9：结构化格式（entity:/attributes:/<裸键>: 独立行）**不支持**——
+    旧实现把 'entity: light.A' 解析成 entity_id='entity:' 的无意义断言、把
+    attributes 块逐行展平，静默产生永远失败的验证。现明确报错，引导改用单行
+    'entity = state' 或 expected_postconditions_json 参数。
     """
     s = s.strip()
     if not s:
         return {}
     low = s.lower()
+    # D16：剥『state:』/『状态:』前缀（预期块内常见 'state: <entity> = <state>'）
+    for _p, _l in (("state:", 6), ("状态:", 3)):
+        if low.startswith(_p):
+            s = s[_l:].strip()
+            low = s.lower()
+            break
     if "被调用" in s or low.startswith("subflow:") or low.startswith("调用子流程:"):
         name = s
         for p in ("被调用", "subflow:", "调用子流程:"):
             name = name.replace(p, "")
         name = name.strip().strip(":").strip()
         return {"subflow": name}
+    # D16：结构化字段行（entity:/attributes:/<裸键>: 无 '='）→ 不支持，明确报错。
+    # 排除：含 '='/'：' 的断言、含 '.' 的合法 entity 形态（light.xxx: on 保留既有行为）、
+    # subflow 行（已在上方返回）。
+    _m = re.match(r"^([A-Za-z_一-鿿][\w一-鿿]*)\s*:\s*\S", s)
+    if _m and "=" not in s and "：" not in s and "." not in _m.group(1):
+        raise DSLError(
+            f"预期块不支持『{_m.group(1)}:』结构化字段格式。请用单行断言："
+            f"『预期: <entity> = <state>』（如 预期: light.A = on），"
+            f"或经 expected_postconditions_json 参数传递结构化后置条件。",
+            code=C_EXPECTED_FORMAT)
     if "=" in s:
         eid, st = s.split("=", 1)
     elif "：" in s:
@@ -1819,10 +1858,53 @@ def _apply_interpolation(scene: Scene) -> None:
     walk(scene.body)
 
 
+def _promote_subflow_var_refs(scene: Scene) -> None:
+    """D11/round7：子流程参数的【裸场景变量名】自动升级为 JSONata 引用（无需反引号）。
+
+    动作参数（brightness_pct=目标亮度）已自动识别变量引用并编译为 flow.目标亮度；
+    子流程参数却要求反引号（text=`目标亮度`）才升级——用户从动作迁移到子流程时
+    忘记加反引号 → 变量名被当作字面字符串发送（TTS 播报"目标亮度"而非变量值），
+    静默错误。现统一：参数值**精确等于**已声明场景变量名（且非表达式/非字面量）
+    → 自动移入 jsonata_args，_emit_subflow 的 jsonata 分支经 _bind_flow_vars 绑定
+    flow 上下文（与动作参数行为一致）。
+    """
+    if not scene.variables:
+        return
+    names = set(scene.variables.keys())
+
+    def _do(st: SubflowCall):
+        for k, v in list(st.raw_args.items()):
+            if not isinstance(v, str):
+                continue
+            val = v.strip()
+            if val in names:
+                st.raw_args[k] = val
+                st.jsonata_args.add(k)
+
+    def walk(steps):
+        for st in steps:
+            if isinstance(st, SubflowCall):
+                _do(st)
+            elif isinstance(st, Switch):
+                for b in st.branches:
+                    walk(b.body)
+                walk(st.else_body)
+            elif isinstance(st, (CurrentState, TimeRange)):
+                walk(getattr(st, "body", []))
+                walk(getattr(st, "else_body", []))
+            elif isinstance(st, Parallel):
+                walk(st.children)
+
+    walk(scene.body)
+
+
 def compile(scene: Scene, target: str = "staging") -> dict:
     # R2/R5(#round4)：`${var}` 插值必须在 validate 之前完成——否则
     # `bark_badge=${阈值}` 会先被类型校验判成「非数字」而误报。
     _apply_interpolation(scene)
+    # D11/round7：子流程裸变量名参数升级 JSONata 引用（在 validate 之前，
+    # 使枚举/类型校验把该参数当动态值处理而非字面量）。
+    _promote_subflow_var_refs(scene)
     issues = validate(scene)
     errors = [i for i in issues if i.level == "error"]
     if errors:
@@ -2498,6 +2580,25 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200,
             last_upstream = []
         if not fire_and_forget:
             last = tail_id
+        else:
+            # D14/round8：link_out 异步子流程（如 demo_notify）后仍有同级串行步骤
+            # → 旧实现静默从调用前上游扇出（后续动作与通知并行执行），时序语义被
+            # 破坏且无任何警告。link_out 无回执通道，编译器无法让后续「等通知完成」
+            # （回送需要 link call + link out(mode=return)），只能诚实告知：如需
+            # 严格串行请改用请求/响应型子流程（http_api / 子流程实例）。
+            if idx + 1 < len(steps) and any(
+                    not isinstance(s2, Comment) for s2 in steps[idx + 1:]):
+                em.lint_warnings.append({
+                    "level": "warning",
+                    "rule": "C_SUBFLOW_ASYNC_SERIAL",
+                    "message": (
+                        f"『{getattr(st, 'name', '')}』是 link_out 异步子流程（fire-and-forget，"
+                        "无回执通道），其后的串行步骤将从调用前上游并行执行，无法等通知"
+                        "完成（时序被破坏）。若需『通知后再串行』，请改用请求/响应型子流程"
+                        "（http_api / 子流程实例，返回值落 payload.reply），或把后续动作"
+                        "放进通知子流程内部[C_SUBFLOW_ASYNC_SERIAL]。"
+                    ),
+                })
     return head, last
 
 

@@ -3548,7 +3548,7 @@ class Gateway:
         # propose_raw 是 fail-open 落档（只报告不拦），若不在此补刀，坏 flow
         #（如 api-current-state 空 entityId → R20）会直接上线、且「重新部署」反复推送。
         if ctype == "raw_flow":
-            _LINT_BLOCK_RULES = {"R13", "R15", "R20", "R17", "R22", "R24", "R30", "R32", "R_SERVICE_PARAM", "R36", "R2-ESC", "R_NO_TRIGGER"}
+            _LINT_BLOCK_RULES = {"R10", "R13", "R15", "R20", "R17", "R22", "R24", "R30", "R32", "R_SERVICE_PARAM", "R36", "R2-ESC", "R_NO_TRIGGER", "R19"}
             _li = lint_flow(flow)
             _blk = [v for v in _li
                     if v.get("level") == "error" and v.get("rule") in _LINT_BLOCK_RULES]
