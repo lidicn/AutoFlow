@@ -158,6 +158,8 @@ C_JSONATA_SYNTAX = "C_JSONATA_SYNTAX"    # 分支/条件 JSONata 语法断裂（
 C_HISTORY_CLOBBER = "C_HISTORY_CLOBBER"  # Defect B（iss_60e4d57ce8）：串行调用多个 history_* 子流程互相覆盖 msg.payload → 下游分支永假、静默失败
 C_HISTORY_DURATION_FIELD = "C_HISTORY_DURATION_FIELD"  # round2 Bug C：history_duration 输出是 total_seconds，用户误写 payload.duration → $number(duration) 恒 NaN → 条件静默失效（已自动重映射为 total_seconds）
 C_PARALLEL_PAYLOAD_ISOLATION = "C_PARALLEL_PAYLOAD_ISOLATION"  # round2 Bug D：并行块只扇出「单步叶子」，无 per-branch 子链、无 join → 子流输出被丢弃、块内/块后 观测 只看到入口原始 msg
+C_PARALLEL_SEQUENTIAL = "C_PARALLEL_SEQUENTIAL"  # round4 D3：并行块后仍有同级串行步骤 → 被静默并入并行（无汇聚原语，至少高声警告）
+C_PARALLEL_EMPTY = "C_PARALLEL_EMPTY"        # round4 D4 兜底：并行块为空（正常由 validate 拦截，此处防御）
 C_COMPARE_TYPE_WARN = "C_COMPARE_TYPE_WARN"  # 数值比较未包 $number()（state 为字符串，比较可能恒假）
 C_ENTITY_UNRESOLVED = "C_ENTITY_UNRESOLVED"  # 中文/友好实体名未解析为 entity_id（原样写入 NR 必然找不到实体）
 C_PARSE = "C_PARSE"                      # 兜底（未归类解析错误）
@@ -692,8 +694,24 @@ def _parse_raw_node(s: str, line: int) -> RawNode:
 
 
 def _extract_branch_cond(stripped: str) -> str:
-    body = (_after_colon(stripped) if stripped.startswith("分支:")
-            else stripped[len("分支"):].strip())
+    """提取分支条件，兼容所有分支关键字前缀（分支/否则如果/否则若/elif）与两种冒号写法：
+      · `分支: <cond>`        冒号在关键字后（分隔符写法）
+      · `分支 <cond>:`        冒号在条件尾部（收尾写法，既有语法）
+      · `分支 <cond>`         无冒号
+
+    ★ D1/round4 修复：旧实现硬编码 `len("分支")`=2 字符切片，对「否则如果: cond」
+    会切掉「否则」留下「如果: cond」→ elif 条件被「如果: 」前缀污染，JSONata
+    把「如果」当 undefined 变量、':' 当非法操作符 → 表达式恒假、elif 分支静默
+    永不命中（无编译错误、gate passed）。现按实际关键字前缀剥离，再可选吞掉
+    紧随的分隔冒号，尾部收尾冒号统一 rstrip。"""
+    body = stripped
+    for _p in ("分支", "否则如果", "否则若", "elif", "else", "否则"):
+        if body.startswith(_p):
+            body = body[len(_p):]
+            break
+    body = body.lstrip()
+    if body.startswith(":"):  # 分隔符写法「分支: cond」
+        body = body[1:].strip()
     return body.rstrip(":").strip()
 
 
@@ -1013,14 +1031,23 @@ def _parse_delay(s: str, line: int) -> Delay:
 
 
 def _parse_current_state(s: str, line: int) -> CurrentState:
-    """解析状态查询：查询: <entity> <state>
-    如：查询: light.living_room on  →  当前是 on 则继续，否则停止。"""
+    """解析状态查询：查询: <entity> <state> 或 查询: <entity> = <state>
+    如：查询: light.living_room on / 查询: light.living_room = on
+    →  当前是 on 则继续，否则停止。
+
+    ★ D2/round4 修复：用户自然写「entity = state」（等号分隔，与 分支: 的
+    `<expr> = <val>` 直觉一致）。旧实现只认空格分隔，把「= on」整体当
+    state_value → 查询目标永远不匹配、条件恒走 else、语义完全反转且无编译错误。
+    现优先识别等号分隔（含无空格 `entity=on`），兼容原空格分隔。"""
     s = s.strip()
-    m = re.match(r"^(\S+)\s+(.+)$", s)
-    if not m:
-        raise DSLError(f"查询格式应为 '<entity> <state>'：{s}（建议：写成 查询: light.xxx on）", line, code=C_QUERY_FORMAT)
-    entity = m.group(1)
-    state = m.group(2).strip()
+    m = re.match(r"^(\S+)\s*=\s*(\S.*)$", s)
+    if m:
+        entity, state = m.group(1), m.group(2).strip()
+    else:
+        m = re.match(r"^(\S+)\s+(.+)$", s)
+        if not m:
+            raise DSLError(f"查询格式应为 '<entity> <state>'：{s}（建议：写成 查询: light.xxx on）", line, code=C_QUERY_FORMAT)
+        entity, state = m.group(1), m.group(2).strip()
     state = _STATE_ALIAS.get(state, state)
     return CurrentState(entity=entity, state=state)
 
@@ -2303,7 +2330,7 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200,
     last_upstream: list = []
     pending_extract: Optional[str] = None  # 当前正在累积的「提取」change 节点 id
     live_history: Optional[str] = None      # 本线性序列最近一次 history_* 调用名（其字段在 payload）
-    for st in steps:
+    for idx, st in enumerate(steps):
         if isinstance(st, Parallel):
             pending_extract = None
             # 并行块：每个子节点都从【同一上游】扇出（并行执行），不串行链接。
@@ -2333,7 +2360,21 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200,
             else:
                 def _fan(cid):
                     return None
-            for child in st.children:
+            # D4/round4：嵌套并行（并行块内再写并行）——_emit_step 无 Parallel 分支，
+            # 旧实现直接 C_UNKNOWN_STEP 编译失败。现递归展平嵌套并行为同一层叶子：
+            # 外层并行 A 的「臂」本身是并行 B 时，B 的各臂与 A 的其它臂平级并行，
+            # 所有叶子从同一上游扇出（语义正确，无需 join）。
+            leaves: list = []
+
+            def _flatten_parallel(p, acc):
+                for c in p.children:
+                    if isinstance(c, Parallel):
+                        _flatten_parallel(c, acc)
+                    else:
+                        acc.append(c)
+
+            _flatten_parallel(st, leaves)
+            for child in leaves:
                 child_head, _ = _emit_step(em, child, x=x)
                 cid = child_head
                 if head is None:
@@ -2347,6 +2388,23 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200,
                 # 是首节点（由 sources 喂入）：后续同级步骤也从同一 sources 扇出
                 sources = list(upstream)
                 # last 保持 None
+            # D3/round4：并行块后还有同级步骤 → 该步骤从同一上游扇出（并入并行），
+            # 而非等并行完成再串行。Node-RED 无「并行汇聚」原语，无法正确实现
+            # 「并行后串行」；旧实现静默改变语义（若 C 依赖 A/B 结果则产生竞态），
+            # 现至少高声警告，禁止静默降级。
+            if idx + 1 < len(steps) and any(
+                    not isinstance(s2, Comment) for s2 in steps[idx + 1:]):
+                em.lint_warnings.append({
+                    "level": "warning",
+                    "rule": "C_PARALLEL_SEQUENTIAL",
+                    "message": (
+                        "『并行:』之后还有串行步骤：Node-RED 无并行汇聚原语，"
+                        "后续动作将从同一上游扇出、与并行臂同时执行"
+                        "（而非等并行完成后再串行）。若需『并行后串行』，"
+                        "请把串行动作放进每个并行臂末尾（重复执行），"
+                        "或用『延时:』近似汇聚[C_PARALLEL_SEQUENTIAL]。"
+                    ),
+                })
             continue
         if isinstance(st, Extract):
             # C4 / iss_3e5f462d01：提取 把 history 输出暂存到变量 → 视为已消费，
@@ -2496,6 +2554,19 @@ def _emit_step(em: _Emitter, st: Step, x: int = 200):
         nid = _emit_read_state(em, st)
     elif isinstance(st, TimeRange):
         nid = _emit_time_range(em, st)
+    elif isinstance(st, Parallel):
+        # D4/round4 兜底：正常路径由 _emit_body 先递归展平嵌套并行（Parallel 不会
+        # 直接传到这里）；此处仅防御其它调用点遗漏——递归 emit 各臂，返回
+        # (首臂 head, 末臂 head)。臂的上游连线由调用方负责（同 _emit_body 并行分支）。
+        heads = []
+        for c in st.children:
+            h, _ = _emit_step(em, c, x=x)
+            if h:
+                heads.append(h)
+        if not heads:
+            raise DSLError("并行块为空：『并行:』之后必须至少包含一个子步骤",
+                           code=C_PARALLEL_EMPTY)
+        return (heads[0], heads[-1])
     elif isinstance(st, Switch):
         nid = _emit_switch(em, st)
     elif isinstance(st, Debug):
