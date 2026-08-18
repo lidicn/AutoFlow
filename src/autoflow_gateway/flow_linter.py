@@ -641,6 +641,8 @@ def lint_flow(flow: Dict[str, Any], b1_unreachable: bool = False) -> List[Dict[s
     issues.extend(_lint_key_empty_params(nodes))
     # R33：整条流无 effectful 节点（纯 stub / pass-through）→ warning（fail-open，不阻塞）
     issues.extend(_lint_noop_flow(nodes))
+    # R_NO_TRIGGER (C8)：含动作节点却无任何触发源 → 流永远无法启动（硬拦）
+    issues.extend(_lint_no_trigger(nodes))
     # R36：同一 switch 引用 ≥2 个不同 history_* 子流程字段（后者覆盖前者 → 静默永假）
     issues.extend(_lint_history_clobber(nodes))
     # R37（round4 R7）：link-out 请求侧错挂「取返回值/提取」节点（无回执 → 静默取错值）
@@ -1022,6 +1024,10 @@ def _lint_undefined_field_ref(nodes: List[Dict[str, Any]]) -> List[Dict[str, str
 # ── R2：function 取值路径黑箱 + 扁平结构反模式 ──
 _FUNCTION_PATH_RE = re.compile(r"msg\.payload(?:\.|\b)([A-Za-z_][\w]*)(?:\.([A-Za-z_][\w]*))?")
 
+# 【C6】function `func` 含未转义反斜杠正则转义（\d \s \w 等）→ 经 e2e 通道二次 JSON 编码
+# 会触发 Invalid \escape，部署即炸。该正则与 dsl_flow_scanner 的 C6 检测保持一致。
+_FUNC_ESCAPE_RE = re.compile(r"\\[dDwWsSbBnNtTrRfFvV0-9.(){}*+?^$|]")
+
 
 def _lint_function(n: Dict[str, Any], nid: str) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
@@ -1039,6 +1045,20 @@ def _lint_function(n: Dict[str, Any], nid: str) -> List[Dict[str, str]]:
             "建议配合 A3 Schema Probe 固化真实响应结构。"
         ),
     })
+    # 【C6】未转义反斜杠正则转义 → e2e 二次编码 Invalid \escape → 部署失败，硬拦。
+    _esc = _FUNC_ESCAPE_RE.search(func)
+    if _esc:
+        out.append({
+            "level": "error",
+            "rule": "R2-ESC",
+            "node_id": nid,
+            "node_type": "function",
+            "message": (
+                f"function `func` 含未转义反斜杠转义 `{_esc.group(0)}`（命中于位置 {_esc.start()}）。"
+                "该序列经 e2e 通道二次 JSON 编码会触发 `Invalid \\escape` 导致部署失败。"
+                "若需正则，请改用 JS 正则字面量（如 /\\d+/，其在字符串内仍须双反斜杠）；"
+                "若仅作字符串，请写成双反斜杠 `\\\\`。"),
+        })
     # 针对性反模式：读 payload.object.* （多数本地 API 是扁平的）
     for m in _FUNCTION_PATH_RE.finditer(func):
         seg1 = m.group(1)
@@ -2447,4 +2467,45 @@ def _lint_noop_flow(nodes: List[Dict[str, Any]]) -> List[Dict[str, str]]:
             "部署后不会对环境产生任何可观察影响。这通常是未完成的草稿（stub）或「参数全空」的流。"
             "请确认是否漏接了动作节点；若确为纯观测 / 调试流可忽略。"
         ),
+    }]
+
+
+# ── R_NO_TRIGGER (C8)：含动作节点却无任何触发源 ──
+# 一条 flow 若包含 effectful 节点（会做事），却没有任何「触发源」节点（inject / time /
+# server-state-changed / mqtt in / link in / http in ...），则流永远无法启动，部署后静默失效。
+# 含 subflow 定义节点 → 真正的触发源在子流程内部，顶层看不到，跳过以免误报。
+def _node_is_effectful_for_trigger(n: Dict[str, Any]) -> bool:
+    t = n.get("type")
+    if t == "function":
+        return bool(str(n.get("func") or "").strip())
+    if t in ("change", "switch"):
+        return isinstance(n.get("rules"), list) and bool(n.get("rules"))
+    if t in ("api-call-service", "ha-call-service"):
+        return (bool(str(n.get("domain") or "").strip())
+                and bool(str(n.get("service") or "").strip()))
+    return t in _EFFECTFUL_TYPES
+
+
+def _lint_no_trigger(nodes: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    if not nodes:
+        return []
+    # 已有触发源 → 无需报
+    if any(n.get("type") in _ENTRY_TYPES for n in nodes):
+        return []
+    # 含 subflow 定义/实例 → 触发源在子流程内部，顶层无入口属正常，跳过。
+    if any(n.get("type") == "subflow" or str(n.get("type", "")).startswith("subflow:")
+            for n in nodes):
+        return []
+    # 没有任何「会做事」的节点 → 由 R33 兜底（纯 stub / 空流），C8 不重复报。
+    if not any(_node_is_effectful_for_trigger(n) for n in nodes):
+        return []
+    return [{
+        "level": "error",
+        "rule": "R_NO_TRIGGER",
+        "node_id": "",
+        "node_type": "flow",
+        "message": (
+            "flow 含动作/处理节点（effectful），但【没有任何触发源】（inject / time / "
+            "server-state-changed / mqtt in / link in / http in 等）。无触发源 → 流永远无法启动，"
+            "部署后静默失效。请补一个触发源节点，或将动作挂到已有触发链上。"),
     }]

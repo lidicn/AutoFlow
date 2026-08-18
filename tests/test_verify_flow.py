@@ -70,7 +70,7 @@ def test_verify_e2e_optin_runs_no_deploy(gw, monkeypatch):
                         lambda: {"ok": True, "source": "skipped"})
     # e2e 命中（verdict=通过），但 verify 不应落 NR
     monkeypatch.setattr(gw, "run_e2e_trace_raw",
-                        lambda flow, target="staging", live=False:
+                        lambda flow, target="staging", live=False, allow_prod=False, **kw:
                             {"e2e": True, "verdict": "通过", "reasons": []})
     deployed = []
     nr = getattr(gw, "nr", None)

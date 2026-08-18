@@ -203,9 +203,9 @@ def test_a14_unmodeled_service_surfaces_in_gate_reasons(gate):
     assert any("未建模" in r for r in g["reasons"]), g["reasons"]
 
 
-def test_a14_unverified_pass_degrades_to_warn(gate):
+def test_a14_unverified_blocks_fail_closed(gate):
     """未建模服务下即便断言「碰巧对上」，顶层也不得给干净 pass —— 那是没抓到反例，
-    不是验证通过。"""
+    不是验证通过。保守 fail-closed：fully_verified=False → 直接硬拦（block）。"""
     s = _store(("remote.a14w", "遥控", "客厅", "on", {}))
     flow = {"id": "a14w", "label": "a14w", "nodes": [
         _inject("t", ["c"]),
@@ -215,9 +215,19 @@ def test_a14_unverified_pass_degrades_to_warn(gate):
                               vhass_store=s, flow=flow)
     assert g["passed"] is True, g          # 闸内确实没抓到反例
     assert g["warnings"], "未建模服务必须留下未证实项"
+    assert g.get("fully_verified") is False, "未建模服务 fully_verified 必须 False"
     r = Gateway._build_unified_gate(g, None, CANARY_SKIPPED)
-    assert r["verdict"] == "warn", f"未证实的绿灯必须降级：{r}"
-    assert any("未证实项" in n for n in r["notes"]), r["notes"]
+    assert r["verdict"] == "block", f"未证实的绿灯必须硬拦[A-fail-closed]：{r}"
+    assert r["passed"] is False
+    assert any("fail-closed" in n or "硬拦" in n for n in r["notes"]), r["notes"]
+
+
+def test_a14_fully_verified_true_with_warnings_still_warn():
+    """边界：fully_verified 为真但仍有 soft warning（矛盾态）→ 降级 warn，不硬拦。"""
+    g = {"passed": True, "fully_verified": True, "warnings": ["soft 提示"]}
+    r = Gateway._build_unified_gate(g, None, CANARY_SKIPPED)
+    assert r["verdict"] == "warn", f"fully_verified=True 的 soft warning 应降级 warn：{r}"
+    assert r["passed"] is True
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -296,7 +306,7 @@ def test_a15_payload_container_normalizer_is_replayed():
         f"标量 payload 下写 payload.<field> 应被识别为丢写并告警，实得 {w2}"
     # 字段没落地 → 分支变量取不到 → 现行策略是「保守视为命中」（避免误杀结构正确的
     # flow）。这条本身是 fail-open，唯一的护栏就是上面那条告警必须存在，
-    # 并由 _build_unified_gate 把它降级成 warn（见 test_a15_conservative_match_degrades_verdict）。
+    # 并由 _build_unified_gate 在 fully_verified=False 时硬拦（见 test_a15_conservative_match_blocks_fail_closed）。
     assert calls2 == ["climate.turn_on"], calls2
 
 
@@ -306,9 +316,10 @@ def test_a15_unresolvable_jsonata_is_warned_not_silent():
     assert any("无法本地求值" in w for w in warns), warns
 
 
-def test_a15_conservative_match_degrades_verdict(gate):
-    """分支只能「保守视为命中」时，闸门即便判过，顶层也必须降级 warn。
-    否则等于用一次猜测换一盏绿灯 —— 正是本工单要消灭的假过。"""
+def test_a15_conservative_match_blocks_fail_closed(gate):
+    """分支只能「保守视为命中」（无法本地求值）时，闸门即便判过，
+    顶层也必须硬拦（block）—— 靠一次猜测换来的绿灯正是本工单要消灭的假过。
+    保守 fail-closed：fully_verified=False → block。"""
     s = _store(("sensor.a15v", "温度", "书房", "unavailable", {}),
                ("climate.a15v", "空调", "书房", "off", {}))
     flow = _flow_a15_raw(with_else=False)
@@ -320,8 +331,9 @@ def test_a15_conservative_match_degrades_verdict(gate):
                               vhass_store=s, flow=flow)
     assert g["passed"] is True, g
     assert any("无法本地求值" in w for w in g["warnings"]), g["warnings"]
+    assert g.get("fully_verified") is False, "无法本地求值 fully_verified 必须 False"
     r = Gateway._build_unified_gate(g, None, CANARY_SKIPPED)
-    assert r["verdict"] == "warn", f"靠猜分支换来的 pass 必须降级：{r}"
+    assert r["verdict"] == "block", f"靠猜分支换来的 pass 必须硬拦[A-fail-closed]：{r}"
 
 
 def test_a15_compiled_dsl_branch_matches_physical_semantics():

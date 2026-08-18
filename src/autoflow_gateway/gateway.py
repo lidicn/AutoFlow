@@ -3548,7 +3548,7 @@ class Gateway:
         # propose_raw 是 fail-open 落档（只报告不拦），若不在此补刀，坏 flow
         #（如 api-current-state 空 entityId → R20）会直接上线、且「重新部署」反复推送。
         if ctype == "raw_flow":
-            _LINT_BLOCK_RULES = {"R13", "R15", "R20", "R17", "R22", "R24", "R30", "R32", "R_SERVICE_PARAM", "R36"}
+            _LINT_BLOCK_RULES = {"R13", "R15", "R20", "R17", "R22", "R24", "R30", "R32", "R_SERVICE_PARAM", "R36", "R2-ESC", "R_NO_TRIGGER"}
             _li = lint_flow(flow)
             _blk = [v for v in _li
                     if v.get("level") == "error" and v.get("rule") in _LINT_BLOCK_RULES]
@@ -4322,14 +4322,25 @@ class Gateway:
             block_notes.append(
                 f"require_e2e=True 但 E2E 未真正执行（层内 verdict={e2e['verdict']}，"
                 f"detail={e2e.get('detail')}）→ 拒绝空 pass[A22]")
-        # 【A14/A15】vhass 闸「过了」但过程中有未证实项（未建模服务 / 只能保守视为命中的
-        # JSONata 分支 / 字段静默丢写）→ 这类绿灯是「没抓到反例」而非「验证通过」，
-        # 不许当作干净 pass 交付，降级 warn 并把原因原样带出。
-        if vhass["ran"] and vhass["passed"] and vhass.get("warnings"):
-            warn_notes.append(
-                "vhass staging 判过，但存在【未证实项】，后置结论不完全可信："
-                + "；".join(str(w) for w in vhass["warnings"])
-                + " → 降级 warn[A14/A15]")
+        # 【A14/A15 / 保守 fail-closed】vhass 闸「判过」但 fully_verified=False
+        # （未建模服务 / 只能保守视为命中的 JSONata 分支 / 字段静默丢写）→
+        # 这类「绿灯」是「没抓到反例」而非「验证通过」，后置结论不完全可信，
+        # 按 fail-closed 直接硬拦；仅当 fully_verified 为真但仍有 soft warning 时降级 warn。
+        if vhass["ran"] and vhass["passed"]:
+            # 用原始 staging_gate 的 fully_verified（而非 vhass 里 bool 归一后的值），
+            # 避免「上游未带该字段（None）→ 被 bool 归一成 False → 误拦每个通过的闸」。
+            # 仅当上游**显式**置 fully_verified=False（真有未证实项）才硬拦。
+            _fv = staging_gate.get("fully_verified") if isinstance(staging_gate, dict) else None
+            if _fv is False:
+                block_notes.append(
+                    "vhass staging 判过但 fully_verified=False（存在未证实项，后置结论不完全可信）："
+                    + "；".join(str(w) for w in vhass["warnings"])
+                    + " → 硬拦[A-fail-closed]")
+            elif vhass.get("warnings"):
+                warn_notes.append(
+                    "vhass staging 判过，但存在【未证实项】："
+                    + "；".join(str(w) for w in vhass["warnings"])
+                    + " → 降级 warn[A14/A15]")
         # 【A18】期望 vhass 闸运行却被 skip → 后置条件一条都没验证，不许绿灯。
         if staging_required and not vhass["ran"]:
             warn_notes.append(
@@ -4562,7 +4573,7 @@ class Gateway:
         # 其余 error 级规则（R5/R7/R8/R10/R16/R18 等）属代码风格/结构类，不阻塞以免误伤合法手搓流。
         # 默认开启（env AUTOFLLOW_WHITEBOX_BLOCK_ON_LINT_ERROR=0 可关）。
         # A8：dry-run 下不早退，改为算 would_block_on_lint 附在预览里，让用户看清「真部署会不会被拦」
-        _LINT_BLOCK_RULES = {"R13", "R15", "R20", "R17", "R22", "R24", "R30", "R32", "R_SERVICE_PARAM", "R36"}
+        _LINT_BLOCK_RULES = {"R13", "R15", "R20", "R17", "R22", "R24", "R30", "R32", "R_SERVICE_PARAM", "R36", "R2-ESC", "R_NO_TRIGGER"}
         _blocking = [v for v in lint_issues
                      if v.get("level") == "error" and v.get("rule") in _LINT_BLOCK_RULES]
         if block_on_lint_error and not dry_run:
@@ -5030,11 +5041,14 @@ class Gateway:
             unified["notes"].append(
                 "以下动作的后置条件未被验证（vhass 无法用 state 断言）："
                 + "；".join(sorted(set(unverifiable))))
-        # 把 lint 硬伤数附进 notes，便于 agent 一眼看到（不影响 verdict，保持 fail-open 语义）
-        if any(v.get("level") == "error" for v in lint_issues):
+        # 【A / 保守 fail-closed】静态 lint 出现 error 级硬伤 → 直接硬拦（不再 fail-open 放行）。
+        # warning 维持放行（warn），仅 error 升级为 block（含 C6 R2-ESC / C8 R_NO_TRIGGER）。
+        _lint_err = sum(1 for v in lint_issues if v.get("level") == "error")
+        if _lint_err:
+            unified["verdict"] = "block"
+            unified["passed"] = False
             unified["notes"].append(
-                f"静态 lint {sum(1 for v in lint_issues if v.get('level')=='error')} 个硬伤"
-                f"（详见 lint；白箱 fail-open 不阻断）")
+                f"静态 lint 发现 {_lint_err} 个 error 级硬伤（详见 lint）→ 按 fail-closed 硬拦[A]")
 
         _slog(_tid, "verify_flow.done", elapsed=round(time.perf_counter() - _t0, 3),
               verdict=unified["verdict"], passed=unified["passed"])
@@ -5105,7 +5119,7 @@ class Gateway:
         validation.extend(lint_issues)
         errors = [v for v in validation if v["level"] == "error"]
         warnings = [v for v in validation if v["level"] == "warning"]
-        _LINT_BLOCK_RULES = {"R13", "R15", "R20", "R17", "R22", "R24", "R30", "R32", "R_SERVICE_PARAM", "R36"}
+        _LINT_BLOCK_RULES = {"R13", "R15", "R20", "R17", "R22", "R24", "R30", "R32", "R_SERVICE_PARAM", "R36", "R2-ESC", "R_NO_TRIGGER"}
         _blocking = [v for v in lint_issues
                      if v.get("level") == "error" and v.get("rule") in _LINT_BLOCK_RULES]
         _blocking = _schema_blocking + _blocking
