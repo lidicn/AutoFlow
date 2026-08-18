@@ -2724,16 +2724,30 @@ def _emit_action(em: _Emitter, st: Action) -> str:
     # #506：动作参数若引用【已声明场景变量】，改用 dataType=jsonata 读 flow 上下文
     # （flow.<变量名>，原生类型）。否则变量沦为死变量、且数值参数落到 HA 会被当字符串。
     # 未引用变量的动作保持原 json 形态（dataType=json，_coerce_params 数值归一）。
+    # ★ D6/round5：动态表达式参数（payload.xxx / msg.xxx / flow.xxx / global.xxx /
+    # $func(...) / ${...}）同样必须走 jsonata——旧实现只认「精确等于场景变量名」，
+    # `brightness_pct=payload.brightness` 被序列化成字面字符串 "payload.brightness"
+    # （dataType=json 不做 JSONata 求值）→ 运行时 HA 收到的是字符串而非传感器真值，
+    # 静默失败（编译通过、gate passed、无 warning）。
     params = dict(st.params)
     uses_var = em.flow_vars and any(
         isinstance(v, str) and v in em.flow_vars for v in params.values()
     )
+    _DYN_PARAM_RE = re.compile(r"^(?:payload|msg|flow|global)\.[A-Za-z_一-鿿]|\$[A-Za-z_一-鿿][\w一-鿿]*\(|\$\{")
+    if not uses_var:
+        uses_var = any(
+            isinstance(v, str) and _DYN_PARAM_RE.search(v) for v in params.values()
+        )
     if uses_var:
         pairs = []
         for k, v in params.items():
             key = json.dumps(k, ensure_ascii=False)
             if isinstance(v, str) and v in em.flow_vars:
                 val = f"flow.{v}"
+            elif isinstance(v, str) and _DYN_PARAM_RE.search(v):
+                # D6/round5：动态表达式原样作为 JSONata 表达式（运行时求值），
+                # 不转字面字符串。
+                val = v
             else:
                 cv = _coerce_scalar(v)
                 if isinstance(cv, bool):

@@ -775,6 +775,13 @@ _JSONATA_KEYWORDS = {
     "function", "payload", "msg", "flow", "global",
 }
 _FIELD_TOKEN_RE = re.compile(r"(?<![.\w$一-鿿])([A-Za-z_一-鿿][\w一-鿿]*)(?![一-鿿\w])")
+# D5/round5：JSONata 字符串字面量（"..." / '...' / `...`）。提取字段前必须先剥掉，
+# 否则 `payload.x = "on"` 的 `on` 会被当裸标识符 → R31 误报「未定义字段 on」。
+_JSONATA_STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`')
+# D7/round5：payload./msg./flow./global. 限定的叶子字段引用。裸 token 正则的后视断言
+# 排除 `.` 前缀 → `$number(payload.nonexistent)` 内的字段永不匹配 → R31 漏报真正
+# 不存在的字段。此处显式提取限定路径的叶子，补上漏报。
+_FIELD_PATH_RE = re.compile(r"(?:payload|msg|flow|global)\.([A-Za-z_一-鿿][\w一-鿿]*)")
 
 
 def _collect_defined_fields(nodes: List[Dict[str, Any]]) -> set:
@@ -927,7 +934,10 @@ def _compute_reliable_fields(nodes: List[Dict[str, Any]]) -> set:
                             src.add(tok)
                 writes.append((field, src))
             elif tot == "jsonata":
-                toks = {m.group(1) for m in _FIELD_TOKEN_RE.finditer(to or "")
+                # D5/round5：jsonata 源同样先剥字符串字面量，避免 "on" 的 on 被当
+                # 源 token → change 字段被误判「源不可靠」→ 下游 switch 连锁误报 R31。
+                toks = {m.group(1) for m in _FIELD_TOKEN_RE.finditer(
+                        _JSONATA_STRING_RE.sub(" ", to or ""))
                         if m.group(1) not in _JSONATA_KEYWORDS}
                 writes.append((field, toks))
             else:
@@ -993,7 +1003,17 @@ def collect_undefined_field_refs(
                 continue
             expr = r.get("v") or ""
             toks: List[str] = []
-            for m in _FIELD_TOKEN_RE.finditer(expr):
+            # D5/round5：先剥字符串字面量，避免 "on" 之类引号内内容被当字段引用。
+            bare = _JSONATA_STRING_RE.sub(" ", expr)
+            # D7/round5：提取 payload./msg./flow./global. 限定的叶子字段
+            # （$number(payload.nonexistent) 内的字段此前漏报）。
+            for m in _FIELD_PATH_RE.finditer(bare):
+                tok = m.group(1)
+                if tok in _JSONATA_KEYWORDS or tok in reliable or tok in toks:
+                    continue
+                toks.append(tok)
+            # 裸标识符 token（无限定引用）
+            for m in _FIELD_TOKEN_RE.finditer(bare):
                 tok = m.group(1)
                 if tok in _JSONATA_KEYWORDS or tok in reliable or tok in toks:
                     continue
