@@ -7,6 +7,11 @@
 守卫：
 - 编译期（dsl_engine）：串行调用后 switch 引用被覆盖的较早子流程字段 → DSLError C_HISTORY_CLOBBER
 - 部署闸（flow_linter R36）：同一 switch 引用 ≥2 个不同 history 子流程专属字段 → error
+- C4 (iss_3e5f462d01) 进一步收紧：线性顺序 2 个不同 history_* 子流程（前者输出未被中间
+  『分支/提取』消费）→ 编译期直接 DSLError C_HISTORY_CLOBBER（fail-closed，不再仅 warning）。
+  因此『串行但下游只引用最新字段』(SERIAL_LATEST) 在 C4 之后也被硬拦截——前者输出被静默
+  丢弃，属同一类危险。Defect B 的核心（stale-read 永假）仍由 switch 级检查守住；此测试仅
+  将 SERIAL_LATEST 的断言从「允许」改为「应被 C4 拦截」以记录该收紧。
 
 运行：python -m pytest tests/test_defect_b_history_clobber.py
 """
@@ -37,7 +42,8 @@ NESTED = _HEADER + (
     "    动作: light.turn_on(light.monitor)\n"
 )
 
-# 好：串行但下游 switch 只引用最新子流程的字段（无冲突）
+# 历史(C4 前)曾允许：串行但下游 switch 只引用最新子流程字段（无冲突）。
+# C4 (iss_3e5f462d01) 收紧后此写法因前者输出被静默丢弃而一律硬拦截。
 SERIAL_LATEST = _HEADER + (
     "调用子流程: history_occurred(entity=light.study, start=8h前, end=现在)\n"
     "调用子流程: history_duration(entity=light.study, start=8h前, end=现在, state=on)\n"
@@ -60,9 +66,15 @@ def test_compile_allows_nested_history():
     assert flow and flow.get("nodes"), "嵌套 history DSL 应编译通过"
 
 
-def test_compile_allows_serial_referencing_latest_only():
-    flow = compile_dsl(SERIAL_LATEST)
-    assert flow and flow.get("nodes"), "只引用最新 history 字段的串行 DSL 应编译通过"
+def test_compile_blocks_serial_referencing_latest_only_c4():
+    """C4 (iss_3e5f462d01) 收紧：即便下游只引用最新 history 字段，顺序双 history 仍因前者
+    输出被静默丢弃而硬拦截（fail-closed）。此用例历史上曾允许，C4 后必须被拒绝。"""
+    try:
+        compile_dsl(SERIAL_LATEST)
+    except DSLError as e:
+        assert e.code == "C_HISTORY_CLOBBER", f"应抛 C_HISTORY_CLOBBER，实际 {e.code}"
+        return
+    raise AssertionError("C4 后顺序双 history（只读最新字段）应被硬拦截")
 
 
 def _hist_node(nid, suffix):

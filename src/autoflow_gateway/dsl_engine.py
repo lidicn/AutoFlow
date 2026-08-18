@@ -2268,7 +2268,25 @@ def _check_history_clobber_in_switch(st, live_history: Optional[str]) -> None:
             getattr(st, "line", None), code=C_HISTORY_CLOBBER)
 
 
-def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200):
+def _history_subflow_referenced(conditions: list, live_history: Optional[str]) -> bool:
+    """判断一组条件/表达式是否引用了 live_history 的输出字段（视为该 history 结果已被消费）。
+
+    用于 C4 / iss_3e5f462d01 的「消费感知」fail-closed：若第一个 history 的输出字段被
+    中间『分支』(条件引用) 或『提取』(暂存到变量) 消费，则顺序调第二个 history 是安全的，
+    不报错；否则线性 2×history 第二个会整体覆盖前者 → 硬拦截（DSLError）。"""
+    if live_history is None:
+        return False
+    fields = set()
+    for c in conditions:
+        fields |= set(_jsonata_payload_fields(c or ""))
+    for f in fields:
+        if _HISTORY_FIELD_TO_SUBFLOW.get(f) == live_history:
+            return True
+    return False
+
+
+def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200,
+               entry: Optional[tuple] = None):
     """顺序编排步骤。sources 为上游节点 id 列表（fan-in）；首节点接收全部上游连线，
     之后顺次链接。遇 并行 块做 fan-out。连续的 提取 步骤合并进同一个 change 节点。
 
@@ -2299,13 +2317,28 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200):
             # 正解：回挂到喂给 switch 的同一上游，使并行路径与 switch 平级、独立起线。
             if (not sources) and last and last_upstream and _is_fanout_node(em, last):
                 upstream = list(last_upstream)
+            # C5 / iss_69c34b1539：当并行块是「分支/门 体首步」（sources=[] 且 last=None，
+            # 即本段由 caller 经 entry=(src_id, out_idx) 注入入口输出口）时，用 connect_out
+            # 把所有臂扇出到该具体输出口；否则仅首臂被 caller 的 connect_out 接到入口、
+            # 其余臂成孤儿节点（运行态永不执行，最危险）。
+            if upstream:
+                def _fan(cid):
+                    for s in upstream:
+                        em.connect(s, cid)
+            elif entry is not None:
+                _e_src, _e_out = entry
+
+                def _fan(cid):
+                    em.connect_out(_e_src, _e_out, cid)
+            else:
+                def _fan(cid):
+                    return None
             for child in st.children:
                 child_head, _ = _emit_step(em, child, x=x)
                 cid = child_head
                 if head is None:
                     head = cid
-                for s in upstream:
-                    em.connect(s, cid)
+                _fan(cid)
             if last:
                 # 接在串行链之后：后续同级步骤仍从同一前驱扇出；并行块不推进链
                 sources = []
@@ -2316,6 +2349,11 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200):
                 # last 保持 None
             continue
         if isinstance(st, Extract):
+            # C4 / iss_3e5f462d01：提取 把 history 输出暂存到变量 → 视为已消费，
+            # 后续再调第二个 history 安全（不误拒「提取暂存」写法）。
+            if live_history is not None and _history_subflow_referenced(
+                    [getattr(st, "expr", "")], live_history):
+                live_history = None
             if pending_extract is None:
                 pending_extract = em.add("change", name="提取字段", rules=[])
                 if head is None:
@@ -2328,6 +2366,12 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200):
                 elif last:
                     em.connect(last, pending_extract)
                     last_upstream = [last]
+                elif entry is not None:
+                    # C5 / iss_69c34b1539：分支/门 体首步为 提取（change 节点）时，本块
+                    # 走 continue 提前返回，绕过了下方通用 step 块的 entry 接线逻辑，
+                    # 必须把首个 change 节点接到入口输出口(entry)，否则成孤儿（永不执行）。
+                    em.connect_out(entry[0], entry[1], pending_extract)
+                    last_upstream = []
                 last = pending_extract
             em._find(pending_extract)["rules"].append(
                 {"t": "set", "p": st.name, "pt": "msg",
@@ -2341,28 +2385,32 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200):
         # 2×history」的 warning 级告警（不强制 fail，引导改用嵌套 / 提取暂存）。
         if isinstance(st, SubflowCall) and _is_history_subflow_call(st):
             if live_history is not None and live_history != st.name:
-                em.lint_warnings.append({
-                    "level": "warning",
-                    "rule": C_HISTORY_CLOBBER,
-                    "message": (
-                        f"顺序调用了多个 history_* 子流程（先 {live_history}，后 {st.name}）。"
-                        f"history_* 把答案替换式写回 msg.payload，后调用者会整体覆盖前调用者 → "
-                        f"{live_history} 的输出字段在后续节点中恒为 undefined（分支永假、不报错）。"
-                        f"请改为：① 嵌套——在第一个 history 查询命中后的『分支』内再调第二个；"
-                        f"或 ② 用『提取: 变量 = payload.<字段>』把首个结果暂存到变量后再调第二个。"
-                    ),
-                    "line": getattr(st, "line", None),
-                    "node_id": None,
-                })
+                # C4 / iss_3e5f462d01：线性顺序 2 个不同 history_*（前者输出未被中间
+                # 分支/提取消费）→ 第二个整体覆盖前者 → 硬拦截（fail-closed）。
+                # 安全写法（history_A → 分支/提取 消费 A → history_B）中 live_history
+                # 已被消费并重置为 None，此处不会误拒。
+                raise DSLError(
+                    f"顺序调用了多个 history_* 子流程（先 {live_history}，后 {st.name}）。"
+                    f"history_* 把答案替换式写回 msg.payload，后调用者会整体覆盖前调用者 → "
+                    f"{live_history} 的输出字段在后续节点中恒为 undefined（分支永假、不报错）。"
+                    f"请改为：① 嵌套——在第一个 history 查询命中后的『分支』内再调第二个；"
+                    f"或 ② 用『提取: 变量 = payload.<字段>』把首个结果暂存到变量后再调第二个。",
+                    getattr(st, "line", None), code=C_HISTORY_CLOBBER)
             live_history = st.name
         elif isinstance(st, Switch):
             _check_history_clobber_in_switch(st, live_history)
+            # 分支引用了当前 live_history 字段 → 视为已消费，允许后续再调 history（安全写法）
+            if _history_subflow_referenced(
+                    [getattr(b, "condition", "") for b in getattr(st, "branches", [])],
+                    live_history):
+                live_history = None
         head_id, tail_id = _emit_step(em, st, x=x)
         # 修复：Comment 不参与连线，仅作可视化说明
         if isinstance(st, Comment):
             continue
         nid = head_id
-        if head is None:
+        head_is_first = (head is None)
+        if head_is_first:
             head = nid
         # R7(#round4) iss_516bc5d816（报告 A16）：link-out 型子流程是 fire-and-forget，
         # 编译产物是 `change(设 msg.payload=入参) → link out`，msg.payload 已被入参整体
@@ -2383,6 +2431,11 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200):
         elif last:
             em.connect(last, nid)
             last_upstream = [last]
+        elif entry is not None and head_is_first:
+            # C5 / iss_69c34b1539：分支/门 体首步（无 sources/last）从该体入口输出口
+            # 扇出（定向 connect_out），与并行块 entry 机制一致，避免首节点孤儿(R13)。
+            em.connect_out(entry[0], entry[1], nid)
+            last_upstream = []
         else:
             last_upstream = []
         if not fire_and_forget:
@@ -2492,11 +2545,10 @@ def _emit_current_state(em: _Emitter, st: CurrentState) -> str:
         _, tail = _emit_body(em, st.body, [sw], x=560)
         if tail:
             main_last = tail
-    # fail 分支（否则体）：从 switch 的 out1 串接 —— 必须连到体首节点(head)，否则首节点孤儿
+    # fail 分支（否则体）：从 switch 的 out1 串接 —— 体首步（含「并行」块）经 entry=(sw,1)
+    # 从该门 out1 扇出，并行所有臂都接到 out1，避免后臂孤儿（C5 / iss_69c34b1539）。
     if st.else_body:
-        else_head, _ = _emit_body(em, st.else_body, [], x=560)
-        if else_head:
-            em.connect_out(sw, 1, else_head)
+        _emit_body(em, st.else_body, [], x=560, entry=(sw, 1))
     # 关键修复：作为「门」被嵌入其它 body 时，父节点必须把连线接到本门【入口】(nid)，
     # 而非门体尾节点；否则本门自身会被留成孤儿（见 嵌套门孤儿接线 bug）。
     # 门体内 body/else_body 已在上方用 connect/connect_out 各自接到本门输出口，无需返回尾节点。
@@ -2579,12 +2631,11 @@ def _emit_time_range(em: _Emitter, st: TimeRange) -> str:
     # 通过分支（主链 body）：从 out0 串接（_emit_body 默认接父节点输出0）
     if st.body:
         _emit_body(em, st.body, [nid], x=560)
-    # 窗口外分支（否则体）：从 out1 串接 —— 必须连到体首节点(head)，否则首节点孤儿。
+    # 窗口外分支（否则体）：从 out1 串接 —— 体首步（含「并行」块）经 entry=(nid,1)
+    # 从 time-range-switch out1 扇出，并行所有臂都接到 out1，避免后臂孤儿（C5）。
     # ★FEEDBACK #9：此前 TimeRange 无 else_body 字段，`时间段:`+`否则:` 编译期崩溃。
     if st.else_body:
-        else_head, _ = _emit_body(em, st.else_body, [], x=560)
-        if else_head:
-            em.connect_out(nid, 1, else_head)
+        _emit_body(em, st.else_body, [], x=560, entry=(nid, 1))
     # 关键修复：作为「门」被嵌入其它 body 时须返回本门【入口】(nid)，
     # 否则父节点会把连线接到门体尾节点、本门自身留成孤儿（嵌套门孤儿接线 bug）。
     # 门体已在上方从本门 out0 串接好，无需返回尾节点。
@@ -3128,14 +3179,12 @@ def _emit_switch(em: _Emitter, sw: Switch) -> str:
     sid = em.add("switch", name="分支", property=node_prop, propertyType=node_ptype,
                  checkall="true", repair=False, rules=rules, outputs=len(rules))
     for idx, b in enumerate(sw.branches):
-        # 关键修复：分支体首节点(head)必须接到 switch 对应输出，否则首节点孤儿(R13)。
-        head, _ = _emit_body(em, b.body, [], x=560)
-        if head:
-            em.connect_out(sid, idx, head)
+        # 关键修复：分支体首节点必须接到 switch 对应输出，否则首节点孤儿(R13)。
+        # 体首步若为「并行」块，_emit_body 用 entry=(sid, idx) 把【所有臂】扇出到该输出口
+        # （避免后臂孤儿，C5 / iss_69c34b1539）；单节点首步同理定向连接。
+        _emit_body(em, b.body, [], x=560, entry=(sid, idx))
     if sw.else_body:
-        else_head, _ = _emit_body(em, sw.else_body, [], x=560)
-        if else_head:
-            em.connect_out(sid, len(sw.branches), else_head)
+        _emit_body(em, sw.else_body, [], x=560, entry=(sid, len(sw.branches)))
     return sid
 
 
