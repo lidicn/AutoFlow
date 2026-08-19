@@ -3376,7 +3376,8 @@ class Gateway:
         if ctype == "subflow":
             # 子流程提案：人审通过后原子注册（写 NR 子流程实例 + 登记 subflow_registry）。
             # 不走 DSL/flow 部署路径（无 staging 闸门 / HA server 注入 / flow_catalog / e2e 闸）。
-            return self._deploy_subflow_proposal(p, content, agent_id, force, dry_run, _tid, _t0)
+            return self._deploy_subflow_proposal(p, content, agent_id, force, dry_run,
+                                                _tid, _t0, allow_prod=allow_prod)
         if ctype == "raw_flow":
             # 白盒提案：使用落档时的原始 flow（已做 HA server 替换），无需重新编译
             flow = content.get("flow")
@@ -3668,7 +3669,8 @@ class Gateway:
         return _resp
 
     def _deploy_subflow_proposal(self, p, content: Dict[str, Any], agent_id: str,
-                                force: bool, dry_run: bool, tid: str, t0: float) -> Dict[str, Any]:
+                                force: bool, dry_run: bool, tid: str, t0: float,
+                                allow_prod: bool = True) -> Dict[str, Any]:
         """子流程提案的注册分支（由 deploy_proposal 在人审通过后调用）。
 
         原子完成两步：
@@ -3709,7 +3711,9 @@ class Gateway:
                 "_trace_id": tid,
             }
 
-        # 第 1 步：写 NR 子流程实例（增量 append，allow_prod=False 仅写 1990，不碰 1880）
+        # 第 1 步：写 NR 子流程实例（增量 append，不整实例替换）。
+        # allow_prod 透传人类在 WebUI「部署到 NR」时的授权（与 flow 部署路径一致）；
+        # prod 下需 allow_prod=True 才放行 _guard_prod，否则沿用 deploy_proposal 的默认 True。
         try:
             self.nr.create_subflow(
                 subflow_id, name,
@@ -3718,7 +3722,7 @@ class Gateway:
                 info=definition.get("info", content.get("description", "")),
                 category=definition.get("category", "subflows"),
                 env=definition.get("env"),
-                allow_prod=False,
+                allow_prod=allow_prod,
             )
         except Exception as e:
             r = {"ok": False, "stage": "nr_create_subflow", "error": f"NR 子流程创建失败: {e}"}
