@@ -2545,8 +2545,14 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200,
                     live_history):
                 live_history = None
         head_id, tail_id = _emit_step(em, st, x=x)
-        # 修复：Comment 不参与连线，仅作可视化说明
+        # Comment 不参与主链 msg 流（终端可视化节点，不转发 msg），但作为『入口首节点』
+        # （如 switch 否则输出 entry）时要给它补一条入边——否则 comment 节点无入边
+        # 漂浮在左上角、且 switch 否则输出 wires=[] 会被 R21 误报『否则分支死分支』（D21）。
+        # 连上后 msg 在 comment 处自然终止（否则分支本就是『命中即停止』语义，仅作说明、
+        # 无副作用节点也合理），连线完整、comment 不再孤立，与「否则: 动作:」行为一致。
         if isinstance(st, Comment):
+            if entry is not None and head is None:
+                em.connect_out(entry[0], entry[1], head_id)
             continue
         nid = head_id
         head_is_first = (head is None)

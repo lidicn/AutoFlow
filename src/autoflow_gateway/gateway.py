@@ -6029,6 +6029,19 @@ class Gateway:
         taps = []
         scope = []
         for n in nodes:
+            # D20 修复：部分 NR 版本/部署下 debug 节点虽 passthrough=true 却
+            # 不把 msg 转发到下游 wires，导致 e2e 插桩后 debug 下游全部误报断点、
+            # 第六轮以来所有含「观测:」的 e2e 结果不可靠。在【插桩副本】里把
+            # debug 替换为一个透传 function 代理（保留 id/wires/z/位置，msg 原样
+            # return），使测试副本中 debug 的上下游连线真实贯通。真实部署回滚后
+            # 用户 flow 仍保留原 debug 观测语义（插桩只在副本，不影响原 flow）。
+            if n.get("type") == "debug":
+                n["type"] = "function"
+                n["func"] = "return msg;"
+                n["outputs"] = 1
+                n["_af_debug_proxy"] = True
+                # 代理自身不插 tap（保持 sink 语义，不进 trace）
+                continue
             if n.get("type") in SINK or n.get("_af_trace_tap") or n.get("_af_err_sink"):
                 continue
             scope.append(n["id"])
