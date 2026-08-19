@@ -5,7 +5,7 @@
  * - 在线时每次重新拉取，尊重服务端 no-store（开发期改了前端能立即生效）。
  * - 离线时回退到已缓存的 app shell，保证 PWA 可打开。
  */
-const CACHE = 'autoflow-shell-v1';
+const CACHE = 'autoflow-shell-v2';
 const SHELL = [
   '/',
   '/static/style.css',
