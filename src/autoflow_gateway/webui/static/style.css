@@ -456,13 +456,15 @@ body {
 .chat .step, .bubble .step { border-left: 3px solid var(--primary); padding: 4px 8px; margin: 6px 0; background: var(--bg); border-radius: 0 6px 6px 0; }
 .chat .step code, .bubble .step code { font-size: 13px; }
 
-/* ===== LLM 助手页：底部居中固定输入条（仿 MiMo），聊天区独立滚动、无额外页面滚动条 ===== */
+@keyframes af-spin { to { transform: rotate(360deg); } }
+
+/* ===== LLM 助手页：聊天区独立滚动、输入条跟随布局 ===== */
 #view-llm_agent:not([hidden]) {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - var(--topbar-h) - var(--bottomnav-h) - var(--sat) - var(--sab)); /* 占满主内容区（扣除顶部、底部导航与安全区域） */
+  height: calc(100vh - var(--topbar-h) - var(--bottomnav-h) - var(--sat) - var(--sab));
   overflow: hidden;
-  position: relative; /* 输入条 absolute 定位基准，避免 fixed 跑到全屏 */
+  position: relative;
 }
 /* 关键：显式 display 会覆盖 [hidden] 属性，必须显式把 hidden 时的 display 关掉，
    否则切换 tab 后 #view-llm_agent 仍常驻可见，造成“串到其他页面”。 */
@@ -471,8 +473,8 @@ body {
   flex: 1;
   overflow-y: auto;
   padding: 18px 0;
-  min-height: 0;        /* 关键：让 flex child 可收缩 */
-  max-height: none;     /* 取消当前 60vh 限制 */
+  min-height: 0;
+  max-height: none;
 }
 #view-llm_agent .chat-input-bar {
   position: absolute;
@@ -527,34 +529,87 @@ body {
   resize: none;
   max-height: 200px;
   min-height: 44px;
-  padding: 10px 4px;
-  font-size: 15px;
+  padding: 10px 12px 10px 4px;
+  font-size: 16px;           /* iOS: >=16px 避免 focus 时页面强制缩放 */
   line-height: 1.55;
   outline: none;
+  color: var(--text);
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+#view-llm_agent .chat-input-bar textarea::placeholder {
+  color: var(--text-dim);
+  opacity: .75;
 }
 #view-llm_agent .chat-input-bar .send-btn {
   width: 44px;
   height: 44px;
+  min-width: 44px;
+  min-height: 44px;
   border-radius: 50%;
   padding: 0;
+  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   font-size: 16px;
 }
+#view-llm_agent .chat-input-bar .send-btn svg,
+#view-llm_agent .chat-input-bar .send-btn img {
+  width: 20px;
+  height: 20px;
+  pointer-events: none;
+}
 /* 聊天消息底部留空，避免被固定输入条遮挡 */
 #view-llm_agent .chat { padding-bottom: 120px; }
+
+/* 移动端：改为静态/流式输入条，彻底解决 iOS 绝对定位底部输入框无法聚焦、键盘不弹出的问题 */
 @media (max-width: 768px) {
+  #view-llm_agent:not([hidden]) {
+    position: static;
+    overflow: hidden;
+  }
+  #view-llm_agent .chat {
+    padding: 14px 0 18px;
+  }
   #view-llm_agent .chat-input-bar {
-    left: 12px;
-    right: 12px;
+    position: static;
     transform: none;
-    width: auto;
-    bottom: 16px;
-    padding: 12px 14px;
+    left: auto;
+    right: auto;
+    bottom: auto;
+    width: 100%;
+    border-radius: 24px 24px 0 0;
+    border-width: 1px 0 0 0;
+    box-shadow: 0 -4px 24px rgba(16,24,40,.10);
+    padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
+    margin-top: auto;
   }
   #view-llm_agent .chat-input-bar .input-tools select.tool-select {
     max-width: 120px;
     padding-right: 18px;
+    font-size: 12px;
+  }
+}
+
+/* 超窄屏：工具选择器与输入区垂直堆叠，给 textarea 足够宽度，避免 placeholder 被截断 */
+@media (max-width: 380px) {
+  #view-llm_agent .chat-input-bar {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  #view-llm_agent .chat-input-bar .input-tools {
+    width: 100%;
+    padding-bottom: 0;
+  }
+  #view-llm_agent .chat-input-bar .input-tools select.tool-select {
+    flex: 1;
+    max-width: none;
+  }
+  #view-llm_agent .chat-input-bar textarea {
+    width: calc(100% - 52px);
+    min-width: 0;
+    padding: 10px 8px;
   }
 }

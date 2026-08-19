@@ -2740,8 +2740,10 @@ async function loadLlmAgent() {
         </select>
         <select class="tool-select" id="llmModel" title="选择模型">${modelOptions}</select>
       </div>
-      <textarea id="llmInput" rows="2" placeholder="随便问点什么，/ 可查看命令，@ 可添加上下文..."></textarea>
-      <button class="btn primary send-btn" id="llmSend">➤</button>
+      <textarea id="llmInput" rows="2" placeholder="随便问点什么，/ 可查看命令，@ 可添加上下文..." inputmode="text" autocapitalize="none" autocomplete="off" autocorrect="off"></textarea>
+      <button class="btn primary send-btn" id="llmSend" type="button" aria-label="发送">
+        <img src="/static/icons/ic-send.svg" alt="" loading="lazy" />
+      </button>
     </div>`;
   const chat = $("#llmChat"), input = $("#llmInput"), send = $("#llmSend");
   const clear = $("#llmClear");
@@ -2805,6 +2807,9 @@ async function loadLlmAgent() {
     chat.innerHTML = `<div class="empty" style="padding:24px 10px">对话已清空。</div>`;
   };
 
+  const SEND_ICON_HTML = `<img src="/static/icons/ic-send.svg" alt="" loading="lazy" />`;
+  const SPINNER_HTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="animation:af-spin 1s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>`;
+
   async function sendMsg() {
     const text = input.value.trim();
     if (!text) return;
@@ -2813,7 +2818,7 @@ async function loadLlmAgent() {
     input.value = "";
     renderBubble({ role: "user", content: text });
     _llmHistory.push({ role: "user", content: text }); _saveLlmChat();
-    send.disabled = true; send.textContent = mode === "acp" ? "委派中…" : "思考中…";
+    send.disabled = true; send.innerHTML = SPINNER_HTML;
     try {
       const body = { message: text, history: _llmHistory.slice(0, -1), mode };
       if (mode === "autoflow" && backendIndex >= 0) body.backend_index = backendIndex;
@@ -2828,13 +2833,22 @@ async function loadLlmAgent() {
       renderBubble(errMsg);
       _llmHistory.push(errMsg); _saveLlmChat();
     } finally {
-      send.disabled = false; send.textContent = "发送";
+      send.disabled = false; send.innerHTML = SEND_ICON_HTML;
     }
   }
   if (send) send.onclick = sendMsg;
   if (input) input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMsg(); }
   });
+  // iOS：点击输入条空白处时，把焦点显式交给 textarea（规避绝对/静态定位切换时的焦点丢失）
+  const inputBar = $("#llmInputBar");
+  if (inputBar && input) {
+    inputBar.addEventListener("click", (e) => {
+      if (e.target === inputBar || e.target === input || e.target.closest(".input-tools") === null) {
+        input.focus();
+      }
+    });
+  }
 }
 
 // 启动

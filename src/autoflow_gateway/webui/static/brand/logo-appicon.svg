@@ -1,20 +1,44 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" fill="none">
   <defs>
-    <linearGradient id="appIconGrad" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#5B8CFF"/>
-      <stop offset="100%" stop-color="#2F6BFF"/>
+    <linearGradient id="appShieldBase" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0A5FA8"/>
+      <stop offset="50%" stop-color="#04528C"/>
+      <stop offset="100%" stop-color="#02355C"/>
+    </linearGradient>
+    <linearGradient id="appShieldSheen" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#1A7BC8" stop-opacity="0.45"/>
+      <stop offset="35%" stop-color="#0A5FA8" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="appShieldRim" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0C6CB8"/>
+      <stop offset="100%" stop-color="#012843"/>
     </linearGradient>
   </defs>
-  <!-- 圆角方形底，适配 iOS 图标 -->
-  <rect width="40" height="40" rx="9" fill="url(#appIconGrad)"/>
-  <!-- 内部节点 flow（白色） -->
-  <g stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="9" y="13" width="8" height="8" rx="2" fill="rgba(255,255,255,0.18)"/>
-    <rect x="23" y="10" width="8" height="8" rx="2" fill="rgba(255,255,255,0.18)"/>
-    <rect x="16" y="23" width="8" height="8" rx="2" fill="rgba(255,255,255,0.18)"/>
-    <path d="M17 17 L23 14" fill="none"/>
-    <polyline points="21.5 13.2 23 14 22 15.4" fill="none" stroke-width="1.4"/>
-    <path d="M27 18 L24 22.5" fill="none"/>
-    <polyline points="23.2 21.2 24 22.5 22.4 22.8" fill="none" stroke-width="1.4"/>
+
+  <!-- 圆角方形底 -->
+  <rect width="40" height="40" rx="9" fill="url(#appShieldRim)"/>
+  <rect x="1.2" y="1.2" width="37.6" height="37.6" rx="7.8" fill="url(#appShieldBase)"/>
+  <rect x="1.2" y="1.2" width="37.6" height="37.6" rx="7.8" fill="url(#appShieldSheen)"/>
+
+  <!-- 盾形外框 -->
+  <path d="M20 6.2c6.2 0 10.9 3.7 10.9 10.4 0 6.7-5.7 13-10.9 16.2C14.8 29.6 9.1 23.3 9.1 16.6 9.1 9.9 13.8 6.2 20 6.2z"
+        fill="none" stroke="#FFFFFF" stroke-width="1.1"/>
+
+  <!-- 内部节点 flow -->
+  <g stroke="#BDE0FE" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <rect x="9.5" y="15.5" width="7" height="4.2" rx="2.1" fill="#BDE0FE" fill-opacity="0.25" stroke-width="1.4"/>
+    <rect x="23" y="10" width="7" height="4.2" rx="2.1" fill="#BDE0FE" fill-opacity="0.25" stroke-width="1.4"/>
+    <rect x="23" y="20.5" width="7" height="4.2" rx="2.1" fill="#BDE0FE" fill-opacity="0.25" stroke-width="1.4"/>
+    <rect x="9.5" y="26" width="7" height="4.2" rx="2.1" fill="#BDE0FE" fill-opacity="0.25" stroke-width="1.4"/>
+
+    <path d="M16.5 17.6 C19.5 17.6 19.5 12.1 23 12.1"/>
+    <path d="M26.5 14.2 V 20.5"/>
+    <path d="M23 22.6 C19.5 22.6 19.5 28.1 16.5 28.1"/>
+  </g>
+
+  <g fill="#BDE0FE">
+    <path d="M22.3 12.1 L24 11.2 L24 13 Z"/>
+    <path d="M26.5 19.9 L27.4 21.6 L25.6 21.6 Z"/>
+    <path d="M17.2 28.1 L15.5 27.2 L15.5 29 Z"/>
   </g>
 </svg>

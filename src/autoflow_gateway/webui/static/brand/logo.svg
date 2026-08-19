@@ -1,24 +1,59 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" fill="none">
   <defs>
-    <linearGradient id="brandGrad" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#5B8CFF"/>
-      <stop offset="100%" stop-color="#2F6BFF"/>
+    <!-- 盾底主体渐变：左侧受光偏亮，右侧背光偏深 -->
+    <linearGradient id="shieldBase" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0A5FA8"/>
+      <stop offset="50%" stop-color="#04528C"/>
+      <stop offset="100%" stop-color="#02355C"/>
+    </linearGradient>
+    <!-- 盾面高光：模拟 3D 切光 -->
+    <linearGradient id="shieldSheen" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#1A7BC8" stop-opacity="0.45"/>
+      <stop offset="35%" stop-color="#0A5FA8" stop-opacity="0"/>
+    </linearGradient>
+    <!-- 外框立体边 -->
+    <linearGradient id="shieldRim" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0C6CB8"/>
+      <stop offset="100%" stop-color="#012843"/>
     </linearGradient>
   </defs>
-  <!-- 盾形守护外框 -->
-  <path d="M20 2c8 0 14 5 14 14 0 9-8 17-14 21-6-4-14-12-14-21C6 7 12 2 20 2z" fill="url(#brandGrad)"/>
-  <!-- 内部节点与连线：Node-RED 风格的 flow -->
-  <g stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-    <!-- 节点 1（左上） -->
-    <rect x="9" y="13" width="8" height="8" rx="2" fill="rgba(255,255,255,0.18)"/>
-    <!-- 节点 2（右中） -->
-    <rect x="23" y="10" width="8" height="8" rx="2" fill="rgba(255,255,255,0.18)"/>
-    <!-- 节点 3（下中） -->
-    <rect x="16" y="23" width="8" height="8" rx="2" fill="rgba(255,255,255,0.18)"/>
-    <!-- 连线 + 流向箭头：1 → 2 → 3 -->
-    <path d="M17 17 L23 14" fill="none"/>
-    <polyline points="21.5 13.2 23 14 22 15.4" fill="none" stroke-width="1.4"/>
-    <path d="M27 18 L24 22.5" fill="none"/>
-    <polyline points="23.2 21.2 24 22.5 22.4 22.8" fill="none" stroke-width="1.4"/>
+
+  <!-- 盾形外框（3D 厚度） -->
+  <path d="M20 2.2c8.2 0 14.4 4.9 14.4 13.7 0 8.8-7.5 17.1-14.4 21.4C13.1 33 5.6 24.7 5.6 15.9 5.6 7.1 11.8 2.2 20 2.2z"
+        fill="url(#shieldRim)"/>
+  <!-- 盾面主体 -->
+  <path d="M20 3.6c7.3 0 12.8 4.2 12.8 12.1 0 7.9-6.7 15.5-12.8 19.3C14 31.2 7.2 23.6 7.2 15.7 7.2 7.8 12.7 3.6 20 3.6z"
+        fill="url(#shieldBase)"/>
+  <!-- 盾面高光 -->
+  <path d="M20 3.6c7.3 0 12.8 4.2 12.8 12.1 0 7.9-6.7 15.5-12.8 19.3C14 31.2 7.2 23.6 7.2 15.7 7.2 7.8 12.7 3.6 20 3.6z"
+        fill="url(#shieldSheen)"/>
+  <!-- 白色内边框 -->
+  <path d="M20 5.4c6.2 0 10.9 3.5 10.9 10.2 0 6.7-5.7 13.2-10.9 16.4C14.8 28.8 9.1 22.3 9.1 15.6 9.1 8.9 13.8 5.4 20 5.4z"
+        fill="none" stroke="#FFFFFF" stroke-width="1.2"/>
+
+  <!-- 节点与流程线：Node-RED 风格，浅蓝 -->
+  <g stroke="#BDE0FE" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <!-- 节点 1：左侧输入 -->
+    <rect x="7.5" y="15.5" width="8.5" height="5" rx="2.5" fill="#BDE0FE" fill-opacity="0.25" stroke-width="1.6"/>
+    <!-- 节点 2：右上 -->
+    <rect x="23" y="9" width="8.5" height="5" rx="2.5" fill="#BDE0FE" fill-opacity="0.25" stroke-width="1.6"/>
+    <!-- 节点 3：右下 -->
+    <rect x="23" y="21" width="8.5" height="5" rx="2.5" fill="#BDE0FE" fill-opacity="0.25" stroke-width="1.6"/>
+    <!-- 节点 4：左下 -->
+    <rect x="7.5" y="27" width="8.5" height="5" rx="2.5" fill="#BDE0FE" fill-opacity="0.25" stroke-width="1.6"/>
+
+    <!-- 流程连线：左侧 → 右上 -->
+    <path d="M16 18 C19.5 18 19.5 11.5 23 11.5" />
+    <!-- 右上 → 右下 -->
+    <path d="M27.25 14 V 21" />
+    <!-- 右下 → 左下 -->
+    <path d="M23 23.5 C19.5 23.5 19.5 29.5 16 29.5" />
+  </g>
+
+  <!-- 流向小箭头 -->
+  <g fill="#BDE0FE">
+    <path d="M22.3 11.5 L24 10.6 L24 12.4 Z"/>
+    <path d="M27.25 20.3 L28.15 22 L26.35 22 Z"/>
+    <path d="M16.7 29.5 L15 28.6 L15 30.4 Z"/>
   </g>
 </svg>
