@@ -1,28 +1,65 @@
+/* ============================================================
+   AutoFlow 统一设计语言 · 设计令牌（Design Tokens）
+   所有颜色 / 间距 / 圆角 / 阴影 / 动效均由此派生，
+   新增组件请优先消费这些变量，不要在业务样式里硬编码色值。
+   ============================================================ */
 :root {
+  /* 品牌色（信任蓝升级：更饱和、更有质感的蓝） */
+  --primary: #2F6BFF;
+  --primary-700: #1F4FD6;
+  --primary-600: #2F6BFF;
+  --primary-400: #5B8CFF;
+  --primary-weak: #E8EFFF;
+  --brand-grad: linear-gradient(135deg, #5B8CFF 0%, #2F6BFF 100%);
+
+  /* 中性色 */
   --bg: #f4f6fb;
   --surface: #ffffff;
   --surface-2: #f0f3f9;
   --border: #e2e8f0;
   --text: #1f2933;
   --text-dim: #64748b;
-  --primary: #3b6ef5;
-  --primary-weak: #e8efff;
+  --text-muted: #94a3b8;
+
+  /* 语义状态色（安全闸 / 验证结果） */
   --danger: #e0464b;
   --danger-weak: #fdecec;
   --warn: #c9821a;
   --warn-weak: #fdf3e3;
   --ok: #1f9d6b;
   --ok-weak: #e6f6ef;
-  --radius: 12px;
+
+  /* 间距比例 4 / 8 基准 */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 20px; --sp-6: 24px; --sp-8: 32px;
+
+  /* 圆角 */
+  --radius-sm: 8px; --radius: 12px; --radius-lg: 16px; --radius-pill: 999px;
+
+  /* 阴影层级 */
   --shadow: 0 1px 3px rgba(16,24,40,.08), 0 1px 2px rgba(16,24,40,.04);
+  --shadow-lg: 0 10px 40px rgba(16,24,40,.18);
+  --shadow-brand: 0 4px 14px rgba(47,107,255,.35);
+
+  /* 动效 */
+  --ease: cubic-bezier(.4,0,.2,1);
+  --dur: .15s;
+
+  /* 布局尺寸 */
+  --topbar-h: 56px;
   --sidebar-w: 200px;
+  --sidebar-w-tablet: 168px;
   --bottomnav-h: 60px;
+
+  /* 字体 */
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: var(--font);
   background: var(--bg);
   color: var(--text);
   font-size: 15px;
@@ -41,7 +78,7 @@ body {
   border-bottom: 1px solid var(--border);
 }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; }
-.brand .logo { color: var(--primary); font-size: 20px; }
+.brand .logo { display: block; width: 26px; height: 26px; }
 .topbar-right { display: flex; align-items: center; gap: 8px; }
 
 /* 徽标 */
@@ -89,7 +126,7 @@ body {
 
 /* 侧边导航（桌面） */
 .sidebar {
-  position: fixed; top: 53px; left: 0; bottom: 0; width: var(--sidebar-w);
+  position: fixed; top: var(--topbar-h); left: 0; bottom: 0; width: var(--sidebar-w);
   background: var(--surface); border-right: 1px solid var(--border);
   display: flex; flex-direction: column; padding: 12px 10px; gap: 4px; z-index: 10;
   overflow-y: auto;
@@ -240,6 +277,11 @@ body {
   .grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
   .grid.cols-2 { grid-template-columns: repeat(2, 1fr); }
 }
+/* 平板：侧栏收窄，主区自动跟随（--sidebar-w 受控） */
+@media (min-width: 769px) and (max-width: 1024px) {
+  :root { --sidebar-w: var(--sidebar-w-tablet); }
+  .grid.cols-4 { grid-template-columns: repeat(3, 1fr); }
+}
 @media (max-width: 900px) {
   .grid.cols-4 { grid-template-columns: repeat(2, 1fr); }
   .grid.cols-2 { grid-template-columns: 1fr; }
@@ -250,10 +292,15 @@ body {
   .bottomnav { display: flex; }
   .grid.cols-4 { grid-template-columns: repeat(2, 1fr); }
   .view-head h2 { font-size: 17px; }
+  /* 顶栏紧凑：图标按钮收窄，避免小屏溢出 */
+  .topbar { padding: 8px 12px; gap: 6px; }
+  .topbar-right { gap: 2px; }
+  .topbar .btn.ghost { padding: 6px 7px; font-size: 15px; }
 }
 @media (max-width: 420px) {
   .grid.cols-4 { grid-template-columns: 1fr; }
   body { font-size: 14px; }
+  .view-head { align-items: flex-start; }
 }
 
 /* 评测工作台 */
@@ -345,7 +392,7 @@ body {
 #view-llm_agent:not([hidden]) {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 36px - var(--bottomnav-h)); /* 占满主内容区（扣除顶部与底部导航） */
+  height: calc(100vh - var(--topbar-h) - var(--bottomnav-h)); /* 占满主内容区（扣除顶部与底部导航） */
   overflow: hidden;
   position: relative; /* 输入条 absolute 定位基准，避免 fixed 跑到全屏 */
 }

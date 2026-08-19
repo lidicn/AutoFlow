@@ -1702,7 +1702,20 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                 errors.append({"id": n["id"], "error": str(e)})
         return _js({"ok": True, "flow_id": flow_id, "triggered": triggered, "errors": errors})
 
+    # PWA：manifest / Service Worker 挂在根路径（SW 必须根路径才能管控全站 scope）
+    def _serve_static_root(name, media):
+        p = os.path.join(static_dir, name)
+        async def _handler(request):
+            return FileResponse(
+                p,
+                media_type=media,
+                headers={"Cache-Control": "no-store"},
+            )
+        return _handler
+
     routes = [
+        Route("/manifest.webmanifest", _serve_static_root("manifest.webmanifest", "application/manifest+json")),
+        Route("/sw.js", _serve_static_root("sw.js", "application/javascript")),
         Route("/api/health", health, methods=["GET"]),
         Route("/api/debug", debug_read_global, methods=["GET"]),
         Route("/api/debug/{flow_id}", debug_read, methods=["GET"]),

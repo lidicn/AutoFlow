@@ -1,0 +1,40 @@
+{
+  "name": "AutoFlow 网关",
+  "short_name": "AutoFlow",
+  "description": "AI 与你家智能家居之间的安全闸：一句话加自动化，虚拟重放验证，人工批准才能落真实设备。",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#f4f6fb",
+  "theme_color": "#2F6BFF",
+  "categories": ["productivity", "home", "utilities"],
+  "icons": [
+    {
+      "src": "/static/brand/png/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/brand/png/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/brand/png/maskable-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/static/brand/png/maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

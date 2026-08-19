@@ -4,13 +4,39 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>AutoFlow 网关</title>
+
+  <!-- 主题色（浏览器地址栏 / PWA 顶栏） -->
+  <meta name="theme-color" content="#2F6BFF" />
+  <meta name="description" content="AutoFlow 网关：AI 与你家智能家居之间的安全闸。一句话加自动化，虚拟重放验证，人工批准才能落真实设备。" />
+
+  <!-- PWA：manifest + Service Worker 资源 -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+
+  <!-- 桌面 favicon -->
+  <link rel="icon" href="/static/brand/logo.svg" type="image/svg+xml" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/brand/png/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/brand/png/favicon-16.png" />
+
+  <!-- iOS PWA：apple-touch-icon（iOS 不支持 SVG，必须 PNG；各尺寸覆盖 iPhone / iPad） -->
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/brand/png/apple-touch-icon-180.png" />
+  <link rel="apple-touch-icon" sizes="167x167" href="/static/brand/png/apple-touch-icon-167.png" />
+  <link rel="apple-touch-icon" sizes="152x152" href="/static/brand/png/apple-touch-icon-152.png" />
+  <link rel="apple-touch-icon" sizes="120x120" href="/static/brand/png/apple-touch-icon-120.png" />
+  <link rel="apple-touch-icon" sizes="76x76" href="/static/brand/png/apple-touch-icon-76.png" />
+
+  <!-- iOS 独立应用模式 -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="AutoFlow" />
+
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
   <div class="app">
     <header class="topbar">
       <div class="brand">
-        <span class="logo">⌁</span>
+        <img class="logo" src="/static/brand/logo.svg" alt="AutoFlow" width="26" height="26" />
         <span class="title">AutoFlow 网关</span>
       </div>
       <div class="topbar-right">
@@ -338,5 +364,13 @@
   <div class="toast" id="toast" hidden></div>
 
   <script src="/static/app.js"></script>
+  <!-- PWA：注册 Service Worker（离线可打开；不缓存 /api 与 /mcp，实时数据始终走网络） -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('/sw.js').catch(function () {});
+      });
+    }
+  </script>
 </body>
 </html>

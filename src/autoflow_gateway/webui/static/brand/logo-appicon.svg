@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="AutoFlow">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5B8CFF"/>
+      <stop offset="1" stop-color="#2F6BFF"/>
+    </linearGradient>
+  </defs>
+  <!-- 满底方（iOS apple-touch-icon / maskable 由系统裁圆角） -->
+  <rect width="1024" height="1024" fill="url(#g)"/>
+  <!-- 白色盾 + 品牌蓝流动箭头，居中、约占安全区 -->
+  <g transform="translate(256,256) scale(2)">
+    <path d="M128 18 L222 54 V128 C222 184 178 220 128 240 C78 220 34 184 34 128 V54 Z" fill="#ffffff"/>
+    <g fill="none" stroke="#2F6BFF" stroke-width="17" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M84 176 C 86 132 166 150 172 88"/>
+      <path d="M150 102 L172 86 L194 70"/>
+    </g>
+    <circle cx="84" cy="176" r="13" fill="#2F6BFF"/>
+  </g>
+</svg>
