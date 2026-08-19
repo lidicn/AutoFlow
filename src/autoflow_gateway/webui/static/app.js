@@ -2740,10 +2740,12 @@ async function loadLlmAgent() {
         </select>
         <select class="tool-select" id="llmModel" title="选择模型">${modelOptions}</select>
       </div>
-      <textarea id="llmInput" rows="2" placeholder="随便问点什么，/ 可查看命令，@ 可添加上下文..." inputmode="text" autocapitalize="none" autocomplete="off" autocorrect="off"></textarea>
-      <button class="btn primary send-btn" id="llmSend" type="button" aria-label="发送">
-        <img src="/static/icons/ic-send.svg" alt="" loading="lazy" />
-      </button>
+      <div class="input-row">
+        <textarea id="llmInput" rows="2" placeholder="随便问点什么，/ 可查看命令，@ 可添加上下文..." inputmode="text" autocapitalize="none" autocomplete="off" autocorrect="off"></textarea>
+        <button class="btn primary send-btn" id="llmSend" type="button" aria-label="发送">
+          <img src="/static/icons/ic-send.svg" alt="" loading="lazy" />
+        </button>
+      </div>
     </div>`;
   const chat = $("#llmChat"), input = $("#llmInput"), send = $("#llmSend");
   const clear = $("#llmClear");

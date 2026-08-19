@@ -522,8 +522,17 @@ body {
   outline: none;
   border-color: var(--primary);
 }
+#view-llm_agent .chat-input-bar .input-row {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  min-width: 0;
+}
 #view-llm_agent .chat-input-bar textarea {
   flex: 1;
+  width: 100%;
+  min-width: 0;
   border: none;
   background: transparent;
   resize: none;
@@ -564,7 +573,8 @@ body {
 /* 聊天消息底部留空，避免被固定输入条遮挡 */
 #view-llm_agent .chat { padding-bottom: 120px; }
 
-/* 移动端：改为静态/流式输入条，彻底解决 iOS 绝对定位底部输入框无法聚焦、键盘不弹出的问题 */
+/* 移动端：改为静态/流式输入条，彻底解决 iOS 绝对定位底部输入框无法聚焦、键盘不弹出的问题。
+   模型/路由选择器放到输入框上方，避免与 textarea 抢水平空间导致文字竖排。 */
 @media (max-width: 768px) {
   #view-llm_agent:not([hidden]) {
     position: static;
@@ -585,19 +595,9 @@ body {
     box-shadow: 0 -4px 24px rgba(16,24,40,.10);
     padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
     margin-top: auto;
-  }
-  #view-llm_agent .chat-input-bar .input-tools select.tool-select {
-    max-width: 120px;
-    padding-right: 18px;
-    font-size: 12px;
-  }
-}
-
-/* 超窄屏：工具选择器与输入区垂直堆叠，给 textarea 足够宽度，避免 placeholder 被截断 */
-@media (max-width: 380px) {
-  #view-llm_agent .chat-input-bar {
-    flex-wrap: wrap;
-    gap: 8px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
   }
   #view-llm_agent .chat-input-bar .input-tools {
     width: 100%;
@@ -606,9 +606,16 @@ body {
   #view-llm_agent .chat-input-bar .input-tools select.tool-select {
     flex: 1;
     max-width: none;
+    padding-right: 22px;
+    font-size: 13px;
+  }
+  #view-llm_agent .chat-input-bar .input-row {
+    width: 100%;
+    gap: 10px;
   }
   #view-llm_agent .chat-input-bar textarea {
-    width: calc(100% - 52px);
+    flex: 1;
+    width: 100%;
     min-width: 0;
     padding: 10px 8px;
   }
