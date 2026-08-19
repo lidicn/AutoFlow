@@ -389,7 +389,10 @@ def _check_jsonata(expr: str) -> Tuple[bool, str]:
     stripped = _strip_strings_and_comments(s)
 
     # 空括号 () 非法（{} [] 为空对象/数组合法，不拦）
-    if re.search(r"\(\s*\)", stripped):
+    # D17/round10：排除无参数函数调用（$now() / $moment() / $env()）——`(` 前
+    # 紧跟 `$函数名` 是合法的无参调用，不是「空括号表达式不完整」。负向后顾
+    # 拒绝 `$标识符` 前的 `(`，只拦孤立 `( )` 或空格形式。
+    if re.search(r"(?<![$\w一-鿿])\(\s*\)", stripped):
         return False, "出现空括号 '()'（表达式不完整，运行态会被 JSONata 引擎拒绝）"
 
     # 构造运算符匹配（符号优先长匹配；词运算符加负向前后顾，
@@ -813,6 +816,18 @@ def _collect_defined_fields(nodes: List[Dict[str, Any]]) -> set:
                         defined.add(p[len("payload."):])
                     elif p != "payload" and "." not in p:
                         defined.add(p)
+                    elif p == "payload" and r.get("tot") == "json" \
+                            and isinstance(r.get("to"), str):
+                        # D19/round10：整条写 payload（构建: {"value": 42}）的
+                        # JSON 顶层键同样视为已声明（与 _compute_reliable_fields 一致）。
+                        try:
+                            _obj = json.loads(r.get("to"))
+                        except Exception:
+                            _obj = None
+                        if isinstance(_obj, dict):
+                            for _k in _obj.keys():
+                                if isinstance(_k, str) and _k and "." not in _k:
+                                    defined.add(_k)
         elif n.get("type") == "inject":
             # 触发 inject 显式声明的字段也属「已声明」，否则 W3 case C 的 R31 检查会
             # 把「引用 inject 字段的 eq 分支」误判为未定义（见 gateway._vg_eval_switch）。
@@ -900,6 +915,25 @@ def _compute_reliable_fields(nodes: List[Dict[str, Any]]) -> set:
                 for _f in _spec.outputs:
                     if _f and "." not in _f:
                         base.add(_f)
+        elif n.get("type") == "change":
+            # D19/round10：『构建: {"value": 42}』→ change 整条写 msg.payload
+            # （tot=json）。旧实现只收集 payload.<x> 子路径写，整条写被跳过 →
+            # 下游『分支: payload.value > 30』被 R31 误报「未定义字段 value」
+            # （value 实际由构建声明），且闸门采信误报跳过该分支重放。
+            # 此处把整条写的 JSON 对象顶层键提取进 base（与 inject json payload 同款）。
+            for r in (n.get("rules") or []):
+                if r.get("t") not in (None, "", "set"):
+                    continue
+                if r.get("p") == "payload" and r.get("tot") == "json" \
+                        and isinstance(r.get("to"), str):
+                    try:
+                        _obj = json.loads(r.get("to"))
+                    except Exception:
+                        _obj = None
+                    if isinstance(_obj, dict):
+                        for _k in _obj.keys():
+                            if isinstance(_k, str) and _k and "." not in _k:
+                                base.add(_k)
     # change 写入字段及其源字段 token
     writes: List[Tuple[str, set]] = []
     for n in nodes:

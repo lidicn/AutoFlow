@@ -5290,6 +5290,15 @@ class Gateway:
         _slog(_tid, "propose_subflow.start", agent_id=agent_id, dsl_name=dsl_name)
         if not dsl_name or not str(dsl_name).strip():
             return {"ok": False, "stage": "input", "error": "dsl_name 必填（DSL 调用名）"}
+        # D18/round10：dsl_name 是 DSL 调用名（subflow_registry 主键），必须符合
+        # 标识符字符集（字母/数字/下划线、首字符非数字）——工具描述已声明该约束，
+        # 旧实现未校验，'bad-name!' 之类被接受，问题延后到 DSL『调用子流程: bad-name!』
+        # 解析/部署时才暴露。非法字符在提案阶段即拦截。
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(dsl_name).strip()):
+            return {"ok": False, "stage": "input",
+                    "error": f"dsl_name 含非法字符：{dsl_name!r}。"
+                             "dsl_name 必须是标识符（首字符为字母或下划线，"
+                             "其后为字母/数字/下划线），如 my_subflow / bark_push_2。"}
         if not name or not str(name).strip():
             return {"ok": False, "stage": "input", "error": "name 必填（子流程可读名）"}
         if not isinstance(definition, dict):
