@@ -96,7 +96,8 @@ function fmtTime(s) {
 const TABS = ["dashboard", "safe", "proposals", "deployed", "subflows", "link_apis", "agents", "diagnostics", "notes", "settings", "help", "acp_tokens", "llm_settings", "llm_agent"];
 function setTab(tab) {
   if (!TABS.includes(tab)) tab = "dashboard";
-  $$(".navitem").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+  $$(".navitem[data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+  closeMobileSheet();
   TABS.forEach((t) => ($("#view-" + t).hidden = t !== tab));
   if (tab === "dashboard") loadDashboard();
   else if (tab === "agents") loadAgents();
@@ -1576,7 +1577,19 @@ $("#shBtn").onclick = async () => {
 
 $("#modalClose").onclick = closeModal;
 $("#modalMask").onclick = (e) => { if (e.target.id === "modalMask") closeModal(); };
-$$(".navitem").forEach((b) => (b.onclick = () => setTab(b.dataset.tab)));
+
+// ── 移动端「更多」抽屉 ──
+function openMobileSheet() { $("#mobileSheet")?.removeAttribute("hidden"); }
+function closeMobileSheet() { $("#mobileSheet")?.setAttribute("hidden", ""); }
+$("#bottomnavMore")?.addEventListener("click", (e) => { e.stopPropagation(); openMobileSheet(); });
+$("#mobileSheet")?.addEventListener("click", (e) => {
+  const target = e.target.closest("[data-action='close-sheet']");
+  if (target) closeMobileSheet();
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMobileSheet(); });
+
+// ── 导航 ──
+$$(".navitem[data-tab]").forEach((b) => (b.onclick = () => setTab(b.dataset.tab)));
 
 // ── 子流程注册表（#575/#579/#580）──
 let _sfList = [];

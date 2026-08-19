@@ -51,20 +51,20 @@
 
     <!-- 桌面侧边导航 -->
     <nav class="sidebar" id="sidebar">
-      <button class="navitem" data-tab="dashboard"><span class="ic">▣</span>概览</button>
-      <button class="navitem" data-tab="safe"><span class="ic">🛡️</span>安全闸</button>
-      <button class="navitem" data-tab="proposals"><span class="ic">✨</span>提案</button>
-      <button class="navitem" data-tab="deployed"><span class="ic">🚀</span>已部署</button>
-      <button class="navitem" data-tab="subflows"><span class="ic">🔗</span>子流程</button>
-      <button class="navitem" data-tab="link_apis"><span class="ic">🔌</span>Link API</button>
-      <button class="navitem" data-tab="agents"><span class="ic">🤖</span>Agents</button>
-      <button class="navitem" data-tab="diagnostics"><span class="ic">🩺</span>诊断</button>
-      <button class="navitem" data-tab="notes"><span class="ic">📝</span>笔记</button>
-      <button class="navitem" data-tab="settings"><span class="ic">⚙️</span>设置</button>
-      <button class="navitem" data-tab="help"><span class="ic">📖</span>帮助</button>
-      <button class="navitem" data-tab="acp_tokens"><span class="ic">🤝</span>ACP 令牌</button>
-      <button class="navitem" data-tab="llm_settings"><span class="ic">🧠</span>LLM 设置</button>
-      <button class="navitem" data-tab="llm_agent"><span class="ic">💬</span>LLM 助手</button>
+      <button class="navitem" data-tab="dashboard"><img class="ic" src="/static/icons/ic-dashboard.svg" alt="" width="20" height="20" />概览</button>
+      <button class="navitem" data-tab="safe"><img class="ic" src="/static/icons/ic-safe.svg" alt="" width="20" height="20" />安全闸</button>
+      <button class="navitem" data-tab="proposals"><img class="ic" src="/static/icons/ic-proposals.svg" alt="" width="20" height="20" />提案</button>
+      <button class="navitem" data-tab="deployed"><img class="ic" src="/static/icons/ic-deployed.svg" alt="" width="20" height="20" />已部署</button>
+      <button class="navitem" data-tab="subflows"><img class="ic" src="/static/icons/ic-subflows.svg" alt="" width="20" height="20" />子流程</button>
+      <button class="navitem" data-tab="link_apis"><img class="ic" src="/static/icons/ic-link.svg" alt="" width="20" height="20" />Link API</button>
+      <button class="navitem" data-tab="agents"><img class="ic" src="/static/icons/ic-agents.svg" alt="" width="20" height="20" />Agents</button>
+      <button class="navitem" data-tab="diagnostics"><img class="ic" src="/static/icons/ic-diagnostics.svg" alt="" width="20" height="20" />诊断</button>
+      <button class="navitem" data-tab="notes"><img class="ic" src="/static/icons/ic-notes.svg" alt="" width="20" height="20" />笔记</button>
+      <button class="navitem" data-tab="settings"><img class="ic" src="/static/icons/ic-settings.svg" alt="" width="20" height="20" />设置</button>
+      <button class="navitem" data-tab="help"><img class="ic" src="/static/icons/ic-help.svg" alt="" width="20" height="20" />帮助</button>
+      <button class="navitem" data-tab="acp_tokens"><img class="ic" src="/static/icons/ic-acp.svg" alt="" width="20" height="20" />ACP 令牌</button>
+      <button class="navitem" data-tab="llm_settings"><img class="ic" src="/static/icons/ic-llm-settings.svg" alt="" width="20" height="20" />LLM 设置</button>
+      <button class="navitem" data-tab="llm_agent"><img class="ic" src="/static/icons/ic-llm.svg" alt="" width="20" height="20" />LLM 助手</button>
     </nav>
 
     <main class="content" id="content">
@@ -320,23 +320,37 @@
       <section class="view" id="view-llm_agent" hidden></section>
     </main>
 
-    <!-- 移动端底部导航 -->
+    <!-- 移动端底部导航：聚焦三大核心入口 + 更多 -->
     <nav class="bottomnav" id="bottomnav">
-      <button class="navitem" data-tab="dashboard"><span class="ic">▣</span>概览</button>
-      <button class="navitem" data-tab="safe"><span class="ic">🛡️</span>安全闸</button>
-      <button class="navitem" data-tab="proposals"><span class="ic">✨</span>提案</button>
-      <button class="navitem" data-tab="deployed"><span class="ic">🚀</span>已部署</button>
-      <button class="navitem" data-tab="subflows"><span class="ic">🔗</span>子流程</button>
-      <button class="navitem" data-tab="link_apis"><span class="ic">🔌</span>Link API</button>
-      <button class="navitem" data-tab="agents"><span class="ic">🤖</span>Agents</button>
-      <button class="navitem" data-tab="diagnostics"><span class="ic">🩺</span>诊断</button>
-      <button class="navitem" data-tab="notes"><span class="ic">📝</span>笔记</button>
-      <button class="navitem" data-tab="settings"><span class="ic">⚙️</span>设置</button>
-      <button class="navitem" data-tab="help"><span class="ic">📖</span>帮助</button>
-      <button class="navitem" data-tab="acp_tokens"><span class="ic">🤝</span>ACP 令牌</button>
-      <button class="navitem" data-tab="llm_settings"><span class="ic">🧠</span>LLM 设置</button>
-      <button class="navitem" data-tab="llm_agent"><span class="ic">💬</span>LLM 助手</button>
+      <button class="navitem" data-tab="proposals"><img class="ic" src="/static/icons/ic-proposals.svg" alt="" width="24" height="24" /><span>提案</span></button>
+      <button class="navitem" data-tab="deployed"><img class="ic" src="/static/icons/ic-deployed.svg" alt="" width="24" height="24" /><span>已部署</span></button>
+      <button class="navitem" data-tab="llm_agent"><img class="ic" src="/static/icons/ic-llm.svg" alt="" width="24" height="24" /><span>LLM助手</span></button>
+      <button class="navitem" id="bottomnavMore" data-action="more"><img class="ic" src="/static/icons/ic-more.svg" alt="" width="24" height="24" /><span>更多</span></button>
     </nav>
+
+    <!-- 移动端「更多」抽屉 -->
+    <div class="mobile-sheet" id="mobileSheet" hidden>
+      <div class="mobile-sheet-backdrop" data-action="close-sheet"></div>
+      <div class="mobile-sheet-panel">
+        <div class="mobile-sheet-head">
+          <span>全部功能</span>
+          <button class="btn ghost" data-action="close-sheet" aria-label="关闭">✕</button>
+        </div>
+        <div class="mobile-sheet-grid">
+          <button class="navitem" data-tab="dashboard"><img class="ic" src="/static/icons/ic-dashboard.svg" alt="" width="22" height="22" />概览</button>
+          <button class="navitem" data-tab="safe"><img class="ic" src="/static/icons/ic-safe.svg" alt="" width="22" height="22" />安全闸</button>
+          <button class="navitem" data-tab="subflows"><img class="ic" src="/static/icons/ic-subflows.svg" alt="" width="22" height="22" />子流程</button>
+          <button class="navitem" data-tab="link_apis"><img class="ic" src="/static/icons/ic-link.svg" alt="" width="22" height="22" />Link API</button>
+          <button class="navitem" data-tab="agents"><img class="ic" src="/static/icons/ic-agents.svg" alt="" width="22" height="22" />Agents</button>
+          <button class="navitem" data-tab="diagnostics"><img class="ic" src="/static/icons/ic-diagnostics.svg" alt="" width="22" height="22" />诊断</button>
+          <button class="navitem" data-tab="notes"><img class="ic" src="/static/icons/ic-notes.svg" alt="" width="22" height="22" />笔记</button>
+          <button class="navitem" data-tab="settings"><img class="ic" src="/static/icons/ic-settings.svg" alt="" width="22" height="22" />设置</button>
+          <button class="navitem" data-tab="help"><img class="ic" src="/static/icons/ic-help.svg" alt="" width="22" height="22" />帮助</button>
+          <button class="navitem" data-tab="acp_tokens"><img class="ic" src="/static/icons/ic-acp.svg" alt="" width="22" height="22" />ACP 令牌</button>
+          <button class="navitem" data-tab="llm_settings"><img class="ic" src="/static/icons/ic-llm-settings.svg" alt="" width="22" height="22" />LLM 设置</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div class="modal-mask" id="modalMask" hidden>

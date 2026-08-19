@@ -1,19 +1,24 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 72" role="img" aria-label="AutoFlow">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 40" fill="none">
   <defs>
-    <linearGradient id="afShield" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#5B8CFF"/>
-      <stop offset="1" stop-color="#2F6BFF"/>
+    <linearGradient id="brandGradWm" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#5B8CFF"/>
+      <stop offset="100%" stop-color="#2F6BFF"/>
     </linearGradient>
   </defs>
-  <g transform="translate(6,8) scale(0.22)">
-    <path d="M128 18 L222 54 V128 C222 184 178 220 128 240 C78 220 34 184 34 128 V54 Z" fill="url(#afShield)"/>
-    <g fill="none" stroke="#ffffff" stroke-width="17" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M84 176 C 86 132 166 150 172 88"/>
-      <path d="M150 102 L172 86 L194 70"/>
+  <!-- mark -->
+  <g transform="translate(0,0)">
+    <path d="M20 2c8 0 14 5 14 14 0 9-8 17-14 21-6-4-14-12-14-21C6 7 12 2 20 2z" fill="url(#brandGradWm)"/>
+    <g stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="9" y="13" width="8" height="8" rx="2" fill="rgba(255,255,255,0.18)"/>
+      <rect x="23" y="10" width="8" height="8" rx="2" fill="rgba(255,255,255,0.18)"/>
+      <rect x="16" y="23" width="8" height="8" rx="2" fill="rgba(255,255,255,0.18)"/>
+      <path d="M17 17 L23 14" fill="none"/>
+      <polyline points="21.5 13.2 23 14 22 15.4" fill="none" stroke-width="1.4"/>
+      <path d="M27 18 L24 22.5" fill="none"/>
+      <polyline points="23.2 21.2 24 22.5 22.4 22.8" fill="none" stroke-width="1.4"/>
     </g>
-    <circle cx="84" cy="176" r="13" fill="#ffffff"/>
   </g>
-  <text x="76" y="49" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="40" font-weight="700" letter-spacing="-0.5">
-    <tspan fill="#1f2933">Auto</tspan><tspan fill="#2F6BFF">Flow</tspan>
-  </text>
+  <!-- wordmark -->
+  <text x="48" y="26" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="20" font-weight="700" fill="#1f2933">Auto</text>
+  <text x="88" y="26" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="20" font-weight="700" fill="#2F6BFF">Flow</text>
 </svg>

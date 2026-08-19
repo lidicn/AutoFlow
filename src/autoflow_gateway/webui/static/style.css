@@ -51,6 +51,12 @@
   --sidebar-w-tablet: 168px;
   --bottomnav-h: 60px;
 
+  /* 安全区域（iOS notch / 灵动岛） */
+  --sat: env(safe-area-inset-top);
+  --sab: env(safe-area-inset-bottom);
+  --sar: env(safe-area-inset-right);
+  --sal: env(safe-area-inset-left);
+
   /* 字体 */
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -74,8 +80,15 @@ body {
   position: sticky; top: 0; z-index: 20;
   display: flex; align-items: center; justify-content: space-between;
   padding: 10px 16px;
+  padding-top: calc(10px + var(--sat));
   background: var(--surface);
   border-bottom: 1px solid var(--border);
+}
+/* iOS PWA 状态栏透传背景下，让顶栏背景延伸到状态栏 */
+@supports (-webkit-touch-callout: none) {
+  .topbar {
+    padding-top: max(10px, var(--sat));
+  }
 }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; }
 .brand .logo { display: block; width: 26px; height: 26px; }
@@ -126,7 +139,7 @@ body {
 
 /* 侧边导航（桌面） */
 .sidebar {
-  position: fixed; top: var(--topbar-h); left: 0; bottom: 0; width: var(--sidebar-w);
+  position: fixed; top: calc(var(--topbar-h) + var(--sat)); left: 0; bottom: 0; width: var(--sidebar-w);
   background: var(--surface); border-right: 1px solid var(--border);
   display: flex; flex-direction: column; padding: 12px 10px; gap: 4px; z-index: 10;
   overflow-y: auto;
@@ -136,13 +149,17 @@ body {
   padding: 11px 12px; border: none; background: transparent; color: var(--text-dim);
   border-radius: 10px; font-size: 15px; cursor: pointer; text-align: left;
 }
-.navitem .ic { width: 20px; text-align: center; }
+.navitem .ic { width: 20px; height: 20px; flex: 0 0 auto; }
 .navitem:hover { background: var(--surface-2); color: var(--text); }
 .navitem.active { background: var(--primary-weak); color: var(--primary); font-weight: 600; }
+.navitem.active .ic { filter: none; }
+.navitem .ic[src*=".svg"] { opacity: .9; }
+.navitem.active .ic[src*=".svg"] { opacity: 1; }
 
 /* 内容区 */
 .content {
-  flex: 1; padding: 18px; margin-left: var(--sidebar-w); margin-bottom: var(--bottomnav-h);
+  flex: 1; padding: 18px; margin-left: var(--sidebar-w);
+  margin-bottom: calc(var(--bottomnav-h) + var(--sab));
 }
 .view { animation: fade .15s ease; }
 @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
@@ -253,14 +270,64 @@ body {
   font-size: 14px; box-shadow: 0 6px 20px rgba(0,0,0,.25); max-width: 90vw;
 }
 
-/* 移动端底部导航 */
+/* 移动端底部导航：核心入口聚焦 */
 .bottomnav {
-  position: fixed; left: 0; right: 0; bottom: 0; height: var(--bottomnav-h);
+  position: fixed; left: 0; right: 0; bottom: 0;
+  height: calc(var(--bottomnav-h) + var(--sab));
+  padding-bottom: var(--sab);
   background: var(--surface); border-top: 1px solid var(--border);
   display: none; z-index: 20;
 }
-.bottomnav .navitem { flex-direction: column; gap: 2px; font-size: 11px; padding: 6px 0; border-radius: 0; }
-.bottomnav .navitem .ic { font-size: 17px; }
+.bottomnav .navitem {
+  flex: 1; flex-direction: column; gap: 3px;
+  font-size: 11px; padding: 6px 0 8px; border-radius: 0;
+  color: var(--text-muted);
+}
+.bottomnav .navitem .ic { width: 24px; height: 24px; }
+.bottomnav .navitem.active { color: var(--primary); background: transparent; font-weight: 600; }
+.bottomnav .navitem.active .ic { color: var(--primary); }
+.bottomnav .navitem span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 2px; }
+
+/* 移动端「更多」抽屉 */
+.mobile-sheet {
+  position: fixed; inset: 0; z-index: 40;
+  display: none; align-items: flex-end;
+}
+.mobile-sheet:not([hidden]) { display: flex; }
+.mobile-sheet-backdrop {
+  position: absolute; inset: 0;
+  background: rgba(15,23,42,.45);
+  animation: fadeIn .15s var(--ease);
+}
+.mobile-sheet-panel {
+  position: relative; width: 100%;
+  max-height: 78vh;
+  background: var(--surface);
+  border-radius: 20px 20px 0 0;
+  padding: 16px 16px calc(20px + var(--sab));
+  box-shadow: 0 -10px 40px rgba(0,0,0,.15);
+  animation: slideUp .22s var(--ease);
+  overflow-y: auto;
+}
+.mobile-sheet-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 12px; padding: 0 4px;
+  font-weight: 700; font-size: 16px; color: var(--text);
+}
+.mobile-sheet-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+.mobile-sheet-grid .navitem {
+  flex-direction: column; gap: 6px;
+  padding: 12px 4px; border-radius: 12px;
+  font-size: 12px; text-align: center; color: var(--text-dim);
+}
+.mobile-sheet-grid .navitem .ic { width: 22px; height: 22px; }
+.mobile-sheet-grid .navitem.active { background: var(--primary-weak); color: var(--primary); }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes slideUp { from { transform: translateY(100%); } to { transform: none; } }
 
 /* 工作区：最近完成日志 */
 .ws-completed { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
@@ -288,14 +355,15 @@ body {
 }
 @media (max-width: 768px) {
   .sidebar { display: none; }
-  .content { margin-left: 0; padding: 14px; }
+  .content { margin-left: 0; padding: 14px; padding-bottom: calc(14px + var(--sab)); }
   .bottomnav { display: flex; }
   .grid.cols-4 { grid-template-columns: repeat(2, 1fr); }
   .view-head h2 { font-size: 17px; }
-  /* 顶栏紧凑：图标按钮收窄，避免小屏溢出 */
-  .topbar { padding: 8px 12px; gap: 6px; }
+  /* 顶栏紧凑：图标按钮收窄，避免小屏溢出；Safe Area 已在 --sat 处理 */
+  .topbar { padding: 8px 12px; padding-top: calc(8px + var(--sat)); gap: 6px; }
   .topbar-right { gap: 2px; }
   .topbar .btn.ghost { padding: 6px 7px; font-size: 15px; }
+  .mobile-sheet-grid { grid-template-columns: repeat(4, 1fr); }
 }
 @media (max-width: 420px) {
   .grid.cols-4 { grid-template-columns: 1fr; }
@@ -392,7 +460,7 @@ body {
 #view-llm_agent:not([hidden]) {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - var(--topbar-h) - var(--bottomnav-h)); /* 占满主内容区（扣除顶部与底部导航） */
+  height: calc(100vh - var(--topbar-h) - var(--bottomnav-h) - var(--sat) - var(--sab)); /* 占满主内容区（扣除顶部、底部导航与安全区域） */
   overflow: hidden;
   position: relative; /* 输入条 absolute 定位基准，避免 fixed 跑到全屏 */
 }

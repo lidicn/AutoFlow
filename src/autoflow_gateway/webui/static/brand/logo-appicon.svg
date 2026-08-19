@@ -1,19 +1,20 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="AutoFlow">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" fill="none">
   <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#5B8CFF"/>
-      <stop offset="1" stop-color="#2F6BFF"/>
+    <linearGradient id="appIconGrad" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#5B8CFF"/>
+      <stop offset="100%" stop-color="#2F6BFF"/>
     </linearGradient>
   </defs>
-  <!-- 满底方（iOS apple-touch-icon / maskable 由系统裁圆角） -->
-  <rect width="1024" height="1024" fill="url(#g)"/>
-  <!-- 白色盾 + 品牌蓝流动箭头，居中、约占安全区 -->
-  <g transform="translate(256,256) scale(2)">
-    <path d="M128 18 L222 54 V128 C222 184 178 220 128 240 C78 220 34 184 34 128 V54 Z" fill="#ffffff"/>
-    <g fill="none" stroke="#2F6BFF" stroke-width="17" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M84 176 C 86 132 166 150 172 88"/>
-      <path d="M150 102 L172 86 L194 70"/>
-    </g>
-    <circle cx="84" cy="176" r="13" fill="#2F6BFF"/>
+  <!-- 圆角方形底，适配 iOS 图标 -->
+  <rect width="40" height="40" rx="9" fill="url(#appIconGrad)"/>
+  <!-- 内部节点 flow（白色） -->
+  <g stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="9" y="13" width="8" height="8" rx="2" fill="rgba(255,255,255,0.18)"/>
+    <rect x="23" y="10" width="8" height="8" rx="2" fill="rgba(255,255,255,0.18)"/>
+    <rect x="16" y="23" width="8" height="8" rx="2" fill="rgba(255,255,255,0.18)"/>
+    <path d="M17 17 L23 14" fill="none"/>
+    <polyline points="21.5 13.2 23 14 22 15.4" fill="none" stroke-width="1.4"/>
+    <path d="M27 18 L24 22.5" fill="none"/>
+    <polyline points="23.2 21.2 24 22.5 22.4 22.8" fill="none" stroke-width="1.4"/>
   </g>
 </svg>
