@@ -3635,6 +3635,7 @@ class Gateway:
             "node_count": len(flow.get("nodes", [])),
             "deployed_node_ids": gateway_node_ids,
             "source_proposal": pid,
+            "source": (p.source if p is not None else "compiler"),
             "nr_url": getattr(self.cfg, "nr_url", ""),
             "deployed_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -4881,6 +4882,7 @@ class Gateway:
             "node_count": len(nodes),
             "deployed_node_ids": gateway_node_ids,
             "source_proposal": None,
+            "source": "raw",
             "nr_url": getattr(self.cfg, "nr_url", ""),
             "deployed_at": datetime.now(timezone.utc).isoformat(),
             "validation_errors": len(errors),
@@ -7598,6 +7600,7 @@ class Gateway:
                     "purpose": flow.get("info", ""),
                     "entities_touched": self._collect_entities(flow),
                     "node_count": len(flow.get("nodes", [])),
+                    "source": "manual",
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 })
                 self.confirm.approve(op_id, reviewer)

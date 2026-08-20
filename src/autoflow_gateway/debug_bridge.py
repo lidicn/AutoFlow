@@ -488,6 +488,8 @@ class DebugBridge:
                 "topic": topic,
                 "payload_preview": preview,
                 "payload_full": full,
+                "payload_truncated": len(payload_str) > self.max_payload_chars,
+                "payload_full_length": len(payload_str),
                 "timestamp": ts_num,
                 "received_at": time.time(),
                 "retain": retain,
@@ -498,11 +500,72 @@ class DebugBridge:
 
     @staticmethod
     def _truncate(s: str, n: int) -> str:
+        """截断字符串；若内容像 JSON（{ / [ 开头），保证截断结果仍是合法 JSON。
+
+        Bug（深度测试报告 Bug 2）：旧实现对 payload 中段切断再追加
+        ``(truncated,N chars)`` 文本，当 payload 本身是 JSON 字符串时，
+        截断结果不再是合法 JSON，调用方 json.loads 必失败。
+        修复：JSON 场景闭合未完成的定界符/字符串字面量，并把截断标记以
+        结构内字段 ``__truncated__`` 注入（如 ``{"a":1,"__truncated__":true}``），
+        使 json.loads 永远成功且能识别截断。边缘情况（如切断在悬挂 key 后）
+        若仍不合法，退回 ``{"__truncated__":true,"head":"<原始前缀>"}`` 包裹，
+        依旧合法 JSON——彻底杜绝「截断后无法解析」。
+        非 JSON 场景保持原行为，尾部追加 ``(truncated,N chars)`` 人类可读标记。"""
         if s is None:
             return ""
         if len(s) <= n:
             return s
-        return s[:n] + f"...(truncated,{len(s) - n} chars)"
+        head = s[:n]
+        stripped = head.lstrip()
+        first = stripped[:1]
+        if first in ("{", "[", '"'):
+            depth: List[str] = []
+            in_str = False
+            esc = False
+            for ch in head:
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == "\\":
+                        esc = True
+                    elif ch == '"':
+                        in_str = False
+                else:
+                    if ch == '"':
+                        in_str = True
+                    elif ch in "{[":
+                        depth.append(ch)
+                    elif ch in "}]":
+                        if depth:
+                            depth.pop()
+            if in_str:
+                head += '"'                       # 闭合当前字符串字面量
+            while depth:
+                d = depth.pop()
+                head += "}" if d == "{" else "]"  # 闭合未完成的容器
+            head = head.rstrip()
+            # 去掉闭合后残留的尾随 , / :（如 [1,2,3, 或 {"a":1,"b":）
+            while head.endswith(",") or head.endswith(":"):
+                head = head[:-1].rstrip()
+            if first == '"':
+                # 裸字符串：闭合后已是合法 JSON 字符串，直接返回
+                try:
+                    json.loads(head)
+                    return head
+                except Exception:
+                    return json.dumps({"__truncated__": True, "length": len(s),
+                                       "head": head}, ensure_ascii=False)
+            # 对象/数组：把截断标记作为末位字段注入（插在末位定界符之前）
+            # 对象用 key:value；数组不能出现 ":"，改为追加一个完整对象元素
+            cand = (head[:-1] + ',"__truncated__":true}') if first == "{" \
+                else (head[:-1] + ',{"__truncated__":true}]')
+            try:
+                json.loads(cand)                  # 合法才用；否则退回包裹（永远合法）
+                return cand
+            except Exception:
+                return json.dumps({"__truncated__": True, "length": len(s),
+                                   "head": head}, ensure_ascii=False)
+        return head + f"...(truncated,{len(s) - n} chars)"
 
     def _push(self, ev: Dict[str, Any]) -> None:
         with self._lock:
