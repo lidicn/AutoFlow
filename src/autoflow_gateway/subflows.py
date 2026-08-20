@@ -714,14 +714,51 @@ for _n, _o in _SUBFLOW_OUTPUTS.items():
         SUBFLOWS[_n].outputs = _o
 
 
+# 注册表 store 解析（get_subflow 统一入口）────────────────────────────
+# 设计取舍（D23 修复）：get_subflow 此前只依赖模块级单例 _registry_store，
+# 而该单例仅在 Gateway.__init__ set_registry_store 时注入。任何『未实例化
+# Gateway』的编译上下文（独立进程 / import-time 编译 / verify_flow /
+# simulate_flow / 单测 / 模块被重新 import 重置全局）下，单例为 None，
+# 注册表分支被静默跳过 → 已注册的 imported 子流程查不到 → 间歇性
+# C_SUBFLOW_UNKNOWN（实验室已实证：DB 行 status=active 且 nr_subflow_id 有效，
+# 但 _registry_store=None 时 get_subflow 仍返回 None）。
+# 自愈：单例缺失时按需构造并缓存一个 TaskStore(get_config())，读同一份
+# autoflow.db，保证注册表必被查到。仅当构造也失败（config/DB 不可用）时
+# 才退回 None（与旧行为一致，fail-safe）。
+_FALLBACK_STORE_UNSET = "_unset"   # 哨兵：尚未尝试构造
+_fallback_store = _FALLBACK_STORE_UNSET
+
+
+def _resolve_registry_store(registry_store=None):
+    """解析 get_subflow 实际要查的注册表 store。
+    - 调用方显式传入 registry_store 时优先；
+    - 否则用网关启动时注入的模块级单例 _registry_store；
+    - 若两者皆空 → 自愈：按需构造并缓存 TaskStore(get_config())（D23）。"""
+    if registry_store is not None:
+        return registry_store
+    global _registry_store
+    if _registry_store is not None:
+        return _registry_store
+    global _fallback_store
+    if _fallback_store == _FALLBACK_STORE_UNSET:
+        try:
+            from .config import get_config
+            from .task_store import TaskStore
+            _fallback_store = TaskStore(get_config())
+        except Exception:
+            _fallback_store = False   # 构造失败：标记，避免每次调用都重试
+    return _fallback_store if _fallback_store is not False else None
+
+
 def get_subflow(name: str, registry_store=None) -> Optional[SubflowSpec]:
     # 1) 网关预置（SUBFLOWS 硬编码清单）优先
     spec = SUBFLOWS.get(name)
     if spec is not None:
         return spec
     # 2) 查注册表（用户从 NR 自省导入的 imported 且 active 子流程）
-    #    registry_store 可由调用方传入；否则用网关启动时注入的模块级单例。
-    store = registry_store if registry_store is not None else _registry_store
+    #    registry_store 可由调用方传入；否则用网关注入单例；单例缺失时
+    #    _resolve_registry_store 会自愈构造 TaskStore 查同一份 DB（D23）。
+    store = _resolve_registry_store(registry_store)
     if store is not None:
         meta = store.get_subflow_meta(name)
         if meta and meta.get("status") == "active":
@@ -758,12 +795,15 @@ def get_subflow(name: str, registry_store=None) -> Optional[SubflowSpec]:
 
 
 # 注册表 store 注入点（模块级单例）。网关启动时调用 set_registry_store(gateway.task_store)
-# 注入；离线/测试可手动注入。get_subflow 查注册表即用此单例（除非显式传 registry_store）。
+# 注入；离线/测试可手动注入。get_subflow 查注册表优先用此单例，但即便单例为 None
+# （未实例化 Gateway 的编译上下文），get_subflow 也会经 _resolve_registry_store 自愈
+# 构造 TaskStore 查同一份 autoflow.db，故注册表始终可达（D23 修复）。
 _registry_store = None
 
 
 def set_registry_store(store) -> None:
-    """注入 TaskStore 实例，使 get_subflow 能查 subflow_registry 表。"""
+    """注入 TaskStore 实例，使 get_subflow 能查 subflow_registry 表。
+    注入为可选加速/覆盖手段；即便不注入，get_subflow 也会自愈读取注册表。"""
     global _registry_store
     _registry_store = store
 

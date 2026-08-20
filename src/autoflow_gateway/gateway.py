@@ -6046,6 +6046,33 @@ class Gateway:
                 n["_af_debug_proxy"] = True
                 # 代理自身不插 tap（保持 sink 语义，不进 trace）
                 continue
+            # D25/round12：link out / link in 经 Node-RED link 机制传递消息（无 wires 输出/输入），
+            # 普通 sink 跳过会让它们及下游在 e2e 中既不被计入计划路径、也不被记录 → 误报断点。
+            # 此处为二者各插一个 tap（记录自身 id），使 link 链路可被追踪；保留其原有 wires
+            # （link-in 经 wires 转发下游，link-out 经 link 广播），tap 作为额外分支不影响逻辑。
+            if n.get("type") in ("link out", "link in"):
+                scope.append(n["id"])
+                tap_id = "af_e2e_tap_" + secrets.token_hex(4)
+                tap = {
+                    "id": tap_id, "type": "function", "z": n.get("z"),
+                    "name": "__e2e__ " + (n.get("name") or n.get("id")),
+                    "func": _tap_fn(n["id"]), "outputs": 1, "_af_trace_tap": True,
+                    "x": (n.get("x", 100) + 140), "y": (n.get("y", 100) + 60),
+                    "wires": [[]],
+                }
+                wires = n.get("wires")
+                if not wires:
+                    n["wires"] = [[tap_id]]
+                else:
+                    new_wires = []
+                    for out in wires:
+                        if isinstance(out, list):
+                            new_wires.append(out + [tap_id])
+                        else:
+                            new_wires.append([out, tap_id])
+                    n["wires"] = new_wires
+                taps.append(tap)
+                continue
             if n.get("type") in SINK or n.get("_af_trace_tap") or n.get("_af_err_sink"):
                 continue
             scope.append(n["id"])
@@ -6081,9 +6108,16 @@ class Gateway:
         out["nodes"] = nodes + taps + [catch, err_sink]
         return out
 
-    def _derive_planned_path(self, flow: Dict) -> List[str]:
+    def _derive_planned_path(self, flow: Dict,
+                             start_ids: Optional[List[str]] = None) -> List[str]:
         """从入口节点（inject / 无入边）沿 wires 做 BFS，给出『计划路径』节点 id 序列。
-        作为未显式给定 expected_path 时的默认期望路径。"""
+        作为未显式给定 expected_path 时的默认期望路径。
+
+        D24/round12：多触发源 flow（如 inject + server-state-changed 汇聚到同一动作）
+        下，若以『无入边节点』为起点，会把**未被触发**的事件入口（server-state-changed
+        无入边、但本轮只触发了 inject）也纳入期望路径 → 其下游永不被点燃 → 误报『断点』。
+        故允许调用方传入实际触发节点 id（inject_ids），此时 BFS 只从该集合起算，
+        未触发的事件入口不计入 expected_count。start_ids 为空/None 时回退旧行为。"""
         nodes = flow.get("nodes", [])
         by_id = {n["id"]: n for n in nodes if "id" in n}
         incoming: Dict[str, List[str]] = {}
@@ -6092,8 +6126,24 @@ class Gateway:
                 if isinstance(w, list):
                     for t in w:
                         incoming.setdefault(t, []).append(n["id"])
-        starts = [n["id"] for n in nodes
-                   if n.get("type") == "inject" or not incoming.get(n["id"])]
+        # D25/round12：link out → link in 经 Node-RED link 机制传递（无 wires），
+        # BFS 需识别 link 对，否则 link 链路后的节点永远走不到、被误报断点。
+        # 解析：link out 的 links 集合 与 link in 的 links 集合相交 → 视为一条隐式边。
+        link_targets: Dict[str, List[str]] = {}
+        for n in nodes:
+            if n.get("type") != "link out":
+                continue
+            ol = set(n.get("links") or [])
+            if not ol:
+                continue
+            for m in nodes:
+                if m.get("type") == "link in" and (set(m.get("links") or []) & ol):
+                    link_targets.setdefault(n["id"], []).append(m["id"])
+        if start_ids:
+            starts = [s for s in start_ids if s in by_id]
+        else:
+            starts = [n["id"] for n in nodes
+                      if n.get("type") == "inject" or not incoming.get(n["id"])]
         seen: set = set()
         order: List[str] = []
         stack = list(starts)
@@ -6109,6 +6159,9 @@ class Gateway:
             for w in (n.get("wires") or []):
                 if isinstance(w, list):
                     stack.extend(w)
+            # link 机制隐式边：link out 广播到的 link in
+            if nid in link_targets:
+                stack.extend(link_targets[nid])
         return order
 
     def _node_label(self, nodes: Dict, nid) -> Optional[str]:
@@ -6145,7 +6198,8 @@ class Gateway:
                 f"（未捕获到运行时错误，可能是连线断裂或节点未产出 msg）。")
 
     def _compare_trace(self, flow: Dict, trace: List[Dict],
-                       expected_path: Optional[List] = None) -> Dict[str, Any]:
+                       expected_path: Optional[List] = None,
+                       trigger_ids: Optional[List[str]] = None) -> Dict[str, Any]:
         """把真实 trace 与期望路径比对，产出断点报告。
 
         D8/round6：switch 的未命中分支 ≠ 断点——若某 switch 有其它分支被 reached，
@@ -6184,7 +6238,8 @@ class Gateway:
         if expected_path:
             expected_ids = [_norm_ep(p) for p in expected_path]
         else:
-            expected_ids = self._derive_planned_path(flow)
+            planned_starts = list(trigger_ids) if trigger_ids else None
+            expected_ids = self._derive_planned_path(flow, start_ids=planned_starts)
         # 只比对【可插桩】节点：inject/debug/link/catch 等不加 tap，永远不会
         # 在 trace 里自报，若纳入比对会被冤枉成『断点』（真机实测：曾把 inject
         # 触发器误报为 failed_at）。故按 E2E_SINK_TYPES 过滤期望路径。
@@ -6491,7 +6546,7 @@ class Gateway:
                         e["id"] = id_map[e["id"]]
                 return e
             exp = [_map_ep(x) for x in exp]
-        report = self._compare_trace(remapped, trace, exp)
+        report = self._compare_trace(remapped, trace, exp, trigger_ids=inject_ids)
         # 8) 可选：HA 副作用后置校验
         post = None
         if expected_postconditions:
@@ -6849,7 +6904,7 @@ class Gateway:
                         e["id"] = id_map[e["id"]]
                 return e
             exp = [_map_ep(x) for x in exp]
-        report = self._compare_trace(compare_flow, trace, exp)
+        report = self._compare_trace(compare_flow, trace, exp, trigger_ids=inject_ids)
         if entity_warns:
             report["entity_warnings"] = entity_warns
 

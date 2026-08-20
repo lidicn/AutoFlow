@@ -2406,6 +2406,12 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200,
     （被 R13 抓出的 22 例真实提案皆是此因）。"""
     last = None
     head = None
+    # chain_advanced：串行链是否已前进（即是否已有一个『真·串行步骤』建立了
+    # last）。并行块/ fire-and-forget 子流程不前进链（无单一尾节点），其后同级
+    # 步骤仍应从入口(entry)扇出——与并行臂一致（D22：分支内『并行』块后紧跟
+    # 串行动作曾因 head 被首臂占用而 head_is_first=False，且 sources/last 皆空，
+    # 导致该串行动作无入边、静默丢弃）。
+    chain_advanced = False
     sources = list(sources)
     # R4(#round4)：记录「喂给 last 那一步的上游 id」。switch 之后的并行块要回挂到
     # 这里，而不是挂在 switch 的输出上（详见下方注释）。
@@ -2577,15 +2583,20 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200,
         elif last:
             em.connect(last, nid)
             last_upstream = [last]
-        elif entry is not None and head_is_first:
+        elif entry is not None and not chain_advanced:
             # C5 / iss_69c34b1539：分支/门 体首步（无 sources/last）从该体入口输出口
             # 扇出（定向 connect_out），与并行块 entry 机制一致，避免首节点孤儿(R13)。
+            # D22：『并行』块不前进链（无单一尾节点），其后同级串行动作仍应从此入口
+            # 扇出（与并行臂平级），故用 not chain_advanced 而非 head_is_first——
+            # 否则并行首臂占用 head 后，并行后的串行步 head_is_first=False 且无
+            # sources/last，落入 else 静默丢边。
             em.connect_out(entry[0], entry[1], nid)
             last_upstream = []
         else:
             last_upstream = []
         if not fire_and_forget:
             last = tail_id
+            chain_advanced = True
         else:
             # D14/round8：link_out 异步子流程（如 demo_notify）后仍有同级串行步骤
             # → 旧实现静默从调用前上游扇出（后续动作与通知并行执行），时序语义被
