@@ -585,10 +585,11 @@ class NodeRedClient:
     _SINGLE_OUTPUT_TYPES = {
         "inject": 1, "delay": 1, "api-current-state": 1, "change": 1,
         "http request": 1,
-        # link out / debug 是 0 输出的终节点（wires:[] 完全合法），
-        # 标成 1 会误触发 R10「期望 1 个 output 却得 0 个」并拦死部署（Bug A）。
-        "link out": 0, "link call": 1, "debug": 0,
-        "function": 1, "api-call-service": 1, "event-state": 1,
+        # link out / debug / api-call-service 是 0 输出的终节点（wires:[] 完全合法）。
+        # 标成 1 会误触发 R10「期望 1 个 output 却得 0 个」并拦死部署（Bug A / RW-R10）。
+        # api-call-service 是 HA websocket 的终端调用节点，不向下游发 msg，故 outputs=0。
+        "link out": 0, "link call": 1, "debug": 0, "api-call-service": 0,
+        "function": 1, "event-state": 1,
     }
 
     def _lint_flows(self, flows: List[Dict]) -> List[str]:
@@ -947,7 +948,31 @@ class NodeRedClient:
                 # 行为：POST /flow 时 NR 会重新生成 flow id（不采纳我们传的 id），
                 # 且 POST 不持久化节点；PUT /flow/:id 能落盘却要求 flow 已存在。
                 # 故三步：① POST 建壳拿真实 id R ② 把节点 z 改写为 R ③ PUT /flow/R 补节点。
-                created = self.create_flow(flow_data, force=force, allow_prod=allow_prod)
+                try:
+                    created = self.create_flow(flow_data, force=force, allow_prod=allow_prod)
+                except Exception as _ce:
+                    # RW-DUP：NR 对「id 已存在」偶发返回 400 duplicate id（尤其中文 flow id /
+                    # 既有同名节点 id 冲突，导致 GET 探存失效而误走 POST）。此时该 flow / 其节点
+                    # 实际已在 NR 中存在，降级为 PUT 整体替换（必要时 DELETE 后重建），避免二次
+                    # 部署（同一 DSL 场景名→稳定中文 slug→节点 id 全局重复）必然失败。
+                    if "duplicate" in str(_ce).lower():
+                        try:
+                            result = self._json("PUT", f"/flow/{flow_id}", json=flow_data)
+                            nodes_count = len(flow_data.get("nodes", []))
+                            self._flow_cache[flow_id] = {
+                                "nodes_count": nodes_count,
+                                "timestamp": datetime.now().isoformat(),
+                            }
+                            _log_operation("UPDATE_FLOW", f"flow={flow_id} | nodes={nodes_count} (dup-fallback)")
+                            return {"id": flow_id, "created": False, "raw": result}
+                        except Exception:
+                            try:
+                                self._json("DELETE", f"/flow/{flow_id}")
+                            except Exception:
+                                pass
+                            created = self.create_flow(flow_data, force=force, allow_prod=allow_prod)
+                    else:
+                        raise
                 real_id = created.get("id") or flow_id
                 for n in flow_data.get("nodes", []):
                     n["z"] = real_id

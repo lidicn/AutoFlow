@@ -493,7 +493,7 @@ function _renderProposals(items) {
       return `
       <div class="item">
         <div class="row">
-          <div><span class="title">${esc(p.title)}</span> ${p.id ? `<span class="meta">(${esc(p.id.slice(0,12))}…)</span>` : ""}</div>
+          <div><span class="title">${esc(p.title)}</span> ${p.id ? `<span class="meta" title="${esc(p.id)}">(${esc(p.id)})</span>` : ""}</div>
           <div>${badge("kind-" + kindBadge, kindBadge)} ${badge("st-" + p.status, p.status)}
             ${gatePassed ? badge("ok", "闸门 PASS") : (gate.passed === false ? badge("danger", "闸门 FAIL") : "")}
             ${badge(srcBadgeCls, srcBadgeTxt)} ${badge(reviewBadgeCls, reviewBadgeTxt)}
@@ -516,8 +516,8 @@ function _renderProposals(items) {
           <button class="btn sm" data-del="${esc(p.id)}">删除</button>
           ${p.archived_at ? `<button class="btn sm" data-unarch="${esc(p.id)}">取消归档</button>` : `<button class="btn sm" data-arch="${esc(p.id)}">归档</button>`}
           ${p.deployed_flow_id && !isSubflow ? `<button class="btn sm danger" data-undep="${esc(p.deployed_flow_id)}">撤回</button>
-            <span class="badge ok" style="margin-left:4px">已部署: ${esc(p.deployed_flow_id.slice(0,12))}…</span>` : ""}
-          ${p.deployed_flow_id && isSubflow ? `<span class="badge ok" style="margin-left:4px">已注册: ${esc(p.deployed_flow_id.slice(0,12))}…</span>` : ""}
+            <span class="badge ok" style="margin-left:4px">已部署: ${esc(p.deployed_flow_id)}</span>` : ""}
+          ${p.deployed_flow_id && isSubflow ? `<span class="badge ok" style="margin-left:4px">已注册: ${esc(p.deployed_flow_id)}</span>` : ""}
         </div>
       </div>`;
     }).join("");
@@ -682,7 +682,7 @@ async function loadDeployed() {
     list.innerHTML = items.map((d) => `
       <div class="item${d.stale ? " stale" : ""}">
         <div class="row">
-          <div><span class="title">${esc(d.label)}</span> <span class="meta">(${esc((d.flow_id||'').slice(0,12))}…)</span></div>
+          <div><span class="title">${esc(d.label)}</span> <span class="meta" title="${esc(d.flow_id||'')}">(${esc(d.flow_id||'')})</span></div>
           <div>${d.stale ? badge("stale", "注册表漂移") : badge("ok", "已部署")}</div>
         </div>
         <div class="desc">来源 agent：${esc(d.owner_agent)} ｜ 节点数：${esc(d.node_count ?? "?")} ｜ ${fmtTime(d.deployed_at)}</div>
