@@ -6066,6 +6066,23 @@ class Gateway:
                 n["type"] = "function"
                 n["func"] = "return msg;"
                 n["outputs"] = 1
+                # WB30 BUG-E2E-1 修复：debug 在 NR 原始导出中 wires=[]（0 输出终节点形态），
+                # 转 function 透传代理后 declared outputs=1，但 wires 仍是 0 个数组 →
+                # 部署侧 R10「期望 1 个 output 却得 0 个 wires 数组」拦截，导致所有
+                # flow_json= 输入的 e2e 在 stage=deploy 失败（dsl= 路径因编译产物 wires=[[]] 正常）。
+                # 此处把 wires 归一化为 1 个 output 数组（保留原下游目标，无则 [[]]）。
+                w = n.get("wires")
+                if isinstance(w, list) and len(w) == 1 and isinstance(w[0], list):
+                    pass  # 已是 [[...]] 合法形态（如 dsl 编译产物），保留原下游
+                else:
+                    flat = []
+                    if isinstance(w, list):
+                        for x in w:
+                            if isinstance(x, list):
+                                flat.extend(x)
+                            elif isinstance(x, str):
+                                flat.append(x)
+                    n["wires"] = [flat]
                 n["_af_debug_proxy"] = True
                 # 代理自身不插 tap（保持 sink 语义，不进 trace）
                 continue
