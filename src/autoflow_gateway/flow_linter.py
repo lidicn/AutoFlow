@@ -621,6 +621,8 @@ def lint_flow(flow: Dict[str, Any], b1_unreachable: bool = False) -> List[Dict[s
     issues.extend(_lint_trigger_duration(nodes))
     # R39：server-state-changed 的 ifState 为空 → warning（任意变化即触发，可能非作者本意）
     issues.extend(_lint_empty_ifstate(nodes))
+    # R40：exec/function/template 危险代码扫描 → warning（软提示，不硬拦）
+    issues.extend(_lint_dangerous_code(nodes))
     issues.extend(_lint_missing_z(nodes))
     # R25: comment 节点被当作消息中转（带 wires 或被接入主链）→ warning（对齐压测报告 Bug-3）
     issues.extend(_lint_comment_relay(nodes))
@@ -1707,6 +1709,84 @@ def _lint_empty_ifstate(nodes: List[Dict[str, Any]]) -> List[Dict[str, str]]:
                 f"（含不属于你关心的状态）。若你本意是「仅在 on/off 等特定状态触发」，请补全 "
                 f"`ifState`（DSL 写法：`触发: <实体> <状态值>`）。"
                 f"若你确实要监听「任意变化」（捕获全部状态脉冲），可忽略本条警告。"
+            ),
+        })
+    return out
+
+
+# ── R40：危险代码扫描层（exec/function/template 代码级软警告）──
+# 决策点1-B（用户采纳）：对 exec/function/template 节点的 command/func/template 字段做
+# 轻量关键字黑名单扫描。命中仅发 warning（不硬拦），保留 HA 自动化合法能力
+# （exec/function/template 属白名单合法节点类型）。这是「纵深防御」的软提示层，
+# 与 vhass 闸（对黑箱 function 因无法建模副作用 fail-closed）互补。
+# 注意：静态字符串匹配只能抓「明文」危险调用，无法防混淆绕过（如字符串拼接/编码）。
+# 真恶意 agent 仍可绕过，故本层定位为「善意提醒 + 人审辅助」，非安全硬闸。
+_DANGEROUS_CODE_PATTERNS = (
+    # 命令执行 / 子进程
+    ("child_process", "调用 Node.js child_process（可执行任意系统命令）"),
+    ("require('child_process')", "require child_process（可 exec 系统命令）"),
+    ("require(\"child_process\")", "require child_process（可 exec 系统命令）"),
+    ("exec(", "调用 exec（执行系统命令）"),
+    ("execSync", "调用 execSync（同步执行系统命令）"),
+    ("spawn(", "调用 spawn（启动子进程）"),
+    ("spawnSync", "调用 spawnSync（同步启动子进程）"),
+    # 文件系统
+    ("fs.readFileSync", "读取文件（fs.readFileSync）"),
+    ("fs.readFile", "读取文件（fs.readFile）"),
+    ("fs.writeFile", "写入文件（fs.writeFile）"),
+    ("fs.unlink", "删除文件（fs.unlink）"),
+    ("fs.rmdir", "删除目录（fs.rmdir）"),
+    ("fs.rm(", "递归删除（fs.rm）"),
+    ("require('fs')", "require fs 文件系统模块"),
+    ("require(\"fs\")", "require fs 文件系统模块"),
+    # 破坏性命令
+    ("rm -rf", "危险 shell 命令 rm -rf（递归强制删除）"),
+    ("rm -fr", "危险 shell 命令 rm -fr"),
+    ("format(", "可能格式化（format 调用，需人工确认语境）"),
+    # 网络/SSRF
+    ("169.254.169.254", "指向云元数据服务 IP（SSRF 风险，可窃取实例凭证）"),
+    ("metadata.google.internal", "指向 GCP 元数据服务（SSRF 风险）"),
+    ("100.100.100.200", "指向阿里云元数据服务 IP（SSRF 风险）"),
+    # MQTT 投毒
+    ("$SYS/", "订阅/发布 MQTT $SYS 主题（broker 内部状态，恶意可读写）"),
+)
+
+
+def _lint_dangerous_code(nodes: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    for n in nodes:
+        nid = n.get("id") or "?"
+        ntype = n.get("type")
+        # 取待扫描的代码片段字段
+        code = ""
+        if ntype == "function":
+            code = n.get("func") or ""
+        elif ntype == "exec":
+            # exec 节点的 command 字段 + 拼接的 addpay
+            code = n.get("command") or ""
+            if n.get("addpay"):
+                code += " " + str(n.get("append", ""))
+        elif ntype == "template":
+            code = n.get("format") or n.get("template") or ""
+        else:
+            continue
+        if not isinstance(code, str) or not code.strip():
+            continue
+        hits = []
+        for pat, desc in _DANGEROUS_CODE_PATTERNS:
+            if pat in code:
+                hits.append(desc)
+        if not hits:
+            continue
+        out.append({
+            "level": "warning", "rule": "R40", "node_id": nid,
+            "node_type": ntype,
+            "message": (
+                f"`{ntype}` 节点的代码含**潜在危险调用**：{'；'.join(hits)}。"
+                f"这类节点在 NR 运行时拥有 Node.js 进程权限，可被执行系统命令/读文件/SSRF/"
+                f"MQTT 投毒，危害 NR 服务器安全。若这是你预期的合法自动化（如调用本地脚本），"
+                f"可忽略本条警告；否则请改用更安全的替代（如 api-call-service 调用 HA 服务、"
+                f"http request 走白名单地址）。部署前请人工复核该节点代码。"
             ),
         })
     return out
