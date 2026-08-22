@@ -2390,13 +2390,15 @@ class Gateway:
                 log_path=self._telemetry_log),
         }
 
-    def get_flow(self, flow_id: str) -> Dict[str, Any]:
+    def get_flow(self, flow_id: str, summary: bool = False) -> Dict[str, Any]:
         """只读：取回已部署 flow 的完整节点图 + 来源标记。
 
         供 agent 回看编译/部署产物（验证 propose_dsl 落地的 flow、或检视线上 tab），
         无需进 WebUI。节点图来自 NR(get_flow)，来源(source)来自 state 的 flow catalog。
         - flow_id：NR flow id（如 '57be9a8f1fca2bcd'）。
-        - 返回 {ok, flow_id, flow_json:{nodes}, source, label, node_count}。
+        - summary：True 时不返回 flow_json 全节点（省 token），改为返回 node_type_hist
+          类型直方图；默认 False（返回完整节点图，供需要检视连线的场景）。
+        - 返回 {ok, flow_id, flow_json:{nodes}|node_type_hist, source, label, node_count}。
         - 空 id / NR 无该 flow / 无 nodes → ok=False 并带原因。
         """
         if not flow_id:
@@ -2444,6 +2446,22 @@ class Gateway:
         label = ((flow or {}).get("label")
                  or (flow or {}).get("info", {}).get("name")
                  or flow_id)
+        # summary=True：不 dump 全节点（省 token），返回类型直方图 + 关键元信息
+        if summary:
+            _hist: Dict[str, int] = {}
+            for _n in nodes:
+                _t = _n.get("type", "?")
+                _hist[_t] = _hist.get(_t, 0) + 1
+            return {
+                "ok": True,
+                "flow_id": flow_id,
+                "node_count": len(nodes),
+                "node_type_hist": _hist,
+                "source": source,
+                "label": label,
+                "disabled": bool((flow or {}).get("disabled", False)),
+                "summary": True,
+            }
         return {
             "ok": True,
             "flow_id": flow_id,
@@ -3410,6 +3428,13 @@ class Gateway:
             # 用落档时记录的 target（白盒流 trigger 已内嵌；其 target 是固有语义，
             # 调用方默认 prod 不应覆盖白盒 staging 流）
             target = content.get("target", target)
+            # WB 健壮性修复：raw_flow 提案的 flow 常省略顶层 id（依赖 _gen_raw_flow_id 生成），
+            # 但下方 defense.check_write(flow_id=flow["id"]) 用下标访问，
+            # 在 dry_run=False 时会 KeyError 冒泡成 500。此处提前补 id，
+            # 既避免崩溃，也保证 operation/defense 阶段 id 一致。
+            # 3514 段的 _remap_raw_flow_ids + flow["id"]=deploy_id 会幂等覆盖（更新已有流场景）。
+            if not flow.get("id"):
+                flow["id"] = content.get("id") or self._gen_raw_flow_id(agent_id, flow)
         else:
             # DSL 提案：重新编译（DSL 是真相源；target=prod 生成真实 HA 事件触发器）
             dsl = content.get("dsl")
@@ -3498,7 +3523,7 @@ class Gateway:
                     owner = meta.get("owner_agent") if meta else None
                 self.defense.check_write(
                     operation=operation,
-                    flow_id=flow["id"],
+                    flow_id=flow.get("id"),
                     label=flow["label"],
                     owner_agent=owner,
                     acting_agent=agent_id,
@@ -5104,8 +5129,10 @@ class Gateway:
         flow + 校验摘要」存入 ProposalStore（kind="skill"，content.type="raw_flow"），
         交由人类在 WebUI 提案面板审核后，由 deploy_proposal 的 raw_flow 分支一步部署。
 
-        设计取向（与 propose_dsl 一致，fail-open）：校验/lint/逻辑问题**只附在提案内容里供人审**，
-        不拒绝落提案——白盒流的最终放行权在人类。仅「输入非 flow 对象」这类结构性错误才返回 ok=False。
+        设计取向（fail-closed 分层，方案A）：校验/lint/逻辑问题**只附在提案内容里供人审**，
+        不拒绝落提案（保留 agent 探索性 fail-open）——但**无歧义硬错**（lint error 级阻断集 +
+        未知节点类型）会聚合成 `deploy_blocked_reasons` 字段随提案落档并回显，明确预告
+        「这提案会在部署阶段被硬拦」，消除信号模糊。仅「输入非 flow 对象」这类结构性错误才返回 ok=False。
 
         dry_run=True：跑完全部校验 + HA 替换 + id 重映射后返回预览（含 remap 后的 flow），
         不落提案。供 Agent/WebUI 部署前确认「这版 flow 长啥样、会不会被 lint 拦」。
@@ -5192,6 +5219,25 @@ class Gateway:
         if _blocking:
             _node_gate_ok = False
 
+        # WB 提案闸 fail-closed 分层(方案A)：聚合「无歧义硬错」为 deploy_blocked_reasons。
+        # 提案阶段仍 fail-open 落档（不阻 agent 探索），但把会在部署阶段(deploy_proposal
+        # raw_flow 分支 / deploy_raw)被硬拦的硬伤聚合成单一可读字段，供 agent/人审一眼看清
+        # 「这提案为何会被拦」，消除此前 blocking_rules/would_block_on_lint/node_gate_ok
+        # 分散表述导致的信号模糊(A19 同类自相矛盾根因)。部署阶段硬拦不变。
+        deploy_blocked_reasons = [
+            {"rule": b.get("rule", "unknown"),
+             "level": b.get("level", "error"),
+             "message": b.get("message", ""),
+             "node_id": b.get("node_id")}
+            for b in _blocking
+        ]
+        # 未知节点类型(node_gate 抛错)也并入硬错聚合(其 rule="node_gate")
+        if not _node_gate_ok and not any(r["rule"] == "node_gate" for r in deploy_blocked_reasons):
+            deploy_blocked_reasons.append(
+                {"rule": "node_gate", "level": "error",
+                 "message": "含未知/未注册节点类型，部署阶段将被节点注册表闸门硬拦",
+                 "node_id": "_root"})
+
         # dry_run → 预览（跑完校验 + HA 替换 + id 重映射，不落提案）
         if dry_run:
             fid = self._gen_raw_flow_id(agent_id, flow)
@@ -5213,6 +5259,7 @@ class Gateway:
                 "logic": _logic_block,
                 "node_gate_ok": _node_gate_ok,
                 "blocked": bool(_blocking),
+                "deploy_blocked_reasons": deploy_blocked_reasons,
                 "flow": _flow_preview,
                 "_trace_id": _tid,
             }
@@ -5252,6 +5299,7 @@ class Gateway:
             "logic": _logic_block,
             "node_gate_ok": _node_gate_ok,
             "blocked": bool(_blocking),
+            "deploy_blocked_reasons": deploy_blocked_reasons,
         }
         title = flow.get("label", "") or f"raw-flow-{agent_id}"
         # 派生可检索 spec：label + 节点类型直方图（不 dump 整段 flow JSON）
@@ -5293,6 +5341,7 @@ class Gateway:
             "logic": _logic_block,
             "node_gate_ok": _node_gate_ok,
             "require_e2e": bool(require_e2e),
+            "deploy_blocked_reasons": deploy_blocked_reasons,
             "_telemetry": _tag_action("propose_raw", {"ok": True}, agent_id,
                                       extra={"proposal_id": proposal_id,
                                              "label": flow.get("label", "")},

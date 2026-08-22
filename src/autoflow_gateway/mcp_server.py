@@ -130,7 +130,8 @@ def autoflow_list_entities(domain: str = "", area: str = "", keyword: str = "",
     返回每个实体 {entity_id, friendly_name, domain, area, state(当前状态),
     possible_states(该域可能状态)}；possible_states 直接告诉你它能同步到哪些状态
     （如 light→["on","off"]、cover→["open","closed"]），写 flow 立即知道目标状态怎么填。
-    并透明回报 matched_count / returned / truncated / next_offset，方便翻页。"""
+    并透明回报 matched_count / returned / truncated / next_offset，方便翻页。
+    💡 默认已按 limit=50 裁剪（全屋 2976 实体不会一次撑爆上下文）；需要更多时再放宽 limit。"""
     r = _gw().list_entities(domain or None, area or None, keyword or None, limit, offset)
     return _js(_with_ok(r))
 
@@ -217,7 +218,11 @@ def autoflow_render_template(name: str, values_json: str = "{}") -> str:
 async def autoflow_propose_dsl(dsl: Optional[str] = None, expected_postconditions_json: str = "[]",
                                resolved_entities_json: str = "[]", strict: bool = False,
                                require_e2e: bool = False) -> str:
-    """【提交场景唯一入口】经 DSL 提案：解析→静态校验→编译→staging 闸门(vhass 重放断言)→落提案(raw)。
+    """【★推荐·提交场景首选入口】经 DSL 提案：解析→静态校验→编译→staging 闸门(vhass 重放断言)→落提案(raw)。
+
+    ⭐ 这是 agent 提交场景的**首选**路径：用高层语义 DSL 描述意图，编译器自动生成合规 flow，
+    比手写 Node-RED JSON 短一个数量级、且天然规避接线/节点类型坑。仅在 DSL 语法无法表达
+    你的特定结构时，才退到 autoflow_deploy_raw（逃生舱）。
 
     用法：
       autoflow_propose_dsl(
@@ -259,18 +264,20 @@ async def autoflow_propose_dsl(dsl: Optional[str] = None, expected_postcondition
         resolved_entities=resolved, strict=strict, require_e2e=require_e2e))
 
 @mcp.tool()
-def autoflow_get_flow(flow_id: str) -> str:
-    """【只读】取回已部署 flow 的完整节点图 + 来源标记（source）。
+def autoflow_get_flow(flow_id: str, summary: bool = True) -> str:
+    """【只读】取回已部署 flow 的元信息 + 来源标记（source）。
 
     用于回看 propose_dsl 落地的编译产物、或检视线上 NR tab 的真实节点，
     无需进 WebUI。节点图来自 Node-RED(get_flow)，来源来自网关 flow catalog。
     - flow_id：NR flow id（如 '57be9a8f1fca2bcd'）。
-    - 返回 {ok, flow_id, flow_json:{nodes}, source, label, node_count}。
+    - summary：默认 True —— 只返回 {node_count, node_type_hist(节点类型直方图),
+      source, label, disabled}，**不 dump 全节点图（省 token，绝大多数场景够用）**；
+      确需检视连线时传 summary=False 取完整 flow_json 节点图。
     - 空 id / flow 不存在 / 无节点 → ok=False 并带原因。只读，绝不修改任何状态。"""
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
-    return _js(_gw().get_flow(flow_id))
+    return _js(_gw().get_flow(flow_id, summary=summary))
 
 @mcp.tool()
 def autoflow_list_tabs(only_disabled: bool = False, keyword: str = "") -> str:
@@ -872,7 +879,12 @@ for _fn in _USER_TOOLS:
 @mcp.tool()
 def autoflow_deploy_raw(flow_json: str, label: str = "", target: str = "staging",
                         force: bool = False, require_e2e: bool = False) -> str:
-    """【原生手写提案闸】把 Agent 产出的 Node-RED flow JSON 提交为**提案**（不直接部署到 NR）。
+    """【⚠️逃生舱·非首选】把 Agent 产出的 Node-RED flow JSON 提交为**提案**（不直接部署到 NR）。
+
+    🚨 这是**逃生舱（escape hatch）**，不是首选路径：手写裸 NR 节点 JSON 既费 token（一个 flow
+    几百行进上下文）、又易踩节点类型/接线语义坑（如未注册节点会被 node_gate 硬拦）。
+    **默认请先用 autoflow_propose_dsl（★推荐）**——仅在 DSL 语法确实无法表达你的特定结构时
+    才退到此工具。退到此工具时，提案落档会附 deploy_blocked_reasons 预告部署阶段将被硬拦的硬伤。
 
     用法：
       autoflow_deploy_raw(
