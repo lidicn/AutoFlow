@@ -657,6 +657,8 @@ def lint_flow(flow: Dict[str, Any], b1_unreachable: bool = False) -> List[Dict[s
     issues.extend(_lint_cycles(nodes, fwd, idset))
     # R23：事件环检测（触发器监听实体被其下游动作改回 → 经 HA 状态重入的死循环）
     issues.extend(_lint_event_loops(nodes, fwd, idset))
+    # R38：flow 顶层 links 端点存在性（BUG-D：悬空 link 引用此前完全未被校验）
+    issues.extend(_lint_flow_links(flow, idset))
     return issues
 
 
@@ -1389,6 +1391,52 @@ def _lint_wire_structure(
                         f"若确实要多输出，请显式设 outputs>=2。"
                     ),
                 })
+    return out
+
+
+# ── R38（BUG-D / WB26）：flow 顶层 links 数组的悬空端点校验 ──
+def _lint_flow_links(flow: Dict[str, Any], idset: set) -> List[Dict[str, str]]:
+    """校验 flow 顶层 `links` 数组里每条连线的端点 id 是否都落在同一 flow 的节点集合内。
+
+    Node-RED 5.x 用 flow 顶层 `links` 描述节点间连线：
+      {"from": {"id": "n1", "output": 1}, "to": {"id": "n2", "input": 0}}
+    此前 linter 只校验「节点内 wires」(R17) 与「link out→link in 的 links 字段」
+    （_build_forward_graph），**完全忽略顶层 links 数组**——导致「连线指向不存在节点」
+    这类悬空连线（WB26 BUG-D）既无 schema 拦截、也无 lint 警告：仅当该悬空连线
+    恰好使某节点不可达时，R14 不可达分析才会间接报出；若目标节点另有入边则完全静默，
+    坏流照常部署。这里显式检查每条 link 的 from/to 端点 id，warning 级（fail-open，
+    不硬拦——白盒流最终放行权在人类），直接点名悬空端点，比 R14 更精准。
+    """
+    out: List[Dict[str, str]] = []
+    links = flow.get("links")
+    if not isinstance(links, list):
+        return out
+    for li, link in enumerate(links):
+        if not isinstance(link, dict):
+            continue
+        frm = link.get("from")
+        to = link.get("to")
+        # 兼容两种写法：{"id":..} 对象 或 裸 id 字符串
+        fid = frm.get("id") if isinstance(frm, dict) else (frm if isinstance(frm, str) else None)
+        tid = to.get("id") if isinstance(to, dict) else (to if isinstance(to, str) else None)
+        if fid and fid not in idset:
+            out.append({
+                "level": "warning", "rule": "R38", "node_id": str(fid),
+                "message": (
+                    f"flow.links[{li}].from 引用了不存在的节点 id `{fid}`"
+                    f"（悬空连线，NR 会静默丢弃此连线、下游永不触发）。"
+                    f"常见原因：节点被删除但连线未清理、或 id 拼写错误。"
+                ),
+            })
+        if tid and tid not in idset:
+            out.append({
+                "level": "warning", "rule": "R38", "node_id": str(tid),
+                "message": (
+                    f"flow.links[{li}].to 引用了不存在的节点 id `{tid}`"
+                    f"（悬空连线，NR 会静默丢弃此连线、下游永不触发）。"
+                    f"常见原因：节点被删除但连线未清理、或 id 拼写错误。"
+                ),
+            })
     return out
 
 

@@ -43,6 +43,7 @@ from .identity import AgentStore, AcpTokenStore, get_current_agent
 from .template_lib import list_templates, render_template, TemplateValidationError
 from .webui import build_webui_asgi
 from .config import get_config, is_task_pool_enabled, is_submit_gate_enabled, is_acp_enabled
+from typing import Optional
 from . import acp_client  # 仅用 stdlib(urllib)，安全常驻导入
 # llm_client 含 `import httpx` —— 改为惰性导入（见 autoflow_ask_llm），
 # 避免 httpx 未安装时网关启动期 ImportError 全功能宕机（ACP 属小众，不应绑架 boot）。
@@ -213,7 +214,7 @@ def autoflow_render_template(name: str, values_json: str = "{}") -> str:
 
 # ───────────── 写：场景提交（进确认闸）─────────────
 @mcp.tool()
-async def autoflow_propose_dsl(dsl: str, expected_postconditions_json: str = "[]",
+async def autoflow_propose_dsl(dsl: Optional[str] = None, expected_postconditions_json: str = "[]",
                                resolved_entities_json: str = "[]", strict: bool = False,
                                require_e2e: bool = False) -> str:
     """【提交场景唯一入口】经 DSL 提案：解析→静态校验→编译→staging 闸门(vhass 重放断言)→落提案(raw)。

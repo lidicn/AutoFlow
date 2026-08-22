@@ -2154,6 +2154,27 @@ class Gateway:
         _tid = _new_trace_id()
         _t0 = time.perf_counter()
         _slog(_tid, "propose_dsl.start", agent_id=agent_id, dsl_len=len(dsl or ""))
+        # ── B6 修复（WB25 全面自动化测试报告）──
+        # dsl 为空/None/纯空白 → 前置友好错误，不再让 FastMCP 把 Pydantic 原始报错
+        # （"Input should be a valid string"）直接冒给调用方。必须在一切解析之前。
+        if not dsl or not str(dsl).strip():
+            result = {"ok": False, "stage": "empty_dsl", "result_kind": "validation_error",
+                      "error": "dsl 参数不能为空，请提供语义 DSL 文本（语法调 autoflow_dsl_help）。"}
+            result["_telemetry"] = _tag_action("propose_dsl", result, agent_id,
+                                               log_path=self._telemetry_log)
+            _slog(_tid, "propose_dsl.empty", agent_id=agent_id)
+            return result
+        # ── B4 修复（WB25 全面自动化测试报告）──
+        # DSL 长度护栏：此前编译器对 DSL 长度无上限，超长 DSL 既能绕过提案大小约束、
+        # 又会撑大快照文件名/存储。解析前快速失败，返回可解析的友好错误。
+        _MAX_DSL_CHARS = 8192
+        if len(dsl) > _MAX_DSL_CHARS:
+            result = {"ok": False, "stage": "dsl_too_long", "result_kind": "validation_error",
+                      "error": f"DSL 长度 {len(dsl)} 超过上限 {_MAX_DSL_CHARS} 字符，请精简场景描述后重试。"}
+            result["_telemetry"] = _tag_action("propose_dsl", result, agent_id,
+                                               log_path=self._telemetry_log)
+            _slog(_tid, "propose_dsl.dsl_too_long", agent_id=agent_id, dsl_len=len(dsl))
+            return result
         expected_postconditions = expected_postconditions or []
         # 归一化 resolved_entities：支持 [{"entity_id":"..."}] 与 ["light.x"] 两种形态。
         # autoflow_resolve_entity 返回 dict 列表；MCP 层 json.loads 后为 list[dict]，
