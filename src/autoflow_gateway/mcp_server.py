@@ -1085,7 +1085,7 @@ def autoflow_validate_flow(flow_json: str) -> str:
     warnings = [v for v in all_issues if v.get("level") == "warning"]
 
     # 计算「真部署是否会被硬伤规则拦下」（对齐 deploy_raw 的 _LINT_BLOCK_RULES）
-    # 注意：只有 R13/R15/R20/R17/R22 的 error 级才会被 deploy_raw 硬拦；
+    # R16（重复 ID）/R24（ifState 时长词）/R36/R2-ESC/R_NO_TRIGGER 同属硬拦集。
     # R19 字段名写错、R21 switch 死分支属报告不阻塞。
     # R9(#round4) iss_86d66844f7：schema **致命**错误（S1..S5：结构非法/缺 type/缺 server/
     # switch wires≠rules/空 flow）现在也会被 deploy_raw 以 stage=schema_block 硬拦，
@@ -1095,7 +1095,11 @@ def autoflow_validate_flow(flow_json: str) -> str:
     # 字段名写错——部署即报 Joi 校验错）同为 error 级且后果严重（功能失效/部署失败），
     # 与 R13/R15/R17/R20 一致纳入阻断；旧实现漏了它们 → validate 报 error 却
     # will_deploy_block=false，deploy_raw 放行坏流。
-    _BLOCK_RULES = {"R10", "R13", "R15", "R20", "R17", "R19", "R22", "R30", "R32"}
+    # 对齐 deploy_raw 的 _LINT_BLOCK_RULES（含 R16 重复 ID 硬拦、R24 ifState 时长词、
+    # R36/R2-ESC/R_NO_TRIGGER 等）。R16 此前漏在此集 → validate 报 will_deploy_block=false
+    # 但 deploy_raw 实际拦截，误导使用者（round15 报告 3.1）。
+    _BLOCK_RULES = {"R10", "R13", "R15", "R20", "R17", "R19", "R22", "R30", "R32",
+                    "R16", "R24", "R36", "R2-ESC", "R_NO_TRIGGER"}
     blocking = list(schema_blocking_issues(schema_issues)) + [
         v for v in lint_issues
         if v.get("level") == "error" and v.get("rule") in _BLOCK_RULES]

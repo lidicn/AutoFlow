@@ -1753,43 +1753,111 @@ _DANGEROUS_CODE_PATTERNS = (
 
 
 def _lint_dangerous_code(nodes: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """R40 危险代码扫描层（决策点1-B，方向A 补强）。
+
+    覆盖四类高风险节点：
+      - function      : func 字段（Node.js 代码，可调用 child_process/fs 等）
+      - exec          : command 字段（shell 命令）；空 command + addpay=true 升级为 error
+      - template      : format/template 字段（handlebars，可拼接 SSRF URL）
+      - mqtt out      : topic 含 $SYS/ 或 retain=true（broker 内部状态投毒）
+      - http request  : url 含云元数据 IP / 内网段（SSRF）
+
+    级别约定：
+      - 明文危险调用（child_process/rm -rf/$SYS/元数据IP 等） → warning（保留合法 HA 自动化）
+      - exec 空 command + addpay=true（执行上游任意 payload，无合法用途） → error（硬拦）
+    """
     out: List[Dict[str, str]] = []
     for n in nodes:
         nid = n.get("id") or "?"
         ntype = n.get("type")
-        # 取待扫描的代码片段字段
-        code = ""
+
+        # ── exec 节点：先判 addpay 形态（升级 error），再扫 command 明文 ──
+        if ntype == "exec":
+            addpay = n.get("addpay")
+            command = n.get("command") or ""
+            # 空 command + addpay=true → 执行上游 msg.payload 任意命令，无合法用途 → error
+            if (not command.strip()) and addpay:
+                out.append({
+                    "level": "error", "rule": "R40", "node_id": nid,
+                    "node_type": ntype,
+                    "message": (
+                        "`exec` 节点 command 为空且 addpay=true，将执行上游节点传入的"
+                        "任意 msg.payload 作为系统命令（如 inject 传入 `rm -rf /`）。"
+                        "这种形态无任何合法自动化用途，且是命令注入高危点，已硬拦。"
+                        "若需执行固定脚本，请改为 command 写死具体命令并 addpay=false。"
+                    ),
+                })
+                continue
+            code = command
+            if addpay:
+                code += " " + str(n.get("append", ""))
+            hits = _scan_dangerous_patterns(code)
+            if hits:
+                out.append(_r40_warning(nid, ntype, hits))
+            continue
+
+        # ── function 节点：扫 func 字段 ──
         if ntype == "function":
             code = n.get("func") or ""
-        elif ntype == "exec":
-            # exec 节点的 command 字段 + 拼接的 addpay
-            code = n.get("command") or ""
-            if n.get("addpay"):
-                code += " " + str(n.get("append", ""))
-        elif ntype == "template":
+            hits = _scan_dangerous_patterns(code)
+            if hits:
+                out.append(_r40_warning(nid, ntype, hits))
+            continue
+
+        # ── template 节点：扫 format/template 字段 ──
+        if ntype == "template":
             code = n.get("format") or n.get("template") or ""
-        else:
+            hits = _scan_dangerous_patterns(code)
+            if hits:
+                out.append(_r40_warning(nid, ntype, hits))
             continue
-        if not isinstance(code, str) or not code.strip():
+
+        # ── mqtt out 节点：topic/retain 高危 ──
+        if ntype == "mqtt out":
+            topic = n.get("topic") or ""
+            retain = n.get("retain")
+            hits = []
+            if "$SYS/" in topic or topic.startswith("$SYS"):
+                hits.append("发布/订阅 MQTT $SYS 主题（broker 内部状态，可泄露/篡改运行时信息）")
+            if retain:
+                hits.append("retain=true（消息持久保留，恶意可长期投毒 broker）")
+            if hits:
+                out.append(_r40_warning(nid, ntype, hits))
             continue
-        hits = []
-        for pat, desc in _DANGEROUS_CODE_PATTERNS:
-            if pat in code:
-                hits.append(desc)
-        if not hits:
+
+        # ── http request 节点：SSRF 扫描 ──
+        if ntype == "http request":
+            url = n.get("url") or ""
+            hits = _scan_dangerous_patterns(url)
+            if hits:
+                out.append(_r40_warning(nid, ntype, hits))
             continue
-        out.append({
-            "level": "warning", "rule": "R40", "node_id": nid,
-            "node_type": ntype,
-            "message": (
-                f"`{ntype}` 节点的代码含**潜在危险调用**：{'；'.join(hits)}。"
-                f"这类节点在 NR 运行时拥有 Node.js 进程权限，可被执行系统命令/读文件/SSRF/"
-                f"MQTT 投毒，危害 NR 服务器安全。若这是你预期的合法自动化（如调用本地脚本），"
-                f"可忽略本条警告；否则请改用更安全的替代（如 api-call-service 调用 HA 服务、"
-                f"http request 走白名单地址）。部署前请人工复核该节点代码。"
-            ),
-        })
     return out
+
+
+def _scan_dangerous_patterns(code: str) -> List[str]:
+    """返回命中的危险描述列表（空列表表示无命中）。"""
+    if not isinstance(code, str) or not code.strip():
+        return []
+    hits = []
+    for pat, desc in _DANGEROUS_CODE_PATTERNS:
+        if pat in code:
+            hits.append(desc)
+    return hits
+
+
+def _r40_warning(nid: str, ntype: str, hits: List[str]) -> Dict[str, str]:
+    return {
+        "level": "warning", "rule": "R40", "node_id": nid,
+        "node_type": ntype,
+        "message": (
+            f"`{ntype}` 节点的代码含**潜在危险调用**：{'；'.join(hits)}。"
+            f"这类节点在 NR 运行时拥有 Node.js 进程权限，可被执行系统命令/读文件/SSRF/"
+            f"MQTT 投毒，危害 NR 服务器安全。若这是你预期的合法自动化（如调用本地脚本），"
+            f"可忽略本条警告；否则请改用更安全的替代（如 api-call-service 调用 HA 服务、"
+            f"http request 走白名单地址）。部署前请人工复核该节点代码。"
+        ),
+    }
 
 
 # ── R12：缺少 z 字段（tab 引用）──
