@@ -619,6 +619,8 @@ def lint_flow(flow: Dict[str, Any], b1_unreachable: bool = False) -> List[Dict[s
     issues.extend(_lint_ha_node_missing_entity(nodes))
     # R24：server-state-changed 的 ifState 混入时长词 → error（持久等待应拆进 for）
     issues.extend(_lint_trigger_duration(nodes))
+    # R39：server-state-changed 的 ifState 为空 → warning（任意变化即触发，可能非作者本意）
+    issues.extend(_lint_empty_ifstate(nodes))
     issues.extend(_lint_missing_z(nodes))
     # R25: comment 节点被当作消息中转（带 wires 或被接入主链）→ warning（对齐压测报告 Bug-3）
     issues.extend(_lint_comment_relay(nodes))
@@ -1678,6 +1680,35 @@ def _lint_trigger_duration(nodes: List[Dict[str, Any]]) -> List[Dict[str, str]]:
                     f"请改用 DSL『持续N分钟』原语或手动把时长移入 for。"
                 ),
             })
+    return out
+
+
+# ── R39：server-state-changed 的 ifState 为空 ──
+# 空 ifState 的 server-state-changed 会「任意状态变化均触发」（NR 行为）。
+# 能部署、能触发，但若作者本意是「仅在 on/off 等特定状态触发」，空条件会导致
+# 误触发（例如实体任意属性抖动都点燃下游）。属语义风险而非硬错误，给 warning 提示，
+# 不拦截部署。注：若作者确实要监听「任意变化」（捕获全部状态脉冲），空 ifState 是合理写法，
+# 故此规则仅提醒、不阻断。
+def _lint_empty_ifstate(nodes: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    for n in nodes:
+        nid = n.get("id") or "?"
+        if n.get("type") != "server-state-changed":
+            continue
+        ifstate = n.get("ifState")
+        if isinstance(ifstate, str) and ifstate.strip():
+            continue  # 已指定状态过滤，跳过
+        # 空 ifState：任意变化触发
+        out.append({
+            "level": "warning", "rule": "R39", "node_id": nid,
+            "node_type": "server-state-changed",
+            "message": (
+                f"`server-state-changed` 节点的 `ifState` 为空 → 实体**任意**状态变化都会触发"
+                f"（含不属于你关心的状态）。若你本意是「仅在 on/off 等特定状态触发」，请补全 "
+                f"`ifState`（DSL 写法：`触发: <实体> <状态值>`）。"
+                f"若你确实要监听「任意变化」（捕获全部状态脉冲），可忽略本条警告。"
+            ),
+        })
     return out
 
 
