@@ -204,6 +204,31 @@ def _build_node_diff(live: Optional[Dict[str, Any]],
 # 在 trace 里自报。_compare_trace 必须同步排除，否则会把它们冤枉成『断点』。
 E2E_SINK_TYPES = {"debug", "link out", "link in", "complete", "status", "catch", "inject", "comment"}
 
+
+def _link_ids(value) -> set:
+    """把 link out / link in 节点的 `links` 字段归一为【目标 id 字符串集合】。
+
+    Node-RED 不同版本 / 导出工具对 links 的序列化形态不一致：
+      - 主流形态：字符串数组  ["li1", "li2"]
+      - 部分导出 / 构造形态：对象数组  [{"id": "li1"}, ...]
+    统一剥成 id 字符串集合，避免 `set([dict])` 直接抛
+    `unhashable type: 'dict'`（D30 e2e trace 含 link 节点崩溃）。"""
+    out: set = set()
+    if not value:
+        return out
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, dict):
+        i = value.get("id")
+        if i:
+            out.add(i)
+        return out
+    if isinstance(value, list):
+        for x in value:
+            out |= _link_ids(x)
+    return out
+
+
 # C1 · 可被「合成 inject」替代的事件入口节点类型（staging 无 HA websocket 推送时，
 # 在插桩副本里把它们换成发出 faithful state-change msg 的 inject，从而真实点燃下游逻辑）。
 E2E_STATE_ENTRY_TYPES = {
@@ -1884,7 +1909,7 @@ class Gateway:
                 if eid:
                     entities.append(eid)
             elif t == "link out":
-                for l in _as_list(n.get("links")):
+                for l in _link_ids(n.get("links")):
                     if l:
                         subflow_entries.append(l)
         entities = sorted(set(entities))
@@ -4206,7 +4231,25 @@ class Gateway:
             if "wires" in nn:
                 nn["wires"] = _rewrite(nn["wires"])
             if nn.get("type") in ("link out", "link in") and "links" in nn:
-                nn["links"] = _rewrite(nn["links"])
+                # D30：links 可能是对象数组 [{"id":...}]，_rewrite 只处理字符串，
+                # 会原样保留 dict、导致 remap 后 link 指向的仍是旧 id → 链路断裂。
+                # 这里逐条改写（字符串走 id_map，对象改其内嵌 id 字段）。
+                links = nn["links"]
+                if isinstance(links, list):
+                    new_links = []
+                    for le in links:
+                        if isinstance(le, str):
+                            new_links.append(id_map.get(le, le))
+                        elif isinstance(le, dict):
+                            le = dict(le)
+                            if le.get("id") in id_map:
+                                le["id"] = id_map[le["id"]]
+                            new_links.append(le)
+                        else:
+                            new_links.append(le)
+                    nn["links"] = new_links
+                else:
+                    nn["links"] = _rewrite(links)
             new_nodes.append(nn)
 
         new_flow = dict(flow)
@@ -4251,7 +4294,7 @@ class Gateway:
         valid_ids |= {n.get("id") for n in nodes if n.get("id")}
         for lo in link_outs:
             lo_name = lo.get("name") or lo.get("id") or "?"
-            for tgt in (lo.get("links") or []):
+            for tgt in _link_ids(lo.get("links")):
                 if tgt in valid_ids:
                     continue
                 out.append({
@@ -6215,18 +6258,28 @@ class Gateway:
                 if isinstance(w, list):
                     for t in w:
                         incoming.setdefault(t, []).append(n["id"])
-        # D25/round12：link out → link in 经 Node-RED link 机制传递（无 wires），
-        # BFS 需识别 link 对，否则 link 链路后的节点永远走不到、被误报断点。
-        # 解析：link out 的 links 集合 与 link in 的 links 集合相交 → 视为一条隐式边。
+        # D25/round12 + round17 修正：link out → link in 经 Node-RED link 机制传递
+        # （无 wires），BFS 需识别 link 边，否则 link 链路后的节点永远走不到、被误报断点。
+        # link out 的 links 字段本就是它广播到的 link in 目标 id 集合；据此建立
+        # link out → link in 的隐式边。D30：links 可能是对象数组 [{"id":...}]，
+        # 用 _link_ids 统一剥成字符串集合，避免 `set([dict])` 抛 unhashable type: 'dict'。
         link_targets: Dict[str, List[str]] = {}
         for n in nodes:
             if n.get("type") != "link out":
                 continue
-            ol = set(n.get("links") or [])
+            # ol = 本 link out 广播到的全部 link in 目标 id（D30：links 可能是
+            # 对象数组 [{"id":...}]，用 _link_ids 统一剥成字符串集合，避免
+            # `set([dict])` 抛 unhashable type: 'dict'）。
+            ol = _link_ids(n.get("links"))
             if not ol:
                 continue
             for m in nodes:
-                if m.get("type") == "link in" and (set(m.get("links") or []) & ol):
+                # D25/round17 修正：link out 的 links 列表本就是它指向的 link in
+                # 目标 id 集合，故「m 是 lo 的目标」的判定应为 `m["id"] in ol`，
+                # 旧实现误写成 `set(m.get("links")) & ol`（拿 link in 的源列表去
+                # 和 link out 的目标列表取交集，二者方向相反，永远为空）→ 链路后的
+                # 节点永远走不到、被误报断点。此处改为正确的「目标包含」判定。
+                if m.get("type") == "link in" and m["id"] in ol:
                     link_targets.setdefault(n["id"], []).append(m["id"])
         if start_ids:
             starts = [s for s in start_ids if s in by_id]
