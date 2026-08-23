@@ -199,10 +199,18 @@ def _build_node_diff(live: Optional[Dict[str, Any]],
             "report": dr.report()}
 
 # P5 · E2E 插桩/比对共用的『不可插桩节点』集合。
-# 这些类型要么是终点(debug/link/complete/status)、要么是入口触发器(inject)、
+# 这些类型要么是终点(debug/complete/status)、要么是入口触发器(inject)、
 # 要么是错误捕获(catch)——_instrument_flow 不给它们加 tap，故它们【永远】不会
 # 在 trace 里自报。_compare_trace 必须同步排除，否则会把它们冤枉成『断点』。
-E2E_SINK_TYPES = {"debug", "link out", "link in", "complete", "status", "catch", "inject", "comment"}
+#
+# D34 修复：移除 "link out" / "link in"。
+#   - link out：保持 SINK 跳过（**绝不**插 tap、改 wires）——link out 无 wires 输出，
+#     强行加 wires 会破坏其 link 广播语义并导致 NR 运行时 TypeError
+#     (Cannot read properties of null (reading 'config'))。其到达由上游 tap 间接覆盖。
+#   - link in：**改为可插桩**（它有正常 wires 输出，加 tap 分支安全）——这样 e2e
+#     能真实记录『link 穿越成功』，link 链路下游节点也可被正确追踪与比对。
+#   注：_derive_planned_path 的 link 隐式边(link out→link in)不依赖 wires，仍生效。
+E2E_SINK_TYPES = {"debug", "link out", "complete", "status", "catch", "inject", "comment"}
 
 
 def _link_ids(value) -> set:
@@ -6209,33 +6217,13 @@ class Gateway:
                 n["_af_debug_proxy"] = True
                 # 代理自身不插 tap（保持 sink 语义，不进 trace）
                 continue
-            # D25/round12：link out / link in 经 Node-RED link 机制传递消息（无 wires 输出/输入），
-            # 普通 sink 跳过会让它们及下游在 e2e 中既不被计入计划路径、也不被记录 → 误报断点。
-            # 此处为二者各插一个 tap（记录自身 id），使 link 链路可被追踪；保留其原有 wires
-            # （link-in 经 wires 转发下游，link-out 经 link 广播），tap 作为额外分支不影响逻辑。
-            if n.get("type") in ("link out", "link in"):
-                scope.append(n["id"])
-                tap_id = "af_e2e_tap_" + secrets.token_hex(4)
-                tap = {
-                    "id": tap_id, "type": "function", "z": n.get("z"),
-                    "name": "__e2e__ " + (n.get("name") or n.get("id")),
-                    "func": _tap_fn(n["id"]), "outputs": 1, "_af_trace_tap": True,
-                    "x": (n.get("x", 100) + 140), "y": (n.get("y", 100) + 60),
-                    "wires": [[]],
-                }
-                wires = n.get("wires")
-                if not wires:
-                    n["wires"] = [[tap_id]]
-                else:
-                    new_wires = []
-                    for out in wires:
-                        if isinstance(out, list):
-                            new_wires.append(out + [tap_id])
-                        else:
-                            new_wires.append([out, tap_id])
-                    n["wires"] = new_wires
-                taps.append(tap)
-                continue
+            # D34 修复：link out / link in 不再在此处插桩。
+            #   - link out 保持 SINK 跳过（见下方 `if n.get("type") in SINK`），
+            #     **绝不**给它加 wires——link out 无 wires 输出，强行加 wires 会破坏
+            #     link 广播语义并触发 NR 运行时 TypeError。其到达由上游 tap 间接覆盖，
+            #     link 穿越由 link in 的 tap 覆盖。
+            #   - link in 已从 E2E_SINK_TYPES 移除，故落入下方普通插 tap 分支：
+            #     它有正常 wires 输出，加 tap 分支安全，e2e 可真实记录 link 穿越成功。
             if n.get("type") in SINK or n.get("_af_trace_tap") or n.get("_af_err_sink"):
                 continue
             scope.append(n["id"])
