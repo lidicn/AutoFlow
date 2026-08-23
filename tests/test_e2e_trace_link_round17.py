@@ -168,19 +168,26 @@ def test_derive_planned_path_link_then_action():
         assert "svc1" in order, order   # 动作终点必须被纳入计划路径
 
 
-# ── 3) D30：remap 后 dict 形态 links 也要改写 id（否则链路断裂）──
+# ── 3) D35：remap 后 dict 形态 links 必须【归一化为字符串数组】(NR 只认字符串数组)──
+# 旧断言 [{"id": new_li}] 是 D30 的保留对象数组行为，但实测 Node-RED 运行时
+# 不认对象数组 links → link 不建立 → 下游全断（D35 / round24）。故 D35 改为
+# 统一输出字符串数组 ["new_li"]。
 def test_remap_rewrites_dict_links():
     gw = _make_gw()
     new_flow, id_map, _ = gw._remap_raw_flow_ids(
         _link_flow({"lo": [{"id": "li1"}], "li": [{"id": "lo1"}]}), "TARGET")
-    by_id = {n["id"]: n for n in new_flow["nodes"]}
     lo_node = [n for n in new_flow["nodes"] if n.get("type") == "link out"][0]
     li_node = [n for n in new_flow["nodes"] if n.get("type") == "link in"][0]
-    assert lo_node["links"] != [{"id": "li1"}], lo_node["links"]  # 必须被改写
+    # 必须被改写（不再是原始对象数组）
+    assert lo_node["links"] != [{"id": "li1"}], lo_node["links"]
     assert li_node["links"] != [{"id": "lo1"}], li_node["links"]
-    # 改写后的 link 目标应是 remap 后的 link in id
+    # D35 关键：remap 后 links 必须是【纯字符串数组】，且 id 指向 remap 后的节点
+    assert isinstance(lo_node["links"], list) and all(
+        isinstance(x, str) for x in lo_node["links"]), lo_node["links"]
+    assert isinstance(li_node["links"], list) and all(
+        isinstance(x, str) for x in li_node["links"]), li_node["links"]
     new_li = [n["id"] for n in new_flow["nodes"] if n.get("type") == "link in"][0]
-    assert lo_node["links"] == [{"id": new_li}], lo_node["links"]
+    assert lo_node["links"] == [new_li], lo_node["links"]
 
 
 # ── 4) D30：validate_link_out_targets 解析 dict 形态，不错杀、不漏杀 ──

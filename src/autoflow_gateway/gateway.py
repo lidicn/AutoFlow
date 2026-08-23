@@ -4239,25 +4239,30 @@ class Gateway:
             if "wires" in nn:
                 nn["wires"] = _rewrite(nn["wires"])
             if nn.get("type") in ("link out", "link in") and "links" in nn:
-                # D30：links 可能是对象数组 [{"id":...}]，_rewrite 只处理字符串，
-                # 会原样保留 dict、导致 remap 后 link 指向的仍是旧 id → 链路断裂。
-                # 这里逐条改写（字符串走 id_map，对象改其内嵌 id 字段）。
-                links = nn["links"]
-                if isinstance(links, list):
-                    new_links = []
-                    for le in links:
-                        if isinstance(le, str):
-                            new_links.append(id_map.get(le, le))
-                        elif isinstance(le, dict):
-                            le = dict(le)
-                            if le.get("id") in id_map:
-                                le["id"] = id_map[le["id"]]
-                            new_links.append(le)
-                        else:
-                            new_links.append(le)
-                    nn["links"] = new_links
-                else:
-                    nn["links"] = _rewrite(links)
+                # D35 根因修复：Node-RED 运行时**只接受** link 节点的 `links`
+                # 为【字符串数组】（["id1","id2"]）。导出 / 构造形态的对象数组
+                # [{"id":"li1"}] 在真实 NR 中**无法建立 link 连接**——link out 广播
+                # 不到 link in，下游全不执行，e2e 报"断点 reached=[]"（D35 / round24）。
+                # 故无论输入是字符串数组还是对象数组，这里统一**归一化为字符串数组**
+                # （内嵌 id 经 id_map 重映射），既修正链路断裂，又消除格式分歧。
+                # （D30 旧实现仅做 id 重映射却保留对象数组形态，导致 NR 不认。）
+                raw_links = nn["links"]
+                if not isinstance(raw_links, list):
+                    raw_links = [raw_links] if raw_links else []
+                norm_links = []
+                for le in raw_links:
+                    if isinstance(le, str):
+                        norm_links.append(id_map.get(le, le))
+                    elif isinstance(le, dict):
+                        lid = le.get("id")
+                        if lid in id_map:
+                            norm_links.append(id_map[lid])
+                        elif lid:
+                            norm_links.append(lid)  # 外部 link（如 TTS 队列）保留原 id
+                    elif isinstance(le, (int, float)):
+                        sid = str(le)
+                        norm_links.append(id_map.get(sid, sid))
+                nn["links"] = norm_links
             new_nodes.append(nn)
 
         new_flow = dict(flow)

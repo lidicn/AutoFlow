@@ -235,10 +235,107 @@ def test_e2e_trace_no_link_control():
     assert report.get("verdict") == "通过", report
 
 
+# ── 6) D35 核心修复点：_remap_raw_flow_ids 把对象数组 links 归一化为字符串数组 ──
+def test_remap_normalizes_object_array_links_to_string_array():
+    gw = _make_gw()
+    flow = {
+        "nodes": [
+            {"id": "lo1", "type": "link out", "z": "f", "wires": [],
+             "links": [{"id": "li1"}, {"id": "li2"}]},
+            {"id": "li1", "type": "link in", "z": "f", "wires": [[]],
+             "links": [{"id": "lo1"}]},
+            {"id": "li2", "type": "link in", "z": "f", "wires": [[]],
+             "links": [{"id": "lo1"}]},
+        ]
+    }
+    remapped, id_map, _ = gw._remap_raw_flow_ids(flow, "FFFFFFFFFFFFFFFF")
+    by_id = {n["id"]: n for n in remapped["nodes"]}
+    # 关键断言：remap 后 link 节点的 links 必须是【纯字符串数组】
+    for tid in ("lo1", "li1", "li2"):
+        links = by_id[id_map[tid]]["links"]
+        assert all(isinstance(x, str) for x in links), (
+            f"D35 REGRESSION: links 未归一化为字符串数组 = {links}")
+        assert len(links) == len(flow["nodes"]
+                                [0 if tid == "lo1" else (1 if tid == "li1" else 2)]
+                                ["links"]), f"链接数丢失: {links}"
+    # 原对象数组中的 id 应被重映射为新的节点 id
+    assert id_map["li1"] in by_id[id_map["lo1"]]["links"], (
+        f"lo1 未指向重映射后的 li1: {by_id[id_map['lo1']]['links']}")
+
+
+# ── 7) D35 完整 e2e：对象数组 links 的 flow verdict 准确（修复后不再断点）──
+def test_e2e_trace_object_array_links_verdict_accurate():
+    gw = _make_gw()
+    # 构造对象数组 links 的输入 flow（模拟 round24 矩阵2/3）
+    flow = {
+        "nodes": [
+            {"id": "i1", "type": "inject", "z": "f", "wires": [["lo1"]]},
+            {"id": "lo1", "type": "link out", "z": "f", "wires": [],
+             "links": [{"id": "li1"}]},
+            {"id": "li1", "type": "link in", "z": "f", "wires": [["ch1"]],
+             "links": [{"id": "lo1"}]},
+            {"id": "ch1", "type": "change", "z": "f",
+             "rules": [{"t": "set", "p": "payload", "pt": "msg", "to": "X",
+                        "tot": "str"}], "wires": [["d1"]]},
+            {"id": "d1", "type": "debug", "z": "f", "wires": []},
+        ]
+    }
+    # 先经 remap 归一化（白盒部署真实路径），再用底层方法比对
+    remapped, id_map, _ = gw._remap_raw_flow_ids(flow, "FFFFFFFFFFFFFFFF")
+    # 模拟真实 NR 执行后回读的 trace（按 remap 后的节点 id 空间）
+    ri1 = id_map["i1"]; rli1 = id_map["li1"]; rch1 = id_map["ch1"]
+    trace = [
+        {"node": ri1, "t": 0, "topic": None, "payload": "x"},
+        {"node": rli1, "t": 1, "topic": None, "payload": "x"},
+        {"node": rch1, "t": 2, "topic": None, "payload": "x"},
+    ]
+    report = gw._compare_trace(remapped, trace, None, trigger_ids=[ri1])
+    # 关键：对象数组 links 经 remap 归一化后，link in / change 应被正确追踪、verdict 通过
+    reached = [gw._node_label({n["id"]: n for n in remapped["nodes"]}, r) or r
+               for r in report.get("reached_ids") or []]
+    assert "link in" in reached, f"D35: link in 未被追踪: {reached}"
+    assert "change" in reached, f"D35: change 未被追踪: {reached}"
+    assert report.get("verdict") == "通过", (
+        f"D35 REGRESSION: 对象数组 links 仍误报断点: {report}")
+
+
+# ── 8) D35 断点场景：对象数组 links + 下游未到达，e2e 准确报断点 ──
+def test_e2e_trace_object_array_links_breakpoint_accurate():
+    gw = _make_gw()
+    flow = {
+        "nodes": [
+            {"id": "i1", "type": "inject", "z": "f", "wires": [["lo1"]]},
+            {"id": "lo1", "type": "link out", "z": "f", "wires": [],
+             "links": [{"id": "li1"}]},
+            {"id": "li1", "type": "link in", "z": "f", "wires": [["ch1"]],
+             "links": [{"id": "lo1"}]},
+            {"id": "ch1", "type": "change", "z": "f",
+             "rules": [{"t": "set", "p": "payload", "pt": "msg", "to": "X",
+                        "tot": "str"}], "wires": [["d1"]]},
+            {"id": "d1", "type": "debug", "z": "f", "wires": []},
+        ]
+    }
+    remapped, id_map, _ = gw._remap_raw_flow_ids(flow, "FFFFFFFFFFFFFFFF")
+    # 模拟真实断点：link 穿越成功，但下游 change 未执行
+    trace = [
+        {"node": id_map["i1"], "t": 0, "topic": None, "payload": "x"},
+        {"node": id_map["li1"], "t": 1, "topic": None, "payload": "x"},
+    ]
+    report = gw._compare_trace(remapped, trace, None, trigger_ids=[id_map["i1"]])
+    reached = [gw._node_label({n["id"]: n for n in remapped["nodes"]}, r) or r
+               for r in report.get("reached_ids") or []]
+    assert "change" not in reached, report
+    assert report.get("verdict") == "断点", (
+        f"D35 REGRESSION: 对象数组 links 断点场景误报通过: {report}")
+
+
 if __name__ == "__main__":
     test_instrument_does_not_pollute_link_out_wires()
     test_sink_types_excludes_link_in()
     test_e2e_trace_link_flow_verdict_accurate()
     test_e2e_trace_link_breakpoint_accurate()
     test_e2e_trace_no_link_control()
-    print("ALL D34 REGRESSION TESTS PASSED ✅")
+    test_remap_normalizes_object_array_links_to_string_array()
+    test_e2e_trace_object_array_links_verdict_accurate()
+    test_e2e_trace_object_array_links_breakpoint_accurate()
+    print("ALL D34+D35 REGRESSION TESTS PASSED ✅")
