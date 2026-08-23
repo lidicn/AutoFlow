@@ -114,3 +114,33 @@ def test_bug3_empty_scene_compiles_with_r33():
     flows = r.get("flows") or [r]
     types = {n.get("type") for f in flows for n in f.get("nodes", [])}
     assert "api-call-service" not in types
+
+
+def test_round4_report_bool_param_is_real_bool():
+    """test-report-round4.md 真实 defect：light.turn_on(..., transition=true) 必须生成
+    布尔值 true 而非字符串 "true"（否则 HA 服务收到错误类型、调用静默失败）。
+    根因：_coerce_scalar 此前只识别数值字符串，不识别 "true"/"false" 字符串。"""
+    p = _action_params("""场景: 布尔参数
+触发: inject
+动作: light.turn_on(light.x, transition=true)""")
+    assert p.get("transition") is True, p
+    assert isinstance(p.get("transition"), bool), p
+
+
+def test_round4_report_bool_false_param():
+    """对照：transition=false → 布尔 False。"""
+    p = _action_params("""场景: 布尔参数假
+触发: inject
+动作: light.turn_on(light.x, transition=false)""")
+    assert p.get("transition") is False, p
+    assert isinstance(p.get("transition"), bool), p
+
+
+def test_round4_report_empty_string_dequoted():
+    """报告误报项复核：transition='' 去引号后应为空字符串 ''（非 "''"）。
+    上一轮 round3 去引号逻辑已修复，此处固化防回归。"""
+    p = _action_params("""场景: 空串参数
+触发: inject
+动作: light.turn_on(light.x, transition='')""")
+    assert p.get("transition") == "", p
+    assert isinstance(p.get("transition"), str), p

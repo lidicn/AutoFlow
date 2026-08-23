@@ -1390,7 +1390,8 @@ def autoflow_run_e2e_trace(dsl: str = "", flow_json: str = "",
 
 @mcp_admin.tool()
 @mcp.tool()
-def autoflow_modify_flow(flow_id: str, dsl: str = "", node_patches: str = "") -> str:
+def autoflow_modify_flow(flow_id: str, dsl: str = "", node_patches: str = "",
+                         allow_prod: bool = False) -> str:
     """外科式修改已存在的 flow（原生手写身份专用）。
 
     - dsl：提供新 DSL 字符串 → 重新编译并复用该 flow 的 id/label 原地更新
@@ -1399,6 +1400,9 @@ def autoflow_modify_flow(flow_id: str, dsl: str = "", node_patches: str = "") ->
       [{"match":{"name":"开灯"},"set":{"name":"开主卧灯"}}] → 只改匹配节点的指定字段（最小改动）。
       match 支持 id / name / type；set 为要写入的字段字典；remove 为要删除的字段名列表。
     二选一即可。
+    - allow_prod（D32 修复）：PROD 环境默认禁止直改已部署 flow（防误操作整实例替换），
+      需显式 allow_prod=True 知情放行（与 apply / verify_flow 的 allow_prod 语义一致）。
+      默认 False，PROD 锁保持生效。
 
     返回 {ok, flow_id, changed_nodes, node_count, mode}。"""
     agent = get_current_agent()
@@ -1413,7 +1417,8 @@ def autoflow_modify_flow(flow_id: str, dsl: str = "", node_patches: str = "") ->
             patches = json.loads(node_patches)
         except Exception as e:
             return _js({"ok": False, "error": f"node_patches 不是合法 JSON：{e}"})
-    r = _gw().modify_flow(flow_id, dsl=dsl or None, node_patches=patches)
+    r = _gw().modify_flow(flow_id, dsl=dsl or None, node_patches=patches,
+                          allow_prod=allow_prod)
     return _js(r)
 
 @mcp_admin.tool()

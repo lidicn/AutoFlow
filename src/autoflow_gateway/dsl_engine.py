@@ -3059,6 +3059,11 @@ def _coerce_scalar(v):
         return v
     if isinstance(v, str):
         s = v.strip()
+        # 布尔值字符串（DSL 解析阶段所有值均为字符串，"true"/"false" 不会命中上面的
+        # isinstance(v, bool) 分支）：必须在此显式识别，否则 light.turn_on(..., transition=true)
+        # 会被塞成字符串 "true"，HA 服务收到错误类型。对齐 _flow_var_to_tot 的判定。
+        if s.lower() in ("true", "false"):
+            return s.lower() == "true"
         if re.fullmatch(r"-?\d+", s):
             return int(s)
         if re.fullmatch(r"-?\d+\.\d+", s):
