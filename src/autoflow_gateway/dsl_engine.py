@@ -651,6 +651,15 @@ def parse(text: str) -> Scene:
             attach(_parse_raw_node(_after_colon(stripped), i + 1))
         else:
             _check_deprecated(stripped, i + 1)
+            # iss_51a8a3829b（round3 测试）：用户按自然语言写「持续: N 分钟」顶层指令，
+            # 但本引擎的持久等待语义挂在【触发】上（编译为 server-state-changed 的 for 等待），
+            # 不是独立顶层指令。给出明确替代语法，避免撞『无法识别的顶层指令』硬墙。
+            if stripped.startswith("持续") or stripped.startswith("持续等待") or stripped.startswith("持续 "):
+                raise DSLError(
+                    f"『持续 N 分钟』是持久等待语义，本引擎把它挂在【触发】上而非独立顶层指令："
+                    f"请写成『触发: <实体> <状态> 持续N分钟』"
+                    f"（如 触发: binary_sensor.xxx on 持续3分钟；N 分钟/小时/秒均可，"
+                    f"编译为 server-state-changed 的 for 等待）。", i + 1, code=C_UNKNOWN_TOPLEVEL)
             if indent > 0:
                 raise DSLError(f"缩进体只支持 动作/调用子流程/延时/查询/时间段/分支/否则如果/否则/取值/"
                                f"观测/注释/请求/提取/构建/原生节点：{stripped}"
@@ -876,6 +885,15 @@ def _action_param_value(v: str) -> str:
         if inner.startswith(("payload.", "msg.", "flow.")):
             return "{{" + inner + "}}"
         return "{{payload." + inner + "}}"
+    # iss_c39a4e3913（round3 测试）：单引号/双引号包裹的字面量值应去引号，
+    # 否则编译成 {"brightness_pct":"'50'"}——HA 收到字符串而非数字，调用静默失败。
+    # 注意：反引号（动态引用）已在上方处理，此处只剥配对的单/双引号外壳，
+    # 内部仍可含空格（如 'some text' 去引号后仍是普通字符串，交给 _coerce_scalar 决定类型）。
+    if len(v) >= 2 and ((v[0] == "'" and v[-1] == "'") or (v[0] == '"' and v[-1] == '"')):
+        inner = v[1:-1]
+        # 仅当整串被引号完整包裹时才剥（避免误伤含引号的正常字符串）
+        if len(inner) >= 0:
+            return _action_param_value(inner.strip())
     return v
 
 
