@@ -1099,7 +1099,7 @@ def autoflow_validate_flow(flow_json: str) -> str:
     # R36/R2-ESC/R_NO_TRIGGER 等）。R16 此前漏在此集 → validate 报 will_deploy_block=false
     # 但 deploy_raw 实际拦截，误导使用者（round15 报告 3.1）。
     _BLOCK_RULES = {"R10", "R13", "R15", "R20", "R17", "R19", "R22", "R30", "R32",
-                    "R16", "R24", "R36", "R2-ESC", "R_NO_TRIGGER"}
+                    "R16", "R24", "R36", "R2-ESC", "R_NO_TRIGGER", "R40"}
     blocking = list(schema_blocking_issues(schema_issues)) + [
         v for v in lint_issues
         if v.get("level") == "error" and v.get("rule") in _BLOCK_RULES]

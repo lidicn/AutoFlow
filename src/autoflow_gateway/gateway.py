@@ -3595,7 +3595,7 @@ class Gateway:
         # propose_raw 是 fail-open 落档（只报告不拦），若不在此补刀，坏 flow
         #（如 api-current-state 空 entityId → R20）会直接上线、且「重新部署」反复推送。
         if ctype == "raw_flow":
-            _LINT_BLOCK_RULES = {"R10", "R13", "R15", "R20", "R17", "R22", "R24", "R30", "R32", "R_SERVICE_PARAM", "R36", "R2-ESC", "R_NO_TRIGGER", "R19", "R16"}
+            _LINT_BLOCK_RULES = {"R10", "R13", "R15", "R20", "R17", "R22", "R24", "R30", "R32", "R_SERVICE_PARAM", "R36", "R2-ESC", "R_NO_TRIGGER", "R19", "R16", "R40"}
             _li = lint_flow(flow)
             _blk = [v for v in _li
                     if v.get("level") == "error" and v.get("rule") in _LINT_BLOCK_RULES]
@@ -4624,7 +4624,7 @@ class Gateway:
         # 其余 error 级规则（R5/R7/R8/R10/R16/R18 等）属代码风格/结构类，不阻塞以免误伤合法手搓流。
         # 默认开启（env AUTOFLLOW_WHITEBOX_BLOCK_ON_LINT_ERROR=0 可关）。
         # A8：dry-run 下不早退，改为算 would_block_on_lint 附在预览里，让用户看清「真部署会不会被拦」
-        _LINT_BLOCK_RULES = {"R13", "R15", "R20", "R17", "R22", "R24", "R30", "R32", "R_SERVICE_PARAM", "R36", "R2-ESC", "R_NO_TRIGGER", "R16"}
+        _LINT_BLOCK_RULES = {"R13", "R15", "R20", "R17", "R22", "R24", "R30", "R32", "R_SERVICE_PARAM", "R36", "R2-ESC", "R_NO_TRIGGER", "R16", "R40"}
         _blocking = [v for v in lint_issues
                      if v.get("level") == "error" and v.get("rule") in _LINT_BLOCK_RULES]
         if block_on_lint_error and not dry_run:
@@ -5173,7 +5173,7 @@ class Gateway:
         validation.extend(lint_issues)
         errors = [v for v in validation if v["level"] == "error"]
         warnings = [v for v in validation if v["level"] == "warning"]
-        _LINT_BLOCK_RULES = {"R13", "R15", "R20", "R17", "R22", "R24", "R30", "R32", "R_SERVICE_PARAM", "R36", "R2-ESC", "R_NO_TRIGGER", "R16"}
+        _LINT_BLOCK_RULES = {"R13", "R15", "R20", "R17", "R22", "R24", "R30", "R32", "R_SERVICE_PARAM", "R36", "R2-ESC", "R_NO_TRIGGER", "R16", "R40"}
         _blocking = [v for v in lint_issues
                      if v.get("level") == "error" and v.get("rule") in _LINT_BLOCK_RULES]
         _blocking = _schema_blocking + _blocking
