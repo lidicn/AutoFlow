@@ -5656,7 +5656,8 @@ class Gateway:
                          virtual_time=None,
                          branch_aware: bool = True,
                          target: str = "staging",
-                         flow: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                         flow: Optional[Dict[str, Any]] = None,
+                         require_change: bool = False) -> Dict[str, Any]:
         """staging 闸门：编译 DSL → 把 flow 的 HA 意图重放到 vhass → 断言后置条件。
 
         不依赖真实 NR/HA：编译产物的 api-call-service 节点即『这个 flow 要对 HA 做的意图』，
@@ -5826,6 +5827,11 @@ class Gateway:
             # 2c) 重放激活意图（link out/subflow 作外部调用记录）
             replayed = []
             external = []
+            # 2b-bis) 记录每个后置条件实体在重放『之前』的种子态 + 本步被重放的实体，
+            # 用于区分「flow 重放导致状态变化」vs「状态在重放前已满足（巧合，未验证副作用）」。
+            _pre_states = {c.get("entity_id"): _world(c.get("entity_id"))
+                           for c in step.get("expected", []) if c.get("entity_id")}
+            _replayed_targets: set = set()
             for nd in flow.get("nodes", []):
                 if nd.get("type") == "api-call-service" and nd["id"] in active:
                     # 统一解析：兼容编译产物(domain/service/entityId)与手写(action/data)
@@ -5836,6 +5842,7 @@ class Gateway:
                         try:
                             store.apply_service(domain, service, payload)
                             replayed.append(f"{domain}.{service}({t})")
+                            _replayed_targets.add(t)
                         except Exception as e:  # pragma: no cover
                             replayed.append(f"{domain}.{service}({t})#err:{e}")
                 elif _vg_is_external_call(nd.get("type")):
@@ -5852,10 +5859,34 @@ class Gateway:
                     rec = store.get_state(eid)
                     got = rec.get("state") if rec else None
                     ok = (got == want)
+                    # iss_b2ecd18673：区分「服务被调用且状态改变」与「状态在重放前已满足、
+                    # flow 未证明副作用」。pre_state=重放前种子态；service_called=本步是否
+                    # 有针对该实体的服务被重放；changed_by_replay=重放是否真的把状态翻成 want。
+                    pre = _pre_states.get(eid)
+                    serv_called = eid in _replayed_targets
+                    changed = (pre is not None and pre != want)
                     # A14：失败可能只是「vhass 未建模该服务」，须与「flow 真错了」区分
                     unmodeled = ((rec or {}).get("attributes") or {}).get("_unmodeled_service")
                     item = {"kind": "state", "entity_id": eid,
-                            "expected": want, "actual": got, "ok": ok}
+                            "expected": want, "actual": got, "ok": ok,
+                            "pre_state": pre, "service_called": serv_called,
+                            "changed_by_replay": changed}
+                    # 巧合命中：状态已满足、且本步无针对该实体的服务被重放 → 没证明 flow 副作用。
+                    # require_change=True 时作为真失败（fail）；否则仅告警（不推翻 verdict）。
+                    if ok and not changed and not serv_called:
+                        item["coincidental"] = True
+                        if require_change:
+                            ok = False
+                            item["ok"] = False
+                            item["reason"] = (
+                                (item.get("reason") + "；") if item.get("reason") else ""
+                            ) + ("后置条件在重放前已满足且无针对该实体的服务被重放，"
+                                 "require_change=True 要求状态发生变化 → 未通过")
+                        else:
+                            warnings.append(
+                                f"【巧合命中】后置条件 {eid}={want} 在重放前已满足，且本步无针对"
+                                f"该实体的服务被重放 → 未验证 flow 的副作用（服务未调用 / 已幂等）。"
+                                f"如需强制验证请传 require_change=true。")
                     if rec is None:
                         # 归因清楚：不是「状态不对」，是这个实体压根不在设备目录里
                         item["reason"] = ("实体不在 vhass staging 设备目录"
@@ -5875,7 +5906,7 @@ class Gateway:
                     assertions.append(item)
                     if not ok:
                         fail = {"entity_id": eid, "expected": want, "actual": got}
-                        if rec is None:
+                        if item.get("reason"):
                             fail["reason"] = item["reason"]
                         if item.get("dead_branch"):
                             fail["na"] = True
