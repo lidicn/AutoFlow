@@ -82,6 +82,24 @@ def _compile_error_envelope(e) -> dict:
 # 原生节点逃逸关键字（Phase 4）：DSL 含此关键字且开关关闭时，编译入口直接拒绝。
 _RAW_NODE_KW_RE = re.compile(r"^\s*(原生节点|raw_node)\s*:", re.MULTILINE)
 
+# ── D36 修复（WB83 P1 DoS 根因）：entity_id 形态判定 ──
+# HA entity_id 形如 domain.object（小写字母/数字/下划线/连字符，无空格、无中文、无大写）。
+# 这种字符串只可能是「真实实体 ID 或编造的实体 ID」，绝不该走自然语言模糊解析；
+# 模糊解析（resolve_entity 全目录扫描打分）只服务于中文/友好名输入。
+# 低于目录命中即判未知，直接返回 None，避免对 N 个未知实体触发 N 次 O(目录) 模糊扫描。
+_ENTITY_ID_SHAPE_RE = re.compile(r"^[a-z0-9_][a-z0-9_.\-]*\.[a-z0-9_.\-]+$")
+
+# D36 防御纵深：resolve_entity 全目录模糊扫描代价高（O(目录)）。同进程内对相同查询
+# 结果缓存，使模糊成本仅首次发生、跨调用摊销；目录刷新后 stale 仅导致 fail-closed
+# 误拒（安全），不导致误放行。容量上限防无限增长。
+_RESOLVE_ENTITY_CACHE: dict = {}
+_RESOLVE_ENTITY_CACHE_MAX = 1024
+
+# D36 防御纵深：单次闸门校验引用的实体上限。家自动化流极少超过此数；超过即判异常复杂度，
+# 廉价拒绝（不逐个模糊解析），杜绝『N 个未知实体 → N 次 O(目录) 扫描』的串行阻塞 DoS。
+_MAX_ENTITY_REFS = 256
+
+
 # ── R_branch_required 内容触发（修复 iss_ebfe742222）──
 # DSL 自然语言里出现条件连词/阈值比较，但编译产物不含任何分支/条件门节点时，
 # 动作会被无条件执行（黑箱模式易丢分支）。此处做「内容意图 → 编译产物」对账：
@@ -1710,6 +1728,10 @@ class Gateway:
           low    : entity_id 子串匹配
         area 为「优先提示」而非硬约束：优先返回该区域候选；若该区域无匹配则放宽到全局，
         避免区域名不完全一致（如设备未分配区域/区域别名差异）把正确设备整段排除。'''
+        # D36 防御纵深：相同查询直接命中缓存，避免重复 O(目录) 模糊扫描。
+        _ck = (name, area, domain)
+        if _ck in _RESOLVE_ENTITY_CACHE:
+            return _RESOLVE_ENTITY_CACHE[_ck]
         cat = self.state.get_device_catalog()
         ents = cat.get('entities', {})
         if not ents:
@@ -1775,9 +1797,14 @@ class Gateway:
                 'matched_by': mb,
                 'confidence': conf,
             })
-        return {'ok': True, 'query': name, 'area': area_filter,
-                'area_warning': area_warning,
-                'domain': domain, 'count': len(out), 'candidates': out}
+        result = {'ok': True, 'query': name, 'area': area_filter,
+                   'area_warning': area_warning,
+                   'domain': domain, 'count': len(out), 'candidates': out}
+        # D36 防御纵深：写回缓存（容量上限，超出丢弃最旧条目防无限增长）。
+        if len(_RESOLVE_ENTITY_CACHE) >= _RESOLVE_ENTITY_CACHE_MAX:
+            _RESOLVE_ENTITY_CACHE.clear()
+        _RESOLVE_ENTITY_CACHE[_ck] = result
+        return result
 
     def _resolve_best(self, name: str) -> Optional[str]:
         """友好名/别名 → entity_id，仅在【无歧义】时返回；有歧义/无候选返回 None。
@@ -1798,6 +1825,15 @@ class Gateway:
         mapped = self.state.resolve(name)
         if mapped:
             return mapped
+        # ── D36 修复（WB83 P1 DoS 根因）──
+        # 已是 entity_id 形态（domain.object，无空格/中文/大写）却不在目录 → 确定性未知，
+        # 直接返回 None，**绝不**调昂贵的 resolve_entity 全目录模糊扫描。模糊解析只服务于
+        # 中文/友好名输入；对 entity_id 形态字符串做模糊扫描既无意义（编造型 ID 不会命中友好名）
+        # 又会因『N 个未知实体 → N 次 O(目录) 扫描』造成 propose_dsl 串行阻塞 DoS。
+        # 真实实体 ID 经上方 `name in cat` 精确命中（毫秒级）；此处只拦截编造/拼错的 ID，
+        # 与『绝不静默猜域』纪律一致（agent 应先用 autoflow_resolve_entity 取精确 ID）。
+        if _ENTITY_ID_SHAPE_RE.match(name):
+            return None
         try:
             r = self.resolve_entity(name)
         except Exception:
@@ -7695,13 +7731,45 @@ class Gateway:
         """返回无法【无歧义】解析到目录内 entity_id 的引用列表（空=全部已知）。
 
         遍历 DSL 的 状态触发实体 + 所有动作目标（含 取值/查询/调用子流程(history_*)/时间段 等嵌套原语），
-        逐一用 _resolve_best 校验：
+        逐一校验：
         - 精确 entity_id / 精确 mapping / 唯一(或 high 置信)候选 → 视为已知；
-        - 多候选歧义（如"书房吊灯"）或 0 候选（如"书房光照度"）→ 返回 None → 判未知，
+        - 多候选歧义（如"书房吊灯"）或 0 候选（如"书房光照度"）→ 判未知，
           闸门据此拦截，迫使 agent 显式调 autoflow_resolve_entity 从候选里选，绝不静默猜域。
+
+        D36 性能修复（WB83 P1 DoS 根因）：
+        旧实现逐实体调 _resolve_best → 每次都 get_device_catalog()+state.resolve() 各读一次盘
+        （大目录 JSON 解析 ~百毫秒/次）→ N 个实体 → O(N·目录解析) → propose_dsl 串行阻塞 DoS
+        （10 层嵌套即数秒、数百层卡死）。
+        现改为【单次】取目录+映射，实体_id 形态引用（domain.object）走内联快路径（不读盘、不模糊），
+        仅中文/友好名引用才调昂贵的模糊解析（且 resolve_entity 已加结果缓存）。
         """
-        return [eid for eid in self._scene_entity_refs(scene)
-                if self._resolve_best(eid) is None]
+        refs = self._scene_entity_refs(scene)
+        # D36 防御纵深：引用实体过多的 DSL 直接判未知拒绝，避免对上千个实体逐个解析。
+        # 家自动化流极少引用 >256 个不同实体，超过即视为异常/恶意复杂度，廉价拒绝。
+        if len(refs) > _MAX_ENTITY_REFS:
+            return list(dict.fromkeys(refs))
+        # 单次读取目录与映射（消除逐实体读盘）。
+        cat = self.state.get_device_catalog().get("entities", {})
+        mapping = self.state.get_entity_mapping().get("mappings", {})
+        unknown: List[str] = []
+        for eid in refs:
+            if eid in cat or eid in mapping:
+                continue  # 精确命中
+            if _ENTITY_ID_SHAPE_RE.match(eid):
+                # 已是 entity_id 形态却不在目录/映射 → 确定性未知，直接判未知，
+                # 绝不调模糊解析（模糊只服务于中文/友好名；编造型 ID 不会命中友好名）。
+                unknown.append(eid)
+                continue
+            # 中文/友好名输入 → 走模糊解析（结果已缓存，且仅此形态才付出代价）。
+            try:
+                r = self.resolve_entity(eid)
+            except Exception:
+                unknown.append(eid)
+                continue
+            cands = r.get("candidates", []) if r.get("ok") else []
+            if not cands or (len(cands) > 1 and cands[0].get("confidence") != "high"):
+                unknown.append(eid)
+        return unknown
 
     def _collect_scene_entities(self, scene) -> List[str]:
         """收集 DSL 引用的所有实体（含 取值/查询/调用子流程(history_*)/时间段 等嵌套原语），尽力解析为真实

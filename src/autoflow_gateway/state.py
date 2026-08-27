@@ -35,6 +35,12 @@ class SharedState:
             "entity_mapping": os.path.join(self.base, "entity_mapping.json"),
             "intent_log": os.path.join(self.base, "intent_log.json"),
         }
+        # D36 性能修复：同一请求内 get_device_catalog()/get_entity_mapping() 等会被 O(N) 次调用
+        # （编译期逐实体解析属性、闸门逐实体校验实体），每次都读盘 + json.load 大目录 →
+        # O(N·目录解析) 的串行阻塞 DoS（propose_dsl 10 层嵌套即数秒）。按 (mtime, size) 缓存
+        # 解析结果：文件未变即命中（瞬时），文件一旦写入即 mtime/size 变化 → 自动失效（无正确性风险）。
+        # 写入方（upsert_*/set_*）改写文件后下次读取重新加载，与落盘一致。
+        self._load_cache: Dict[str, Any] = {}
 
     # ── 原子读写 ──
     def _load(self, name: str, default=None) -> Dict[str, Any]:
@@ -42,8 +48,18 @@ class SharedState:
         if not path or not os.path.exists(path):
             return default if default is not None else {}
         try:
+            st = os.stat(path)
+        except OSError:
+            return default if default is not None else {}
+        # D36：未变更即命中缓存（mtime+size 任一变化即失效，重新读盘）。
+        _sig = (st.st_mtime, st.st_size)
+        with self._lock:
+            _cached = self._load_cache.get(name)
+            if _cached is not None and _cached[0] == _sig:
+                return _cached[1]
+        try:
             with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
         except (json.JSONDecodeError, OSError) as e:
             # 损坏/不可读：先备份损坏文件再回退默认，避免静默丢数据且无迹可查
             # （正是 2026-07-29 02:18 崩溃致 flow_catalog 损坏→静默变空→不可恢复的根因）
@@ -61,6 +77,10 @@ class SharedState:
                              name, be, e)
             return default if default is not None else {}
 
+        with self._lock:
+            self._load_cache[name] = (_sig, data)
+        return data
+
     def _save(self, name: str, data: Dict[str, Any]) -> None:
         path = self._files.get(name)
         if not path:
@@ -77,6 +97,13 @@ class SharedState:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
         os.replace(tmp, path)  # 原子替换
+        # D36：写后同步缓存（新 mtime 会自然失效旧条目，此处直接置为新值，避免保存后立即可读到的短暂陈旧）。
+        try:
+            _st = os.stat(path)
+            with self._lock:
+                self._load_cache[name] = ((_st.st_mtime, _st.st_size), data)
+        except OSError:
+            pass
 
     # ── device_catalog ──
     def get_device_catalog(self) -> Dict[str, Any]:
