@@ -5826,6 +5826,8 @@ class Gateway:
         steps = scenario if scenario else [{"expected": expected}]
         step_results = []
         warnings = []
+        # 【WB84·P3-F2/P3-F4】跨步收集错域 service 命中，供 _unverified 诚实降级 fully_verified。
+        _domain_mismatch_hits: List[Dict] = []
         # 【A12】flow 里声明过的全部外部调用名（不论本步是否可达）。
         # 与「本步真的被激活的 external」对照，可把失败精确归因为
         #「压根没这个子流程」还是「有但挂在死分支」。
@@ -5881,11 +5883,24 @@ class Gateway:
             _pre_states = {c.get("entity_id"): _world(c.get("entity_id"))
                            for c in step.get("expected", []) if c.get("entity_id")}
             _replayed_targets: set = set()
+            # 【WB84·P3-F2/P3-F3/P3-F4】service 域 vs 实体域一致性校验收集：
+            # 错域调用（如 switch.turn_on 作用于 light）语义错误，两闸必须一致拦截，
+            # 且不得宣称 fully_verified。homeassistant 域可作用于任意实体，豁免。
+            _domain_mismatch: List[Dict] = []
             for nd in flow.get("nodes", []):
                 if nd.get("type") == "api-call-service" and nd["id"] in active:
                     # 统一解析：兼容编译产物(domain/service/entityId)与手写(action/data)
                     domain, service, targets, data = _ha_node_call(nd)
                     for t in targets:
+                        _ent_dom = t.split(".", 1)[0] if "." in t else ""
+                        if (domain and _ent_dom and domain != "homeassistant"
+                                and _ent_dom != domain):
+                            _domain_mismatch.append(
+                                {"entity_id": t, "domain": domain,
+                                 "service": service, "ent_domain": _ent_dom})
+                            replayed.append(f"{domain}.{service}({t})#domain_mismatch")
+                            _replayed_targets.add(t)
+                            continue
                         payload = dict(data)
                         payload["entity_id"] = t
                         try:
@@ -5954,6 +5969,18 @@ class Gateway:
                              "编译器 R31 已告警）→ 永不执行，后置条件无法达成 → 记 N/A")
                     assertions.append(item)
                     if not ok:
+                        if unmodeled:
+                            # 【WB84·P3-F1】vhass 未建模该 service 的真实副作用 → 后置状态
+                            # 不可验证（非必然是 flow 的错）。降级为告警，不计入硬失败
+                            # （否则合法但 vhass 未建模的开启类自动化会被默认误拦，使质量闸
+                            # 不可用）。断言项已保留可读；_unverified 已含 _unmodeled →
+                            # fully_verified 诚实置 False，不虚假宣称充分验证。
+                            item["unmodeled_service"] = unmodeled
+                            warnings.append(
+                                f"【未建模服务·非硬拦】{eid} 期望={want}：vhass 未建模 "
+                                f"{unmodeled} 的真实副作用，后置状态无法验证（dry-run 下不据此"
+                                f"硬拦；请跑 e2e 实机验证以确证）。")
+                            continue
                         fail = {"entity_id": eid, "expected": want, "actual": got}
                         if item.get("reason"):
                             fail["reason"] = item["reason"]
@@ -6006,6 +6033,26 @@ class Gateway:
                                        "expected": cond, "actual": None,
                                        "ok": False, "reason": why})
                     failures.append({"expected": cond, "actual": None, "reason": why})
+            # 【WB84·P3-F2/P3-F3/P3-F4】错域 service 失败：与后置条件断言同级，
+            # 作为真实失败计入 failures（fail-closed 拦截），且在 assertions 中可观测。
+            # 这让 propose 内嵌闸 与 verify_flow 对「switch.turn_on 作用于 light」这类
+            # 错域调用给出一致结论，并杜绝 fully_verified 虚假宣称。
+            _domain_mismatch_hits.extend(_domain_mismatch)
+            for dm in _domain_mismatch:
+                _dm_reason = (
+                    f"service 域({dm['domain']})与实体域({dm['ent_domain']})不一致："
+                    f"{dm['domain']}.{dm['service']} 作用于 {dm['entity_id']} 属语义错误"
+                    f"（应为 {dm['ent_domain']}.{dm['service']}）。")
+                assertions.append({
+                    "kind": "domain_mismatch", "entity_id": dm["entity_id"],
+                    "expected": f"{dm['domain']}.{dm['service']}",
+                    "actual": f"实体域={dm['ent_domain']}", "ok": False,
+                    "domain_mismatch": True, "reason": _dm_reason})
+                failures.append({
+                    "entity_id": dm["entity_id"],
+                    "expected": f"{dm['domain']}.{dm['service']}",
+                    "actual": f"实体域={dm['ent_domain']}",
+                    "domain_mismatch": True, "reason": _dm_reason})
             # 2c-bis)【G2 / 报告 A15】重放归零检测：flow 明明声明了动作，本步却
             # 一个 HA 意图、一个外部调用都没重放 → 闸门**什么都没验证**。
             # 若归零可归因于「闸门无法本地求值的 JSONata」或「编译器判定的恒假分支」，
@@ -6070,7 +6117,8 @@ class Gateway:
             (bool(replay_zero_steps) and _rz_policy == "warn_only") or
             bool(conservative_hits) or
             _function_only or
-            _declared_effect_unreplayed
+            _declared_effect_unreplayed or
+            bool(_domain_mismatch_hits)  # 【WB84·P3-F4】错域 service 不得宣称 fully_verified
         )
         if _function_only:
             warnings.append(
@@ -7224,6 +7272,27 @@ class Gateway:
                                       f"至少其一。{hint}")}
             target = dict(base)
             nodes = target.setdefault("nodes", [])
+
+            def _np_match(n, m):
+                return (("id" in m and n.get("id") == m["id"]) or
+                        ("name" in m and n.get("name") == m["name"]) or
+                        ("type" in m and n.get("type") == m["type"]
+                         and "id" not in m and "name" not in m))
+
+            # 【WB84·P2-F-MULTI】第一遍：先算每个 patch 的命中范围，fail-closed 拒绝
+            # 模糊 type 匹配命中 >1 节点（静默批量改写多处）的脚枪。需显式 allow_bulk=True
+            # 确认，或改用 id/name 精确匹配。先校验后应用，避免「先改后拒」留半截脏 flow。
+            for i, p in enumerate(patches):
+                m = p.get("match") or {}
+                _hits = sum(1 for n in nodes if _np_match(n, m))
+                _type_only = ("type" in m and "id" not in m and "name" not in m)
+                if _type_only and _hits > 1 and not p.get("allow_bulk"):
+                    return {"ok": False, "stage": "patch", "flow_id": flow_id,
+                            "error": (f"node_patches[{i}] 按 type 模糊匹配命中 {_hits} 个节点，"
+                                      f"将静默批量改写多处（脚枪风险）。请显式加 allow_bulk=True "
+                                      f"确认，或改用 id/name 精确匹配。{hint}"),
+                            "ambiguous_hits": _hits, "match": m}
+            # 第二遍：应用
             changed = 0
             unmatched: List[Dict[str, Any]] = []
             for i, p in enumerate(patches):
@@ -7232,20 +7301,22 @@ class Gateway:
                 remove = p.get("remove") or []
                 hits = 0
                 for n in nodes:
-                    hit = (("id" in m and n.get("id") == m["id"]) or
-                           ("name" in m and n.get("name") == m["name"]) or
-                           ("type" in m and n.get("type") == m["type"]
-                            and "id" not in m and "name" not in m))
-                    if not hit:
+                    if not _np_match(n, m):
                         continue
+                    _actual = 0
                     for k, v in setmap.items():
                         n[k] = v
+                        _actual += 1
                     for k in remove:
-                        n.pop(k, None)
+                        # 【WB84·P2-F-REMOVENONE】仅当字段真实存在才计改动，
+                        # 删不存在字段是 no-op，不虚报 changed=1（否则掩盖「其实没改」）。
+                        if k in n:
+                            del n[k]
+                            _actual += 1
+                    changed += _actual
                     hits += 1
                 if hits == 0:
                     unmatched.append({"index": i, "match": m})
-                changed += hits
             if unmatched or changed == 0:
                 # 中止：不部署、不写回，flow 保持原样
                 return {"ok": False, "stage": "patch", "flow_id": flow_id,
@@ -7276,16 +7347,53 @@ class Gateway:
         if _unresolved:
             return {"ok": False, "stage": "ha_server_inject", "flow_id": flow_id,
                     "error": self._ha_server_unresolved_msg(_unresolved)}
+        # 【WB84·P2-F-DIRECT】直写路径审计化：落盘前留预快照 + 写 apply 轨迹，
+        # 使 modify_flow(node_patches) 与 apply(mode=A) 一致可回滚（apply_rollback(trace_id)
+        # 可还原），消除两条写路径安全保证分叉。best-effort：快照/轨迹失败不影响部署主流程。
+        _rollback_trace_id = None
+        _rollback_snap = None
+        if mode == "node_patches":
+            try:
+                _rollback_snap = snapshot_flow(agent_id, "direct_patch", flow_id, base)
+                _rollback_trace_id = "mp_" + uuid.uuid4().hex[:12]
+                _write_apply_trace({
+                    "trace_id": _rollback_trace_id, "flow_id": flow_id,
+                    "mode": "DIRECT", "agent_id": agent_id,
+                    "stage": "direct_write_pending", "ok": True,
+                    "applied": False, "pending": True,
+                    "snapshot_path": _rollback_snap,
+                    "reason": "modify_flow node_patches 直写（预回滚点）",
+                })
+            except Exception:
+                _rollback_trace_id = None
         # 部署（force 覆盖，复用 deploy 链路）
         try:
             res = self.nr.create_or_update_flow(flow_id, target, force=True,
                                                 allow_prod=allow_prod)
             real_fid = res.get("id") or flow_id
+            # 部署成功后把预回滚轨迹标记为已应用（apply_rollback 可一键还原）
+            if _rollback_trace_id:
+                try:
+                    _write_apply_trace({
+                        "trace_id": _rollback_trace_id, "flow_id": real_fid,
+                        "mode": "DIRECT", "agent_id": agent_id,
+                        "stage": "direct_write_applied", "ok": True,
+                        "applied": True, "pending": False,
+                        "snapshot_path": _rollback_snap,
+                        "reason": "modify_flow node_patches 直写（已落盘，可回滚）",
+                    })
+                except Exception:
+                    pass
         except Exception as e:
             return {"ok": False, "stage": "deploy", "error": f"部署失败：{e}"}
-        return {"ok": True, "flow_id": real_fid, "label": target.get("label"),
+        _ret = {"ok": True, "flow_id": real_fid, "label": target.get("label"),
                 "changed_nodes": changed,
                 "node_count": len(target.get("nodes", [])), "mode": mode}
+        if _rollback_trace_id:
+            _ret["rollback_trace_id"] = _rollback_trace_id
+            _ret["snapshot_path"] = _rollback_snap
+            _ret["audited_direct_write"] = True
+        return _ret
 
     # ───────────── apply 闭环编排（WB1-F / #694）─────────────
     # 触发(autoflow_trigger_inject) → 回读(autoflow_debug_read) → **apply** 的最后一环。
