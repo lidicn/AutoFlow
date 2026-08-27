@@ -507,6 +507,73 @@ def _lint_link_out_request_side(nodes: List[Dict[str, Any]],
     return out
 
 
+def _lint_link_terminal_service(nodes: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """R41（round21 D31）：`api-call-service` / `ha-call-service` 作为**终点节点**
+    （无下游连线）且**直接由 `link in` 直喂**时，在 Node-RED 运行时可能**静默不执行**，
+    导致灯/动作永不触发。
+
+    实证来源（round21 复跑，prod `32cf637`，默认 1880 实例）：
+      - v5（inject → link out → link in → api-call-service 终点）实测 1/2 不执行；
+      - v4（嵌套 link out→link in → api-call-service 终点）实测 2/3 不执行；
+      - v1（link in → switch → api 终点）✅、v5c（inject → api 终点，无 link）✅、
+        v2/v3（link in → subflow/debug）✅ 均正常。
+    根因疑似：`link in` 异步投递 msg 与 HA 服务节点初始化之间存在竞态窗口，
+    竞态非确定（v5b 同形接线在某次复跑侥幸 2/2），故本规则**宁可告警、不硬拦**。
+
+    判定条件（精确，link-aware 单跳，避免误伤）：
+      1. 节点类型为 `api-call-service` 或 `ha-call-service`；
+      2. **终点**：其所有 wires 输出口均为空（`_flat_wire_targets(wires)` 为空）；
+      3. **直接上游含 `link in`**：沿 wires 反向一跳，或沿 `link in` 节点的 wires
+         反向一跳（嵌套 link out→link in 的最后一跳 link in 也算直喂）。
+    不误伤：
+      - v1（link in → switch → api）：api 直接上游是 switch，非 link in → 不报；
+      - v5c（inject → api 终点）：api 直接上游是 inject，非 link in → 不报；
+      - v2/v3（link in → subflow / debug 等）：非 api-call-service 类型 → 不报；
+      - api 带下游（如 link in → api → debug）：非终点 → 不报。
+    级别：warning（非阻断，fail-open）——提示作者核对，必要时给该服务节点接一个
+    下游节点（debug/change）或在 link in 与其之间插入中间节点消除竞态窗口。
+    """
+    out: List[Dict[str, str]] = []
+    by_id = {n.get("id"): n for n in nodes if n.get("id")}
+    if not by_id:
+        return out
+    link_ins = {nid for nid, n in by_id.items() if n.get("type") == "link in"}
+
+    # 直接上游（预测表）：wires 反向一跳 + link in 节点 wires 反向一跳。
+    preds: Dict[str, List[str]] = {nid: [] for nid in by_id}
+    for nid, n in by_id.items():
+        for tgt in _flat_wire_targets(n.get("wires") or []):
+            if tgt in by_id:
+                preds[tgt].append(nid)
+    for lin in link_ins:
+        for tgt in _flat_wire_targets(by_id[lin].get("wires") or []):
+            if tgt in by_id:
+                preds[tgt].append(lin)  # link in 作为上游（单跳直喂）
+
+    for nid, n in by_id.items():
+        ntype = n.get("type", "?")
+        if ntype not in ("api-call-service", "ha-call-service"):
+            continue
+        # 终点判定：所有输出口都为空
+        if _flat_wire_targets(n.get("wires") or []):
+            continue
+        # 直接上游是否含 link in
+        if any(p in link_ins for p in preds.get(nid, [])):
+            out.append({
+                "level": "warning", "rule": "R41", "node_id": nid,
+                "node_type": ntype,
+                "message": (
+                    f"`{ntype}` 节点作为**终点节点（无下游连线）**且**直接由 `link in` "
+                    f"直喂**。round21 实证：link in → 终点 api-call-service 在 Node-RED 运行时"
+                    f"存在竞态、可能**静默不执行**（灯/动作永不触发）。"
+                    f"建议：① 给该服务节点接一个下游节点（如 debug / change），使其不再是终点；"
+                    f"或 ② 在 link in 与其之间插入一个中间节点（change / delay）以错开竞态窗口。"
+                    f"若已在生产环境验证该 flow 能稳定触发，可忽略本警告（非阻断）。"
+                ),
+            })
+    return out
+
+
 # ── Defect B 守卫（iss_60e4d57ce8 / high）──────────────────────────────────────
 # history_* 子流程（NR 类型 `subflow:af_hist_*`）把答案写回 msg.payload，串行调用会
 # 互相覆盖；若同一个 switch 同时引用 ≥2 个不同 history 子流程的【专属输出字段】，运行态
@@ -623,6 +690,8 @@ def lint_flow(flow: Dict[str, Any], b1_unreachable: bool = False) -> List[Dict[s
     issues.extend(_lint_empty_ifstate(nodes))
     # R40：exec/function/template 危险代码扫描 → warning（软提示，不硬拦）
     issues.extend(_lint_dangerous_code(nodes))
+    # R41（round21 D31）：api-call-service 终点 + 直接 link in 直喂 → warning（非阻断）
+    issues.extend(_lint_link_terminal_service(nodes))
     issues.extend(_lint_missing_z(nodes))
     # R25: comment 节点被当作消息中转（带 wires 或被接入主链）→ warning（对齐压测报告 Bug-3）
     issues.extend(_lint_comment_relay(nodes))

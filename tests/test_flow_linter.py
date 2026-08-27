@@ -719,5 +719,90 @@ class TestR33NoopFlow(unittest.TestCase):
         self.assertEqual(r33[0]["level"], "warning")
 
 
+class TestR41LinkTerminalService(unittest.TestCase):
+    """round21 D31：api-call-service 作为终点节点且直接由 link in 直喂 → warning（非阻断）。
+
+    实证：link in → 终点 api-call-service 在 Node-RED 运行时存在竞态、可能静默不执行。
+    判定必须精确——仅「api 终点 + 直接上游含 link in」才报，不误伤：
+      - link in → switch → api（api 直上游是 switch）→ 不报；
+      - inject → api 终点（无 link）→ 不报；
+      - link in → api → debug（api 有下游，非终点）→ 不报。
+    """
+
+    def _api(self, nid, wires):
+        return {"id": nid, "type": "api-call-service", "z": "flow1",
+                "server": "s1", "version": 7, "action": "light.turn_on",
+                "entityId": ["light.test"], "data": "{}", "dataType": "json",
+                "domain": "light", "service": "turn_on", "wires": wires}
+
+    def _link_in(self, nid, wires, links):
+        return {"id": nid, "type": "link in", "z": "flow1", "links": links, "wires": wires}
+
+    def _link_out(self, nid, links):
+        return {"id": nid, "type": "link out", "z": "flow1", "links": links, "wires": []}
+
+    def _inject(self, nid, wires):
+        return {"id": nid, "type": "inject", "z": "flow1", "wires": wires}
+
+    def _switch(self, nid, wires):
+        return {"id": nid, "type": "switch", "z": "flow1", "property": "payload",
+                "propertyType": "msg", "checkall": True, "outputs": 1, "wires": wires}
+
+    def _dbg(self, nid):
+        return {"id": nid, "type": "debug", "z": "flow1", "wires": []}
+
+    def _r41(self, flow):
+        return [i for i in lint_flow(flow) if i["rule"] == "R41"]
+
+    def test_link_in_to_terminal_api_fires(self):
+        flow = _mk([
+            self._inject("inj", [["lo"]]),
+            self._link_out("lo", ["li"]),
+            self._link_in("li", [["api"]], ["lo"]),
+            self._api("api", [[]]),
+        ])
+        r41 = self._r41(flow)
+        self.assertEqual(len(r41), 1, r41)
+        self.assertEqual(r41[0]["level"], "warning")
+        self.assertEqual(r41[0]["node_id"], "api")
+
+    def test_nested_link_to_terminal_api_fires(self):
+        flow = _mk([
+            self._inject("inj", [["lo1"]]),
+            self._link_out("lo1", ["li1"]),
+            self._link_in("li1", [["lo2"]], ["lo1"]),
+            self._link_out("lo2", ["li2"]),
+            self._link_in("li2", [["api"]], ["lo2"]),
+            self._api("api", [[]]),
+        ])
+        r41 = self._r41(flow)
+        self.assertEqual(len(r41), 1, r41)
+        self.assertEqual(r41[0]["node_id"], "api")
+
+    def test_inject_to_terminal_api_no_r41(self):
+        flow = _mk([self._inject("inj", [["api"]]), self._api("api", [[]])])
+        self.assertEqual(self._r41(flow), [])
+
+    def test_link_in_to_switch_to_api_no_r41(self):
+        flow = _mk([
+            self._inject("inj", [["lo"]]),
+            self._link_out("lo", ["li"]),
+            self._link_in("li", [["sw"]], ["lo"]),
+            self._switch("sw", [["api"]]),
+            self._api("api", [[]]),
+        ])
+        self.assertEqual(self._r41(flow), [])
+
+    def test_link_in_to_api_with_downstream_no_r41(self):
+        flow = _mk([
+            self._inject("inj", [["lo"]]),
+            self._link_out("lo", ["li"]),
+            self._link_in("li", [["api"]], ["lo"]),
+            self._api("api", [["dbg"]]),
+            self._dbg("dbg"),
+        ])
+        self.assertEqual(self._r41(flow), [])
+
+
 if __name__ == "__main__":
     unittest.main()
