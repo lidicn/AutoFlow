@@ -144,6 +144,8 @@ C_DELAY_FORMAT = "C_DELAY_FORMAT"        # 延时格式错
 C_QUERY_FORMAT = "C_QUERY_FORMAT"        # 查询格式错
 C_READ_FORMAT = "C_READ_FORMAT"          # 取值格式错
 C_READ_RESERVED = "C_READ_RESERVED"      # 取值读取了保留字（payload/msg 等）
+C_DELAY_UNIT = "C_DELAY_UNIT"          # 延时单位非法（如 光年），fail-closed 拒绝编译
+C_LABEL_UNDEFINED = "C_LABEL_UNDEFINED"  # 分支/动作引用未定义的取值标签，fail-closed 拒绝（防静默反向执行）
 C_TIMERANGE_FORMAT = "C_TIMERANGE_FORMAT"  # 时间段格式错
 C_REQUEST_FORMAT = "C_REQUEST_FORMAT"    # 请求格式错
 C_REQUEST_PARAM = "C_REQUEST_PARAM"      # HTTP 参数解析错
@@ -1054,14 +1056,33 @@ def _validate_subflow_attribute(name: str, args: dict, line: int) -> None:
             line, code=C_SUBFLOW_ATTR_UNKNOWN)
 
 
+# 延时单位 → 秒的换算系数（WB85 F2：非法单位 fail-closed，不再静默默认成毫秒）
+_DELAY_UNIT_SECONDS = {
+    "秒": 1, "s": 1,
+    "分钟": 60, "min": 60,
+    "小时": 3600, "h": 3600, "时": 3600,
+    "毫秒": 1 / 1000, "ms": 1 / 1000,
+}
+
+
 def _parse_delay(s: str, line: int) -> Delay:
-    m = re.match(r"^(\d+)\s*(秒|s|分钟|min)?", s.strip())
+    s = s.strip()
+    # 锚定整行：数字 + 可选单位（中文/ASCII），尾部多余字符一律视为非法单位
+    m = re.fullmatch(r"(\d+)\s*([一-鿿A-Za-z]*)", s)
     if not m:
-        raise DSLError(f"延时格式应为 '<数字> 秒'：{s}（建议：写成 5 秒 / 2 分钟）", line, code=C_DELAY_FORMAT)
+        raise DSLError(f"延时格式应为 '<数字> [单位]'：{s}（建议：写成 5 秒 / 2 分钟 / 500 毫秒）",
+                       line, code=C_DELAY_FORMAT)
     val = int(m.group(1))
-    if m.group(2) in ("分钟", "min"):
-        val *= 60
-    return Delay(seconds=val)
+    unit = m.group(2)
+    if unit == "":
+        # 无单位：向后兼容历史 DSL，默认按秒
+        return Delay(seconds=val)
+    if unit not in _DELAY_UNIT_SECONDS:
+        raise DSLError(
+            f"延时单位无效：'{unit}'（仅支持 秒/s、分钟/min、小时/h/时、毫秒/ms）。"
+            f"'{val}{unit}' 无法解析，已拒绝编译，避免被静默当成 {val} 秒 [C_DELAY_UNIT]",
+            line, code=C_DELAY_UNIT)
+    return Delay(seconds=val * _DELAY_UNIT_SECONDS[unit])
 
 
 def _parse_current_state(s: str, line: int) -> CurrentState:
@@ -2676,8 +2697,10 @@ def _emit_step(em: _Emitter, st: Step, x: int = 200):
         # 判定"字段集与类型 defaults 不一致"→ 节点显示红色警告三角。
         # 这些字段对 pauseType=delay 虽不参与运算，但 NR 调色板拖出的节点
         # 必带，缺失会让生成流在编辑器里观感"脏"。
-        nid = em.add("delay", name=f"延时 {st.seconds}s",
-                     pauseType="delay", timeout=str(st.seconds * 1000),
+        _ms = int(round(st.seconds * 1000))
+        _dname = f"延时 {_ms}ms" if st.seconds < 1 else f"延时 {st.seconds}s"
+        nid = em.add("delay", name=_dname,
+                     pauseType="delay", timeout=str(_ms),
                      timeoutUnits="milliseconds",
                      rate="1", nbRateUnits="1", rateUnits="second",
                      randomFirst="1", randomLast="5", randomUnits="seconds",
@@ -2896,6 +2919,19 @@ def _emit_action(em: _Emitter, st: Action) -> str:
     else:
         data_field = json.dumps(_coerce_params(params), ensure_ascii=False)
         data_type = "json"
+    # WB85 F1：动作参数里的动态表达式若引用未定义的取值标签 → fail-closed 拒绝。
+    # 仅检查被识别为 JSONata 的参数值（_DYN_PARAM_RE 命中：payload./msg./flow./global. 或 $func/${）。
+    if uses_var:
+        _rf = getattr(em, "read_fields", set())
+        _fv = getattr(em, "flow_vars", set())
+        for _k, _v in params.items():
+            if isinstance(_v, str) and _DYN_PARAM_RE.search(_v):
+                _bad = _find_undefined_labels(_v, _rf, _fv)
+                if _bad:
+                    raise DSLError(
+                        f"动作 {st.domain}.{st.service} 的参数『{_k}={_v}』引用了未定义的取值标签："
+                        f"{', '.join(_bad)}（请先在『取值:』步骤里定义该标签）[C_LABEL_UNDEFINED]",
+                        getattr(st, "line", None), code=C_LABEL_UNDEFINED)
     return em.add("api-call-service", name=f"{st.domain}.{st.service}",
                   server=HA_SERVER_ID, version=7,
                   action=f"{st.domain}.{st.service}",
@@ -3182,6 +3218,42 @@ def _bind_read_fields(expr: str, field_names) -> str:
     return "".join(out)
 
 
+# WB85 F1：取值标签未定义即 fail-closed（消除「分支/动作引用未定义标签 → 静默恒假/反向执行」）。
+# 在 JSONata 表达式里扫描【裸标识符】（不被 . / $ 前置的单词 token）：
+#   - $ 前缀 → JSONata 内置函数（$number/$exists/...），不拦；
+#   - 落在 em.read_fields（已定义取值标签）/ em.flow_vars（场景变量）/ 下方保留字 → 合法，不拦；
+#   - 其余裸标识符 = 引用了未定义的取值标签 → 编译期高声拒绝（否则运行时
+#     $number(undefined)→NaN→条件恒假→反向执行，且 fail-open 闸完全不可见）。
+_JSONATA_SAFE_WORDS = {
+    # JSONata 上下文变量
+    "payload", "msg", "flow", "global",
+    # 字面量 / 保留字
+    "true", "false", "null", "undefined",
+    "context", "lambda", "function", "and", "or", "not", "in",
+    "if", "then", "else", "where", "case",
+    # 常见裸字段名（取值写入 msg.payload.state；eq 规则常直接比较 msg.state）
+    "state",
+}
+
+
+def _find_undefined_labels(expr: str, read_fields, flow_vars) -> list:
+    """扫描 JSONata 表达式里的裸标识符（不被 . / $ 前置），返回其中【未定义】的标签列表。
+
+    命中 read_fields / flow_vars / _JSONATA_SAFE_WORDS 的不算未定义。返回空 = 无未定义标签。"""
+    if not expr:
+        return []
+    toks = re.findall(r"(?<![.\w$一-鿿])([A-Za-z_一-鿿][\w一-鿿]*)", expr)
+    bad, seen = [], set()
+    for t in toks:
+        if t in seen:
+            continue
+        seen.add(t)
+        if t in read_fields or t in flow_vars or t in _JSONATA_SAFE_WORDS:
+            continue
+        bad.append(t)
+    return bad
+
+
 def _collect_read_fields(scene: Scene) -> set:
     """收集场景里所有 取值 步骤的具名字段名（落点 msg.payload.<field>）。
 
@@ -3363,6 +3435,27 @@ def _emit_switch(em: _Emitter, sw: Switch) -> str:
     rule_info = [_parse_switch_rule(b.condition) for b in sw.branches]
     if sw.else_body:
         rule_info.append({"t": "else", "v": "true", "vt": "jsonata", "property": "payload"})
+    # WB85 F1：分支条件引用未定义的取值标签 → fail-closed 拒绝（消除静默恒假/反向执行）。
+    # 已定义的取值标签（em.read_fields）会被 _bind_read_fields 改写为 payload.<field>，
+    # 此处对「改写前」的原文做未定义引用扫描：jsonata 规则扫整条表达式、eq/ne 规则只看
+    # 顶层裸字段（带 . 的路径如 msg.x/switch.x 跳过，避免误伤）。
+    _rf = getattr(em, "read_fields", set())
+    _fv = getattr(em, "flow_vars", set())
+    for _i, _ri in enumerate(rule_info):
+        if _ri["t"] == "else":
+            continue
+        if _ri["vt"] == "jsonata":
+            _bad = _find_undefined_labels(_ri["v"], _rf, _fv)
+        else:
+            _p = _ri["property"]
+            _bad = [_p] if ("." not in _p and _p not in _rf
+                            and _p not in _fv and _p not in _JSONATA_SAFE_WORDS) else []
+        if _bad:
+            _cond = sw.branches[_i].condition if _i < len(sw.branches) else _ri.get("v", _p)
+            raise DSLError(
+                f"分支条件『{_cond}』引用了未定义的取值标签：{', '.join(_bad)}"
+                f"（请先在『取值:』步骤里定义该标签，再在分支中引用）[C_LABEL_UNDEFINED]",
+                getattr(sw, "line", None), code=C_LABEL_UNDEFINED)
     # 节点级 property：取首个非 jsonata 规则的 property（同 switch 内通常一致），否则默认 payload
     node_prop = "payload"
     node_ptype = "msg"

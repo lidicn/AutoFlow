@@ -11,7 +11,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from autoflow_gateway import dsl_engine as E
-from autoflow_gateway.dsl_engine import DSLError, parse, validate, compile, compile_dsl, RawNode
+from autoflow_gateway.dsl_engine import (
+    DSLError, parse, validate, compile, compile_dsl, RawNode,
+    C_LABEL_UNDEFINED, C_DELAY_UNIT,
+)
 from autoflow_gateway.subflows import DEMO_NOTIFY_ENTRY_LINK_ID
 
 # ── MVP 闸门场景：回家开灯+播报（无分支，最薄场景）──────────────────────
@@ -852,6 +855,85 @@ def test_query_state_gate_emits_state_to_payload():
     # 分支路由由后续 switch 节点承担（state==on → body, 否则 → else_body）
     switches = [n for n in flow["nodes"] if n["type"] == "switch"]
     assert switches, "查询门下游应有 switch 节点按 payload 分支"
+
+
+# ── WB85 F1：分支引用未定义取值标签 → fail-closed ──────────────────────────
+def test_wb85_f1_undefined_label_rejected():
+    """分支条件引用未在『取值:』定义的标签 → 编译期 DSLError(C_LABEL_UNDEFINED)，
+    消除『$number(undefined)→NaN→条件恒假→反向执行』的静默失败。"""
+    dsl = """
+场景: t
+触发: 每天 08:00
+取值: light.office 亮度
+分支: $number(foo) > 10
+  动作: light.turn_on(light.bedroom)
+否则:
+  动作: light.turn_off(light.bedroom)
+"""
+    try:
+        compile_dsl(dsl)
+        raise AssertionError("应抛 C_LABEL_UNDEFINED 却编译通过")
+    except DSLError as e:
+        assert e.code == C_LABEL_UNDEFINED, e.code
+    # 已定义标签可正常编译，且被改写为 payload.<field>
+    dsl_ok = """
+场景: t
+触发: 每天 08:00
+取值: light.office 亮度
+分支: $number(亮度) > 10
+  动作: light.turn_on(light.bedroom)
+否则:
+  动作: light.turn_off(light.bedroom)
+"""
+    flow = compile_dsl(dsl_ok)
+    sw = next(n for n in flow["nodes"] if n["type"] == "switch")
+    assert any("payload.亮度" in (r.get("v", "") or "") for r in sw["rules"]), sw["rules"]
+
+
+def test_wb85_f1_jsonata_safe_no_false_positive():
+    """含 $number/$exists/payload 等合法 JSONata 的复杂分支条件不得误伤。"""
+    dsl = """
+场景: t
+触发: 每天 08:00
+取值: light.office 亮度
+分支: $number(亮度) > 10 and $exists(payload.state)
+  动作: light.turn_on(light.bedroom)
+否则:
+  动作: light.turn_off(light.bedroom)
+"""
+    # 不应抛 C_LABEL_UNDEFINED
+    compile_dsl(dsl)
+
+
+# ── WB85 F2：延时非法单位 → fail-closed ────────────────────────────────────
+def test_wb85_f2_invalid_unit_rejected():
+    """延时单位非法（如 光年）→ 编译期 DSLError(C_DELAY_UNIT)，不再静默默认成秒。"""
+    dsl = """
+场景: t
+触发: 每天 08:00
+延时: 5 光年
+  动作: light.turn_on(light.bedroom)
+"""
+    try:
+        compile_dsl(dsl)
+        raise AssertionError("应抛 C_DELAY_UNIT 却编译通过")
+    except DSLError as e:
+        assert e.code == C_DELAY_UNIT, e.code
+
+
+def test_wb85_f2_valid_unit_compiles():
+    """合法单位（秒/分钟/小时/毫秒）正常编译，且秒数换算正确。"""
+    for unit, expect_ms in [("5 秒", 5000), ("2 分钟", 120000), ("1 小时", 3600000),
+                            ("500 毫秒", 500)]:
+        dsl = f"""
+场景: t
+触发: 每天 08:00
+延时: {unit}
+  动作: light.turn_on(light.bedroom)
+"""
+        flow = compile_dsl(dsl)
+        d = next(n for n in flow["nodes"] if n["type"] == "delay")
+        assert d["timeout"] == str(expect_ms), (unit, d["timeout"])
 
 
 if __name__ == "__main__":

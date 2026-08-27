@@ -255,7 +255,30 @@ def _run():
     test_deploy_subflow_conflict()
     test_deploy_subflow_dry_run()
     test_promote_subflow_rejected()
-    print("\n全部子流程提案测试通过 ✅  (6/6)")
+    test_wb85_f4_subflow_lint_surfaces_r41()
+    print("\n全部子流程提案测试通过 ✅  (7/7)")
+
+
+def test_wb85_f4_subflow_lint_surfaces_r41():
+    """WB85 F4：含『link in → api-call-service 终点』危险形状的子流程提案，
+    提案阶段即跑 flow_linter，R41 警告须透出到 lint_summary（旧实现不 lint，静默放过）。"""
+    _reset()
+    risky_def = {
+        "id": "sf_risky",
+        "nodes": [
+            {"id": "li1", "type": "link in", "z": "sf_risky", "wires": [["api1"]]},
+            {"id": "api1", "type": "api-call-service", "z": "sf_risky", "wires": [[]]},
+        ],
+        "in_ports": [],
+        "out_ports": [],
+    }
+    r = _propose_subflow(dsl_name="risky_thing", name="危险子流程", definition=risky_def)
+    assert r["ok"], r
+    rules = [i.get("rule") for i in r.get("lint_summary", [])]
+    assert "R41" in rules, f"R41 未透出：{rules}"
+    # lint_summary 须随提案可见（非阻塞，但必须出现在回执里）
+    assert r.get("lint_warning_count", 0) >= 1, r
+    print("  ✓ propose_subflow：危险子流程提案透出 R41 警告")
 
 
 if __name__ == "__main__":

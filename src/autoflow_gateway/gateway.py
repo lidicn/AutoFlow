@@ -5481,6 +5481,16 @@ class Gateway:
 
         _nodes = definition.get("nodes", [])
         _label = name or dsl_name
+        # WB85 F4：子流程提案也要跑 flow_linter（与顶层 propose_dsl 一致），
+        # 让 R41 等反模式警告对子流程可见——旧实现不 lint，子流程可藏『link in→api 终点』
+        # 这类 round21 竞态危险形状。非阻断：仅随回执透出，由人类在 WebUI 审核时看到。
+        lint_issues = lint_flow({"nodes": _nodes})
+        lint_summary = [{"rule": v.get("rule"), "level": v.get("level"), "message": v.get("message")}
+                        for v in lint_issues if v.get("level") in ("error", "warning")]
+        lint_error_count = sum(1 for v in lint_issues if v.get("level") == "error")
+        lint_warning_count = sum(1 for v in lint_issues if v.get("level") == "warning")
+        _slog(_tid, "propose_subflow.lint", lint_errors=lint_error_count,
+              lint_warnings=lint_warning_count)
         content: Dict[str, Any] = {
             "type": "subflow",
             "dsl_name": dsl_name,
@@ -5509,6 +5519,10 @@ class Gateway:
             "name": name,
             "node_count": len(_nodes),
             "label": _label,
+            "lint": lint_issues,
+            "lint_summary": lint_summary,
+            "lint_error_count": lint_error_count,
+            "lint_warning_count": lint_warning_count,
             "_telemetry": _tag_action("propose_subflow", {"ok": True}, agent_id,
                                       extra={"proposal_id": proposal_id,
                                              "dsl_name": dsl_name},
