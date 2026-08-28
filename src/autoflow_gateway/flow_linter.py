@@ -28,6 +28,8 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
+import ipaddress
+from urllib.parse import urlparse
 
 
 # ── 公共类型 ──
@@ -1898,6 +1900,7 @@ def _lint_dangerous_code(nodes: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         if ntype == "http request":
             url = n.get("url") or ""
             hits = _scan_dangerous_patterns(url)
+            hits += _ssrf_host_warn(url)  # WB87 R2：RFC1918/回环/链路本地/模板宿主 告警
             if hits:
                 out.append(_r40_warning(nid, ntype, hits))
             continue
@@ -1913,6 +1916,38 @@ def _scan_dangerous_patterns(code: str) -> List[str]:
         if pat in code:
             hits.append(desc)
     return hits
+
+
+def _ssrf_host_warn(url: str) -> List[str]:
+    """WB87 R2：http request host 内网/回环/链路本地/模板注入告警（warning，不阻断）。
+
+    与 dsl_engine._validate_request_host（compile 期硬拦 链路本地/回环/元数据/模板宿主）互补：
+    此处对 RFC1918 私网段发 warning（网关合法控 LAN，仅告警供人审），并对 raw/native 流
+    做纵深防御。公网域名/IP 不告警，避免误伤 example.com 等合法调用。
+    """
+    if not isinstance(url, str) or not url.strip():
+        return []
+    p = urlparse(url)
+    scheme = (p.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        return []
+    host = (p.netloc.split("@", 1)[-1].split(":", 1)[0] or "").strip().strip("[]")
+    if not host:
+        return []
+    # 动态表达式 / 模板注入宿主（运行时由变量拼出）
+    if re.search(r"[\$`]|{{|\${", host):
+        return ["host 含动态表达式（SSRF/模板注入风险，运行时由 flow 变量拼出并解析）"]
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return []  # 域名（元数据域名已由 _DANGEROUS_CODE_PATTERNS 覆盖）
+    if ip.is_loopback:
+        return [f"host 命中回环地址（SSRF 风险，可访问本机服务）：{host}"]
+    if ip.is_link_local:
+        return [f"host 命中链路本地地址（云元数据 SSRF 风险）：{host}"]
+    if ip.is_private:
+        return [f"host 命中私网/RFC1918 地址（SSRF 风险，可访问内网设备如路由器/NAS/HA）：{host}"]
+    return []
 
 
 def _r40_warning(nid: str, ntype: str, hits: List[str]) -> Dict[str, str]:

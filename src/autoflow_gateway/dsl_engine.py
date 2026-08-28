@@ -145,9 +145,10 @@ C_QUERY_FORMAT = "C_QUERY_FORMAT"        # 查询格式错
 C_READ_FORMAT = "C_READ_FORMAT"          # 取值格式错
 C_READ_RESERVED = "C_READ_RESERVED"      # 取值读取了保留字（payload/msg 等）
 C_DELAY_UNIT = "C_DELAY_UNIT"          # 延时单位非法（如 光年），fail-closed 拒绝编译
-C_LABEL_UNDEFINED = "C_LABEL_UNDEFINED"  # 分支/动作引用未定义的取值标签，fail-closed 拒绝（防静默反向执行）
-C_TIMERANGE_FORMAT = "C_TIMERANGE_FORMAT"  # 时间段格式错
+C_LABEL_UNDEFINED = "C_LABEL_UNDEFINED"  # 分支/条件/动作引用未定义的取值标签或未声明 flow 变量，fail-closed 拒绝（防静默反向执行/静默不触发）
+C_TIMERANGE_FORMAT = "C_TIMERANGE_FORMAT"  # 时间段格式错（含溢出时刻 00:00–23:59 校验）
 C_REQUEST_FORMAT = "C_REQUEST_FORMAT"    # 请求格式错
+C_REQUEST_HOST = "C_REQUEST_HOST"        # 请求 host 校验失败（SSRF 收口：非 http/https、链路本地/回环/云元数据、host 含动态表达式）
 C_REQUEST_PARAM = "C_REQUEST_PARAM"      # HTTP 参数解析错
 C_EXTRACT_FORMAT = "C_EXTRACT_FORMAT"    # 提取格式错
 C_EXTRACT_EMPTY = "C_EXTRACT_EMPTY"      # 提取字段名/表达式为空
@@ -1153,11 +1154,63 @@ def _parse_time_range(s: str, line: int) -> TimeRange:
     编译为 time-range-switch（2 输出 + only 星期限定），在时间段内继续主链。"""
     s = s.strip()
     weekday, rest = _parse_time_range_weekday(s)
-    m = re.match(r"^(\d{1,2}:\d{2})\s*[-~]\s*(\d{1,2}:\d{2})$", rest)
+    m = re.match(r"^(\d{1,2}):(\d{2})\s*[-~]\s*(\d{1,2}):(\d{2})$", rest)
     if not m:
         raise DSLError(f"时间段格式应为 'HH:MM-HH:MM'（可加星期前缀如 工作日）：{rest}"
                        f"（建议：写成 时间段: 07:00-23:00，星期前缀放前面如 工作日 20:00-23:00）", line, code=C_TIMERANGE_FORMAT)
-    return TimeRange(start=m.group(1), end=m.group(2), weekday=weekday)
+    # WB86 F6：时刻范围校验（保留跨午夜语义：end<start 视为隔夜窗口，合法）。
+    try:
+        sh, sm, eh, em_ = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+    except ValueError:
+        raise DSLError(f"时间段时刻非法：{rest}（建议：HH:MM-HH:MM，如 07:00-23:00）", line, code=C_TIMERANGE_FORMAT)
+    if not (0 <= sh <= 23 and 0 <= sm <= 59 and 0 <= eh <= 23 and 0 <= em_ <= 59):
+        raise DSLError(f"时间段时刻需在 00:00–23:59 之间（隔夜窗口如 18:00-09:00 合法）：{rest}"
+                       f"（建议：写成 时间段: 07:00-23:00）", line, code=C_TIMERANGE_FORMAT)
+    return TimeRange(start=f"{m.group(1)}:{m.group(2)}", end=f"{m.group(3)}:{m.group(4)}", weekday=weekday)
+
+
+# WB86 F7 / WB87 R3：云元数据 host 收口（凭证窃取，compile 期硬拦）。
+# - 域名类（GCP/内部）：metadata.google.internal 等。
+# - IP 类：169.254.169.254（AWS/GCP/Azure/Oracle IMDS，属链路本地）+
+#   100.100.100.200（阿里云 IMDS，非链路本地，需显式拦截）。
+_METADATA_HOSTS = {"metadata.google.internal"}
+_METADATA_IPS = {"169.254.169.254", "100.100.100.200"}
+
+
+def _validate_request_host(url: str, line: int):
+    """请求 host 语义校验（SSRF 收口）。
+
+    拒绝：非 http/https 协议；链路本地(169.254.0.0/16、fe80::/10)/回环(127.0.0.0/8、::1)
+    host；云元数据域名；host 含动态表达式($/{{/${/反引号，模板注入向量)。
+    注意：本网关本就控制 LAN 设备（192.168/10/172 等 RFC1918 私网），故【不】封锁
+    私网段——只封锁 unambiguously 危险的链路本地/回环/元数据，避免误伤合法 LAN 调用。
+    """
+    from urllib.parse import urlparse
+    import ipaddress
+    p = urlparse(url)
+    scheme = (p.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise DSLError(f"请求仅支持 http/https 协议（SSRF 收口），不支持『{scheme or '空'}』：{url}"
+                       f"（建议：用 http:// 或 https://）", line, code=C_REQUEST_HOST)
+    # 去 userinfo 与端口，取纯 host（IPv6 可能带方括号，一并剥掉）
+    host = (p.netloc.split("@", 1)[-1].split(":", 1)[0] or "").strip().strip("[]")
+    if not host:
+        raise DSLError(f"请求 URL 缺少 host：{url}", line, code=C_REQUEST_HOST)
+    # 动态表达式注入：host 不得含 JSONata/模板动态 token（防 SSRF 模板注入）
+    if re.search(r"[\$`]|{{|\${", host):
+        raise DSLError(f"请求的 host 不得包含动态表达式（SSRF/模板注入风险）：{host}"
+                       f"（建议：host 写静态域名或 IP）", line, code=C_REQUEST_HOST)
+    # 链路本地 / 回环（IP 字面量）
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_link_local or ip.is_loopback or host in _METADATA_IPS:
+            raise DSLError(f"请求的 host 命中链路本地/回环地址（SSRF 风险）：{host}"
+                           f"（建议：改用业务可达地址）", line, code=C_REQUEST_HOST)
+    except ValueError:
+        pass  # 非 IP 字面量（域名），走下方字符串匹配
+    # 云元数据域名（GCP 内部）
+    if host in _METADATA_HOSTS or ("metadata" in host and host.endswith(".internal")):
+        raise DSLError(f"请求的 host 命中云元数据域名（SSRF 风险）：{host}", line, code=C_REQUEST_HOST)
 
 
 def _parse_http(s: str, line: int) -> HttpRequest:
@@ -1181,6 +1234,10 @@ def _parse_http(s: str, line: int) -> HttpRequest:
         method = "GET"
         url = m2.group(1)
         rest = (m2.group(2) or "").strip()
+
+    # WB86 F7：请求 host 语义校验（SSRF 收口）——拒绝非 http/https、链路本地/回环/
+    # 云元数据 host、host 含动态表达式（模板注入向量）。
+    _validate_request_host(url, line)
 
     body = None
     headers: list[dict] = []
@@ -1958,6 +2015,10 @@ def compile(scene: Scene, target: str = "staging") -> dict:
     em.flow_vars = set(scene.variables.keys())
     # WB25-NEW-2：收集 取值 字段名，供 _emit_switch 对齐分支 JSONata / eq 路径到 msg.payload.<field>
     em.read_fields = _collect_read_fields(scene)
+    # WB86 F1 补强：收集 提取 字段名（落点 msg.<name>），与 取值 合并为「已定义标签」白名单，
+    # 供未定义标签扫描豁免（提取结果在 分支/条件 裸引用属合法，不得误伤）。
+    em.extract_fields = _collect_extract_fields(scene)
+    em.defined_label_fields = em.read_fields | em.extract_fields
 
     # 多触发：先全部发射（拿到节点 id），再按段分配
     all_src_ids = [_emit_trigger(em, t, target) for t in scene.triggers]
@@ -2007,8 +2068,19 @@ def compile(scene: Scene, target: str = "staging") -> dict:
         else:
             # 非状态断言（其他复杂 JSONata 表达式）仍走 jsonata switch 兜底；
             # 经 _sanitize_jsonata 归一全角符号（（）＝），避免 R7 静默不求值。
+            # WB86 F5b：条件 JSONata 引用未定义取值标签/未声明 flow 变量 → fail-closed，
+            # 否则运行时 NaN→条件恒假→整条自动化静默不触发（与 F1 同源 fail-open 语义闸）。
+            _cond_sanitized = _sanitize_jsonata(cond)
+            _rf = getattr(em, "defined_label_fields", getattr(em, "read_fields", set()))
+            _fv = getattr(em, "flow_vars", set())
+            _bad = _find_undefined_labels(_cond_sanitized, _rf, _fv, scan_flow_path=True)
+            if _bad:
+                raise DSLError(
+                    f"条件表达式『{cond}』引用了未定义的取值标签：{', '.join(_bad)}"
+                    f"（请先在『取值:』步骤里定义该标签，再在条件中引用）[C_LABEL_UNDEFINED]",
+                    None, code=C_LABEL_UNDEFINED)
             sid = em.add("switch", name=f"条件: {cond}",
-                         rules=[{"t": "jsonata_exp", "v": _sanitize_jsonata(cond), "vt": "jsonata"}],
+                         rules=[{"t": "jsonata_exp", "v": _cond_sanitized, "vt": "jsonata"}],
                          outputs=1)
             for s in all_src_ids:
                 em.connect(s, sid)
@@ -2922,11 +2994,13 @@ def _emit_action(em: _Emitter, st: Action) -> str:
     # WB85 F1：动作参数里的动态表达式若引用未定义的取值标签 → fail-closed 拒绝。
     # 仅检查被识别为 JSONata 的参数值（_DYN_PARAM_RE 命中：payload./msg./flow./global. 或 $func/${）。
     if uses_var:
-        _rf = getattr(em, "read_fields", set())
+        _rf = getattr(em, "defined_label_fields", getattr(em, "read_fields", set()))
         _fv = getattr(em, "flow_vars", set())
         for _k, _v in params.items():
             if isinstance(_v, str) and _DYN_PARAM_RE.search(_v):
-                _bad = _find_undefined_labels(_v, _rf, _fv)
+                # 动作参数只查裸未定义标签（scan_flow_path=False）：flow.X 是数据传参，
+                # 未定义→传坏值而非控制流反向，与 分支/条件 风险不同，保持既有行为。
+                _bad = _find_undefined_labels(_v, _rf, _fv, scan_flow_path=False)
                 if _bad:
                     raise DSLError(
                         f"动作 {st.domain}.{st.service} 的参数『{_k}={_v}』引用了未定义的取值标签："
@@ -3236,12 +3310,32 @@ _JSONATA_SAFE_WORDS = {
 }
 
 
-def _find_undefined_labels(expr: str, read_fields, flow_vars) -> list:
-    """扫描 JSONata 表达式里的裸标识符（不被 . / $ 前置），返回其中【未定义】的标签列表。
+def _mask_string_literals(expr: str) -> str:
+    """剔除引号字符串（"..." '... `...），避免未定义标签扫描误伤字面量
+    （如 分支 msg.payload == "有人" 里的『有人』）。"""
+    s = re.sub(r'"[^"]*"', " ", expr)
+    s = re.sub(r"'[^']*'", " ", s)
+    s = re.sub(r"`[^`]*`", " ", s)
+    return s
 
-    命中 read_fields / flow_vars / _JSONATA_SAFE_WORDS 的不算未定义。返回空 = 无未定义标签。"""
+
+def _find_undefined_labels(expr: str, read_fields, flow_vars, scan_flow_path=True) -> list:
+    """扫描 JSONata 表达式里的【未定义标签】，返回列表。
+
+    - 裸标识符（不被 . / $ 前置）：不在 read_fields/flow_vars/_JSONATA_SAFE_WORDS → 未定义；
+    - flow.<name> 路径成员（scan_flow_path=True 时）：name 不在 flow_vars → 未定义
+      （WB86 F5a：flow.未声明变量 运行时为 undefined → $number→NaN→条件恒假/反向执行）。
+    命中白名单的不算未定义。返回空 = 无未定义标签。
+
+    read_fields 实为「已定义的取值标签 ∪ 提取字段」（见 compile 里 em.defined_label_fields），
+    故 取值/提取 结果在 分支/条件 里引用不会误伤；引号内字面量已先剔除。
+    注：scan_flow_path 默认 True；动作参数(_emit_action)传 False——动作参数里的 flow.X 是
+    数据传递（未定义→传坏值，非控制流反向），与 分支/条件 的 fail-open 语义闸风险不同，
+    故动作参数保持「只查裸未定义标签」的既有行为，避免误伤 flow.X 风格动态传参。
+    """
     if not expr:
         return []
+    expr = _mask_string_literals(expr)
     toks = re.findall(r"(?<![.\w$一-鿿])([A-Za-z_一-鿿][\w一-鿿]*)", expr)
     bad, seen = [], set()
     for t in toks:
@@ -3251,6 +3345,17 @@ def _find_undefined_labels(expr: str, read_fields, flow_vars) -> list:
         if t in read_fields or t in flow_vars or t in _JSONATA_SAFE_WORDS:
             continue
         bad.append(t)
+    if scan_flow_path:
+        # WB86 F5a：flow.<name> 路径引用——name 必须已声明为场景变量(flow_vars)，
+        # 否则运行时 flow.<name> 为 undefined → $number→NaN→条件恒假/反向执行。
+        for m in re.finditer(r"\bflow\s*\.\s*([A-Za-z_一-鿿][\w一-鿿]*)", expr):
+            nm = m.group(1)
+            if nm in seen:
+                continue
+            seen.add(nm)
+            if nm in flow_vars or nm in _JSONATA_SAFE_WORDS:
+                continue
+            bad.append(nm)
     return bad
 
 
@@ -3266,6 +3371,33 @@ def _collect_read_fields(scene: Scene) -> set:
         for st in steps:
             if isinstance(st, ReadState) and st.field:
                 fields.add(st.field)
+            elif isinstance(st, Switch):
+                for b in st.branches:
+                    walk(b.body)
+                walk(st.else_body)
+            elif isinstance(st, (CurrentState, TimeRange)):
+                walk(getattr(st, "body", []))
+                walk(getattr(st, "else_body", []))
+            elif isinstance(st, Parallel):
+                for c in st.children:
+                    walk([c])
+    walk(scene.body)
+    return fields
+
+
+def _collect_extract_fields(scene: Scene) -> set:
+    """收集场景里所有 提取(Extract) 步骤的具名字段名（落点 msg.<name>）。
+
+    WB86 F1 补强：提取结果在 分支/条件 里以裸标识符引用（如 提取: 温度数值 = ... 后
+    『分支 温度数值 > 28』）应视为已定义，不误伤（提取写 msg.<name>，与 取值 写
+    msg.payload.<field> 落点不同，故单列收集，不混入 em.read_fields 以免被 _bind_read_fields
+    误改写为 payload.<name>）。"""
+    fields: set = set()
+
+    def walk(steps):
+        for st in steps:
+            if isinstance(st, Extract) and st.name:
+                fields.add(st.name)
             elif isinstance(st, Switch):
                 for b in st.branches:
                     walk(b.body)
@@ -3439,7 +3571,7 @@ def _emit_switch(em: _Emitter, sw: Switch) -> str:
     # 已定义的取值标签（em.read_fields）会被 _bind_read_fields 改写为 payload.<field>，
     # 此处对「改写前」的原文做未定义引用扫描：jsonata 规则扫整条表达式、eq/ne 规则只看
     # 顶层裸字段（带 . 的路径如 msg.x/switch.x 跳过，避免误伤）。
-    _rf = getattr(em, "read_fields", set())
+    _rf = getattr(em, "defined_label_fields", getattr(em, "read_fields", set()))
     _fv = getattr(em, "flow_vars", set())
     for _i, _ri in enumerate(rule_info):
         if _ri["t"] == "else":
@@ -3464,7 +3596,7 @@ def _emit_switch(em: _Emitter, sw: Switch) -> str:
             node_prop = ri["property"]
             # WB25-NEW-2：取值 字段落点在 msg.payload.<field>，节点级 property 同步对齐，
             # 否则 NR 按 msg.<field> 读（undefined）。与 flow 变量作用域互斥判定并存。
-            if node_prop in getattr(em, "read_fields", set()):
+            if node_prop in getattr(em, "defined_label_fields", getattr(em, "read_fields", set())):
                 node_prop = "payload." + node_prop
             # C2 修复：若分支 LHS 是场景变量（由 `变量:` 写入 flow 上下文），
             # 则 switch 改读 flow 上下文，否则读 msg（默认）。同一 switch 只能用一种作用域，
@@ -3483,12 +3615,12 @@ def _emit_switch(em: _Emitter, sw: Switch) -> str:
         if ri["vt"] == "jsonata":
             if em.flow_vars:
                 v = _bind_flow_vars(v, em.flow_vars)
-            if getattr(em, "read_fields", set()):
+            if getattr(em, "defined_label_fields", getattr(em, "read_fields", set())):
                 v = _bind_read_fields(v, em.read_fields)
         else:
             # eq/ne 规则的 property 同样须对齐取值落点（msg.payload.<field>）
             prop = ri.get("property", "payload")
-            if prop in getattr(em, "read_fields", set()):
+            if prop in getattr(em, "defined_label_fields", getattr(em, "read_fields", set())):
                 prop = "payload." + prop
                 ri = {**ri, "property": prop}
         _bound_rules.append({"t": ri["t"], "v": v, "vt": ri["vt"], **({"property": ri["property"]} if ri["vt"] != "jsonata" else {})})
