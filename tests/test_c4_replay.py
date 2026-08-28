@@ -29,6 +29,7 @@ from autoflow_gateway.config import reset_config
 reset_config()
 GW = G.Gateway()
 for _eid in ("light.study_main", "binary_sensor.study_motion",
+            "binary_sensor.study_pc",
             "light.philips_cn_249518489_rwread_s_2_light"):
     GW.state.add_mapping(_eid, _eid)
 
@@ -214,20 +215,26 @@ def test_gate_timerange_outside_window_blocks():
                                 [{"entity_id": "light.study_main", "state": "on"}],
                                 vhass_store=store, virtual_time="2026-07-16T10:00:00",
                                 branch_aware=True)
-    # 窗口外 time-range-switch 走 out1(空) → 开灯意图不执行 → light 仍为 off → 断言失败
-    assert gate["passed"] is False, gate
+    # 窗口外 time-range-switch 走 out1(空) → 开灯意图不执行 → 该后置条件属「未激活分支」，
+    # 按 WB91 P3-F1/P3-F2 修复跳过断言 → 不再硬拦（与 propose 一致），verdict 降级
+    # 「未充分验证」（0 重放，诚实标注未覆盖），而非误杀这份合法时间段流。
+    assert gate["passed"] is True, gate
+    assert gate["verdict"] == "未充分验证", gate
     assert not any("turn_on" in r for r in gate["replayed_services"]), \
         f"窗口外仍重放了开灯：{gate['replayed_services']}"
 
 
 # ── 5) 条件流（分支未命中）→ 负向验证通过（灯保持 off，闸门不误杀）──
 DSL_COND_PC_OFF = """场景: 书房电脑开才开挂灯
-触发: inject(payload={"pc":"off"})
+触发: inject
+取值: binary_sensor.study_pc pc
 分支 pc = "on":
     动作: light.turn_on(light.study_main, brightness=80)
 预期:
   light.study_main = off
 """
+
+SEED_PC = (("binary_sensor.study_pc", "书房电脑", "书房", "off", {}),)
 
 
 def test_gate_conditional_flow_passes_when_branch_untriggered():
@@ -235,10 +242,11 @@ def test_gate_conditional_flow_passes_when_branch_untriggered():
     灯保持 seed 态 off（负向验证通过），后置条件{挂灯=off}成立、无失败、不 N/A，
     闸门放行（不误杀「书房电脑开→开挂灯」这类条件流）。
 
-    注：本测试原写法（预期=on）断言的是「分支触发后的后置」，但种子态 pc=off 分支
-    不触发，故原测试检验的是并不存在的「未命中即 N/A 跳过」行为 → 属测试过时，
-    已于 TEST_RESULT_003 收口：改验负向路径（灯保持 off）。"""
-    store = _vhass_with(*SEED_LIGHT)
+    注：本测试原写法（预期=on / 分支直接引 payload 字段 pc）在 WB90 标签硬化
+    （C_LABEL_UNDEFINED fail-closed）后已无法编译，故改为 取值: 显式声明标签 pc，
+    种子态 pc=off 使分支不触发，仍验负向路径（灯保持 off）。该语义恰是 P3-F1 的
+    负向面：未命中的条件分支不被误判、不被硬拦。"""
+    store = _vhass_with(*SEED_LIGHT, *SEED_PC)
     gate = GW.run_staging_gate(DSL_COND_PC_OFF,
                                [{"entity_id": "light.study_main", "state": "off"}],
                                vhass_store=store, branch_aware=True)

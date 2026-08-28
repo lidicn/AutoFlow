@@ -5926,6 +5926,20 @@ class Gateway:
                 elif _vg_is_external_call(nd.get("type")):
                     if nd["id"] in active:
                         external.append(nd.get("name") or nd.get("type") or "subflow")
+            # 【WB91·P3-F1/P3-F2 修复】分支感知后置条件断言：
+            # 设备不可能同时 on 又 off，来自「未激活分支」的后置条件在本世界态下永不可达
+            # （典型即条件流的「反向切换 else」）。把这些 (entity_id, state) 收为 inactive_effects，
+            # 断言时跳过（不计入失败）——否则 verify_flow 对一切含反向 else 的合法条件流恒拦，
+            # 与 propose 方向相反（P3-F2 复活）。active 集合在 branch_aware=False 时含全部节点，
+            # 故该逻辑对非分支感知模式自动失效（退回旧行为，全部断言），安全。
+            inactive_effects = set()
+            for _nd in flow.get("nodes", []):
+                if _nd.get("type") == "api-call-service" and _nd["id"] not in active:
+                    _dm, _sv, _tg, _dt = _ha_node_call(_nd)
+                    for _t in _tg:
+                        _st, _why = _expected_state_for(_dm, _sv, _dt)
+                        if _st is not None:
+                            inactive_effects.add((_t, _st))
             # 2d) 断言后置条件
             assertions = []
             failures = []
@@ -5934,6 +5948,16 @@ class Gateway:
                 want_sub = cond.get("subflow") or cond.get("subflow_name")
                 if eid:
                     want = cond.get("state")
+                    # 来自未激活分支的后置条件：当前世界态下该分支不会执行，
+                    # 断言它必失败（设备处于另一态）→ 假阳性。跳过（非失败、非 N/A）。
+                    if (eid, want) in inactive_effects:
+                        assertions.append({
+                            "kind": "state", "entity_id": eid,
+                            "expected": want, "actual": None, "ok": True,
+                            "branch_inactive": True,
+                            "reason": ("该后置条件来自未激活分支（当前世界态下该分支不执行），"
+                                       "按 P3-F1/P3-F2 修复跳过断言（非失败）")})
+                        continue
                     rec = store.get_state(eid)
                     got = rec.get("state") if rec else None
                     ok = (got == want)
@@ -6171,7 +6195,12 @@ class Gateway:
         reasons = []
         for a in sr["assertions"]:
             # G3：恒假分支导致的未过标 [N/A]（不是设备没响应，是分支永不执行）
-            mark = "[通过]" if a["ok"] else ("[N/A]" if a.get("na") else "[未过]")
+            if a.get("branch_inactive"):
+                mark = "[跳过]"
+            elif a["ok"]:
+                mark = "[通过]"
+            else:
+                mark = "[N/A]" if a.get("na") else "[未过]"
             # A12：断言项现在有 state / subflow / unknown 三种，标签不能只认 entity_id
             label = a.get("entity_id") or a.get("subflow") or "期望项"
             line = f"{mark} {label} 期望={a['expected']} 实测={a['actual']}"
