@@ -2028,6 +2028,14 @@ def compile(scene: Scene, target: str = "staging") -> dict:
         # 而非一律字符串——下游 JSONata（flow.X）与 HA 服务调用才能拿到真数值/布尔。
         rules = []
         for k, v in scene.variables.items():
+            # WB88 F9a：变量值若写成 JSONata/flow 引用形态（含 `$` 或 `flow.`），
+            # 必须校验引用已定义——否则 `$number(不存在的标签)` 原样落进 change 节点，
+            # 运行时 flow.<k> 是坏串 → 下游 $number()→NaN → 分支恒假 → 静默反向执行。
+            # 变量值本身是【字面量】语义（见 _flow_var_to_tot：tot=bool/num/json/str），
+            # 故仅对「像表达式」的值检查，避免误伤
+            # `变量: 消息 = 检测到有人移动` 这类无引号中文字面量。
+            if re.search(r"\$|flow\s*\.", str(v)):
+                _check_assign_labels(em, str(v), None, f"变量: {k}")
             to, tot = _flow_var_to_tot(v)
             rules.append({"t": "set", "p": k, "pt": "flow", "to": to, "tot": tot})
         vid = em.add("change", name="设置变量", rules=rules)
@@ -2630,6 +2638,9 @@ def _emit_body(em: _Emitter, steps: list, sources: list, x: int = 200,
                     em.connect_out(entry[0], entry[1], pending_extract)
                     last_upstream = []
                 last = pending_extract
+            # WB88 F9b：提取 的表达式以 tot=jsonata 落进 change 节点（必然求值），
+            # 未定义标签 → NaN → 下游分支恒假 → 静默反向执行，故 fail-closed。
+            _check_assign_labels(em, st.expr, getattr(st, "line", None), f"提取: {st.name}")
             em._find(pending_extract)["rules"].append(
                 {"t": "set", "p": st.name, "pt": "msg",
                  "to": _sanitize_jsonata(st.expr), "tot": "jsonata"})
@@ -3138,8 +3149,15 @@ def _emit_build(em: _Emitter, st: Build) -> str:
     下游 http request 节点在不带字面 body 时会自动发送这个 msg.payload。"""
     if st.kind == "json":
         to, tot = json.dumps(st.literal, ensure_ascii=False), "json"
+        # WB88 F9c：JSON 字面量（json.loads 成功分支）。正常 JSON 的字符串值必带引号，
+        # 会被 _mask_string_literals 剔除，故此检查通常不触发；保留是为「所有赋值通道
+        # 共用同一校验器」（WB87 R1），防止将来解析分支变化时漏检。
+        _check_assign_labels(em, to, getattr(st, "line", None), "构建(请求体)")
     else:
         # #507：构建请求体的 JSONata 表达式里裸变量名绑定到 flow 上下文
+        # WB88 F9d：`构建: {"v": $number(不存在的标签)}` 这类非合法 JSON 会退化到本分支
+        # （见 _parse_build），表达式以 tot=jsonata 落盘并求值 → 未定义标签同样静默失效。
+        _check_assign_labels(em, st.expr, getattr(st, "line", None), "构建(请求体)")
         to, tot = _bind_flow_vars(_sanitize_jsonata(st.expr), em.flow_vars), "jsonata"
     return em.add("change", name="构建请求体",
                   rules=[{"t": "set", "p": "payload", "pt": "msg",
@@ -3357,6 +3375,32 @@ def _find_undefined_labels(expr: str, read_fields, flow_vars, scan_flow_path=Tru
                 continue
             bad.append(nm)
     return bad
+
+
+def _check_assign_labels(em, expr: str, line, what: str):
+    """WB88 F9 / WB87 R1：赋值通道（变量/提取/构建）的未定义引用检查。
+
+    【单一共享校验器】与 分支/条件/动作 共用 _find_undefined_labels，杜绝
+    「修分支漏变量」式按例修复（WB87 R1 的补齐）。赋值侧与分支侧同属
+    fail-closed 语义：未定义标签 → $number()→NaN → 下游分支恒假 →
+    静默反向执行（如「按阈值开灯」恒走否则=关灯），是最危险的静默失效形态。
+
+    注意：不扫 msg.X 路径（msg.payload 等为运行时数据，扫描必误伤），
+    与 分支/条件 现有语义保持一致。
+    """
+    if not expr:
+        return
+    _bad = _find_undefined_labels(
+        expr,
+        getattr(em, "defined_label_fields", None) or set(),
+        getattr(em, "flow_vars", None) or set(),
+        scan_flow_path=True,
+    )
+    if _bad:
+        raise DSLError(
+            f"{what} 引用了未定义的取值标签或未声明的变量：{', '.join(_bad)}"
+            f"（请先在『取值:』步骤里定义该标签，或在『变量:』里声明该变量）[C_LABEL_UNDEFINED]",
+            line, code=C_LABEL_UNDEFINED)
 
 
 def _collect_read_fields(scene: Scene) -> set:
