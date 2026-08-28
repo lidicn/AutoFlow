@@ -78,13 +78,15 @@ def test_switch_jsonata_qualifies_read_field():
     switch = next(n for n in flow["nodes"] if n["type"] == "switch")
     # 找第一个真分支规则（非 else）
     rule = next(r for r in switch["rules"] if r.get("t") == "jsonata_exp")
-    assert "$number(payload.temperature)" in rule["v"], rule["v"]
-    assert "payload.temperature" in rule["v"]
+    assert "$number(msg.temperature)" in rule["v"], rule["v"]
+    assert "msg.temperature" in rule["v"]
+    assert "$number(payload.temperature)" not in rule["v"], "裸字段名未被对齐 → 分支仍将读空"
     assert "$number(temperature)" not in rule["v"], "裸字段名未被对齐 → 分支仍将读空"
 
 
 def test_switch_eq_rule_property_qualified():
-    """NEW-2 补：eq 规则 分支 temperature == 30 的节点级 property 应落到 payload.temperature。"""
+    """NEW-2 补：eq 规则 分支 temperature == 30 的节点级 property 应落到裸字段名 temperature
+    （propertyType=msg → 读 msg.temperature；取值经桥接 change 节点落 msg 根，WB90 F11）。"""
     dsl = (
         "场景: 温度等值\n"
         "触发: light.x on\n"
@@ -94,7 +96,7 @@ def test_switch_eq_rule_property_qualified():
     )
     flow = compile_dsl(dsl)
     switch = next(n for n in flow["nodes"] if n["type"] == "switch")
-    assert switch["property"] == "payload.temperature", switch.get("property")
+    assert switch["property"] == "temperature", switch.get("property")
 
 
 def test_read_state_lands_payload_field():

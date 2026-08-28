@@ -79,14 +79,20 @@ class TestVarInAction(unittest.TestCase):
 
 class TestVarInJsonata(unittest.TestCase):
     def test_branch_jsonata_binds_bare_var(self):
-        dsl = ("场景: x\n触发: inject\n变量: 阈值=10\n"
-               "分支: $number(s) < 阈值\n    动作: light.turn_on(light.x)\n"
+        # 裸变量名(阈值) → $flowContext('阈值')；裸取值标签(温度) → msg.温度。
+        # 注意：未声明标识符(如旧版的 s)会被 C_LABEL_UNDEFINED fail-closed 拦下，故此处两者都声明。
+        dsl = ("场景: x\n触发: inject\n"
+               "取值: sensor.temp 温度\n"
+               "变量: 阈值=10\n"
+               "分支: $number(温度) < 阈值\n    动作: light.turn_on(light.x)\n"
                "否则:\n    动作: light.turn_off(light.x)\n")
         flow = compile_dsl(dsl)
         sw = _by_type(flow, "switch")[0]
         jr = [r for r in sw["rules"] if r.get("vt") == "jsonata"][0]
-        self.assertEqual(jr["v"], "$number(s) < flow.阈值", "裸变量名应绑定到 flow 上下文")
-        self.assertNotIn("flow.s", jr["v"], "未声明标识符 s 不得被改写")
+        self.assertEqual(jr["v"], "$number(msg.温度) < $flowContext('阈值')",
+                         "变量绑 $flowContext、取值标签绑 msg.<field>")
+        self.assertNotIn("flow.阈值", jr["v"])
+        self.assertNotIn("payload.温度", jr["v"])
 
     def test_build_jsonata_binds_var(self):
         dsl = ("场景: x\n触发: inject\n变量: 阈值=10\n"
@@ -96,7 +102,7 @@ class TestVarInJsonata(unittest.TestCase):
         build = [c for c in chg if c.get("name") == "构建请求体"][0]
         rule = build["rules"][0]
         self.assertEqual(rule["tot"], "jsonata")
-        self.assertIn("flow.阈值", rule["to"])
+        self.assertIn("$flowContext('阈值')", rule["to"])
 
 
 if __name__ == "__main__":

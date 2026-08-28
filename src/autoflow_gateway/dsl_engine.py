@@ -2037,6 +2037,10 @@ def compile(scene: Scene, target: str = "staging") -> dict:
             if re.search(r"\$|flow\s*\.", str(v)):
                 _check_assign_labels(em, str(v), None, f"变量: {k}")
             to, tot = _flow_var_to_tot(v)
+            # WB90 F11 修复（CRITICAL）：变量裸引用 `阈值` 在分支/条件里此前因 _bind_flow_vars
+            # 错误改写为 flow.阈值（JSONata 里 flow 不是有效上下文引用 → 恒 undefined → 分支
+            # 恒走 else）而不可达。修复见 _bind_flow_vars：裸变量名改为 $flowContext('阈值')
+            # （Node-RED 读 flow 上下文的正确 JSONata 写法）。变量仍写入 flow 上下文（C2 契约保留）。
             rules.append({"t": "set", "p": k, "pt": "flow", "to": to, "tot": tot})
         vid = em.add("change", name="设置变量", rules=rules)
         for s in all_src_ids:
@@ -2896,32 +2900,47 @@ def _emit_read_state(em: _Emitter, st: ReadState) -> str:
         output_properties = [
             {"property": "payload", "propertyType": "msg",
              "value": '$type(payload) = "object" ? payload : {}', "valueType": "jsonata"},
+            # 保留 payload.<field> 别名（真实节点若兑现则多一处落点）；但 WB90 F11 实证
+            # 真实 NR 的 api-current-state 对【自定义】outputProperty 不兑现（仅 payload.state
+            # 可靠），故裸标签绑定不依赖它，见下方 change 桥接。
             {"property": f"payload.{st.field}", "propertyType": "msg",
              "value": "", "valueType": "entityState"},
             {"property": "payload.state", "propertyType": "msg",
              "value": "", "valueType": "entityState"},
         ]
+        nid = em.add("api-current-state", name=f"取值 {st.entity}",
+                     server=HA_SERVER_ID, version=7,
+                     entityId=entity,
+                     state_type="str", blockInputOverrides=False,
+                     outputProperties=output_properties,
+                     state_location="data", override_payload=False,
+                     halt_if="", halt_if_type="str", halt_if_compare="is",
+                     outputs=1)
+        # WB90 F11 修复（CRITICAL）：取值标签在运行时不可达 → 分支/条件恒走 else（静默反向执行）。
+        # 根因：① 分支/条件裸标签 `光照` 解析为 msg.光照，但取值原只写 payload.<field>（且真实节点
+        #   不兑现该自定义 outputProperty）；② _bind_read_fields 把裸字段改写成 payload.<field>，
+        #   两头都指到不可达位置。修复：用 change 节点把【真实节点可靠写入的】payload.state 复制到
+        #   msg 根（msg.<field>），与「提取」通道(pt:msg) 落点一致，裸标签即可原生解析。
+        vid = em.add("change", name=f"绑定 {st.field}", rules=[
+            {"t": "set", "p": st.field, "pt": "msg",
+             "to": "payload.state", "tot": "msg"},
+        ])
+        em.connect(nid, vid)
+        return vid
     else:
         output_properties = [
             {"property": "payload", "propertyType": "msg",
              "value": "", "valueType": "entityState"},
         ]
-    nid = em.add("api-current-state", name=f"取值 {st.entity}",
-                 server=HA_SERVER_ID, version=7,
-                 entityId=entity,
-                 state_type="str", blockInputOverrides=False,
-                 outputProperties=output_properties,
-                 # WB23 #634 修复：NODE_DEFAULT_FIELDS 给 api-current-state 注入的
-                 # state_location="payload" + override_payload=True 会与上面的 outputProperties
-                 # 同写 msg.payload（或 payload.*），在 NR 节点上冲突 → 节点吐时间戳
-                 # 而非数值（全实体类型通病，gate 全盲）。此处把节点原生状态输出改写到
-                 # msg.data（避开 payload），由 outputProperties 独家负责把实体态写入
-                 # msg.payload（含 payload.<field> / payload.state 别名），消除同写冲突。
-                 state_location="data", override_payload=False,
-                 # 空 halt_if → 不门控，仅透传
-                 halt_if="", halt_if_type="str", halt_if_compare="is",
-                 outputs=1)
-    return nid
+        nid = em.add("api-current-state", name=f"取值 {st.entity}",
+                     server=HA_SERVER_ID, version=7,
+                     entityId=entity,
+                     state_type="str", blockInputOverrides=False,
+                     outputProperties=output_properties,
+                     state_location="data", override_payload=False,
+                     halt_if="", halt_if_type="str", halt_if_compare="is",
+                     outputs=1)
+        return nid
 
 
 def _emit_time_range(em: _Emitter, st: TimeRange) -> str:
@@ -3250,11 +3269,13 @@ def _is_protected_seg(seg: str) -> bool:
 
 
 def _bind_flow_vars(expr: str, var_names):
-    """把 JSONata 表达式里的【已声明场景变量名】绑定到 flow 上下文（flow.<name>）。
+    """把 JSONata 表达式里的【已声明场景变量名】绑定到 flow 上下文（$flowContext('name')）。
 
     作用：变量（变量: X=v 经 _flow_var_to_tot 写入 flow 上下文）此前在 JSONata 里是死变量——
-    裸写 X 既不被识别为 flow 也不被识别为 msg，节点不认识 X → 表达式静默不求值。现改写裸变量名
-    为 flow.X，使 JSONata 从 flow 上下文取到原生类型变量值（iss_185a55e085 根因修复 #507）。
+    裸写 X 既不被识别为 flow 也不被识别为 msg，节点不认识 X → 表达式静默不求值。WB90 F11 前此处
+    错误改写为 flow.X（JSONata 里 flow 不是有效上下文引用，需 $flowContext('X') 才读得到，故变量
+    在分支/条件里恒 undefined → 分支恒走 else）。现统一改写为 $flowContext('X')，从 flow 上下文
+    取到原生类型变量值（iss_185a55e085 根因修复 #507 的正确落地；C2 变量走 flow 上下文契约保留）。
 
     安全边界：
     - 只改写【声明过】的变量名，未声明标识符（如 msg 字段 s、$函数）不受影响；
@@ -3276,19 +3297,18 @@ def _bind_flow_vars(expr: str, var_names):
         s = seg
         for nm in names:
             rx = re.compile(r"(?<![.\w$一-鿿])" + re.escape(nm) + r"(?![一-鿿\w])")
-            s = rx.sub(r"flow." + nm, s)
+            s = rx.sub(r"$flowContext('" + nm + r"')", s)
         out.append(s)
     return "".join(out)
 
 
 def _bind_read_fields(expr: str, field_names) -> str:
-    """把 switch JSONata 表达式里的【取值字段名】绑定到 msg.payload 上下文（payload.<field>）。
+    """把 switch JSONata 表达式里的【取值字段名】绑定到 msg 根上下文（msg.<field>）。
 
-    取值 节点把实体状态写到 msg.payload.<field>（而非 msg.<field>）；而 NR switch 的 JSONata 规则
-    以 msg 为求值上下文（裸 identifier 解析为 msg.<id>）。于是 取值 X 后用 分支: $number(X)>25 时，
-    $number(X) 实际读 msg.X（undefined）→ 分支恒走 else（WB25-NEW-2 / #634 数据断裂根因之一）。
-
-    此处把开关规则里的裸字段名改写为 payload.X，使其与 取值 的落点对齐。
+    取值 节点把实体状态经桥接 change 节点写到 msg.<field>（WB90 F11 修复前写的是 msg.payload.<field>
+    且真实 NR 节点不兑现该自定义 outputProperty）；而 NR switch 的 JSONata 规则以 msg 为求值上下文
+    （裸 identifier 解析为 msg.<id>）。此处把开关规则里的裸字段名改写为 msg.X，使其与取值的落点对齐
+    （WB90 F11：避免 $number(X) 读 msg.X 时因落点错位而恒 undefined → 分支恒走 else）。
     安全边界（同 _bind_flow_vars）：只改写【取值过】的字段名；已带 payload./msg./flow./$ 前缀或
     {{...}} 模板的标识符不重复改写（负向后顾 `[^.\\w$一-鿿]`）；词尾边界 `[^一-鿿\\w]` 防长标识符
     误吞；mustache {{...}} 与引号字符串字面量整体跳过；按字段名长度降序处理，避免短名误吞长名
@@ -3305,7 +3325,7 @@ def _bind_read_fields(expr: str, field_names) -> str:
         s = seg
         for nm in names:
             rx = re.compile(r"(?<![.\w$一-鿿])" + re.escape(nm) + r"(?![一-鿿\w])")
-            s = rx.sub(r"payload." + nm, s)
+            s = rx.sub(r"msg." + nm, s)
         out.append(s)
     return "".join(out)
 
@@ -3638,21 +3658,21 @@ def _emit_switch(em: _Emitter, sw: Switch) -> str:
     for ri in rule_info:
         if ri["t"] != "jsonata":
             node_prop = ri["property"]
-            # WB25-NEW-2：取值 字段落点在 msg.payload.<field>，节点级 property 同步对齐，
-            # 否则 NR 按 msg.<field> 读（undefined）。与 flow 变量作用域互斥判定并存。
+            # WB90 F11：取值字段落点已改为 msg 根（见 _emit_read_state 桥接节点），
+            # property 保持裸字段名、propertyType=msg 即读 msg.<field>，不再前缀 payload.
             if node_prop in getattr(em, "defined_label_fields", getattr(em, "read_fields", set())):
-                node_prop = "payload." + node_prop
-            # C2 修复：若分支 LHS 是场景变量（由 `变量:` 写入 flow 上下文），
-            # 则 switch 改读 flow 上下文，否则读 msg（默认）。同一 switch 只能用一种作用域，
-            # 按首个规则的 LHS 判定——变量与 msg 字段混用的分支极罕见，且变量场景应优先对齐 flow。
+                node_ptype = "msg"
+            # C2（保留）：变量(变量:) 写入 flow 上下文，分支 LHS 命中变量时节点改读
+            # flow 上下文（裸变量名经 _bind_flow_vars 改写为 $flowContext('阈值') 从 flow
+            # 上下文取值，WB90 F11 修复前错写成 flow.<name> 导致读不到）。
             if node_prop in getattr(em, "flow_vars", set()):
                 node_ptype = "flow"
             break
-    # #507：分支/条件 jsonata 规则里的裸变量名绑定到 flow 上下文（flow.<变量名>），
-    # 让变量从死变量变为可被 switch 读到的真值（iss_185a55e085）。else 规则 v="true" 无变量名，
-    # _bind_flow_vars 不改写。
-    # WB25-NEW-2：取值字段落点 msg.payload.<field>，jsonata 里裸字段名须对齐到 payload.<field>，
-    # 否则 $number(温度) 读 msg.温度（undefined）→ 分支恒走 else。
+    # #507 / WB90 F11：分支/条件 jsonata 规则里的裸变量名经 _bind_flow_vars 改写为
+    # $flowContext('变量名')（WB90 F11 前错误改写为 flow.<name>，JSONata 里 flow 不是有效
+    # 上下文引用 → 恒 undefined → 分支恒走 else）；裸取值字段名经 _bind_read_fields 改写为
+    # msg.<field>（取值现写 msg 根）。两者分别指向 flow 上下文 / msg 根，裸标签即可原生解析，
+    # 消除「分支恒走 else」的静默反向执行。else 规则 v="true" 无标签/变量名，_bind_*_vars 不改写。
     _bound_rules = []
     for ri in rule_info:
         v = ri["v"]
@@ -3662,10 +3682,10 @@ def _emit_switch(em: _Emitter, sw: Switch) -> str:
             if getattr(em, "defined_label_fields", getattr(em, "read_fields", set())):
                 v = _bind_read_fields(v, em.read_fields)
         else:
-            # eq/ne 规则的 property 同样须对齐取值落点（msg.payload.<field>）
+            # eq/ne 规则的 property 同样须对齐取值落点（WB90 F11：现 msg 根，裸字段名即可，
+            # propertyType 由节点级 node_ptype=msg 提供，读 msg.<field>）。
             prop = ri.get("property", "payload")
             if prop in getattr(em, "defined_label_fields", getattr(em, "read_fields", set())):
-                prop = "payload." + prop
                 ri = {**ri, "property": prop}
         _bound_rules.append({"t": ri["t"], "v": v, "vt": ri["vt"], **({"property": ri["property"]} if ri["vt"] != "jsonata" else {})})
     rules = _bound_rules

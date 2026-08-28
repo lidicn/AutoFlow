@@ -59,9 +59,9 @@ class TestC2VariableBranchScope(unittest.TestCase):
         flow = compile_dsl(dsl)
         sw = _by_type(flow, "switch")
         self.assertEqual(len(sw), 1)
-        self.assertEqual(sw[0]["property"], "payload.state")
+        self.assertEqual(sw[0]["property"], "state")
         self.assertEqual(sw[0]["propertyType"], "msg",
-                         "非变量字段分支应保持 msg 上下文")
+                         "非变量字段(取值标签)分支应读 msg 根; 取值经桥接 change 落 msg.<field>")
 
 
 if __name__ == "__main__":

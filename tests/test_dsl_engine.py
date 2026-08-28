@@ -875,7 +875,7 @@ def test_wb85_f1_undefined_label_rejected():
         raise AssertionError("应抛 C_LABEL_UNDEFINED 却编译通过")
     except DSLError as e:
         assert e.code == C_LABEL_UNDEFINED, e.code
-    # 已定义标签可正常编译，且被改写为 payload.<field>
+    # 已定义标签可正常编译，且 WB90 F11 后裸标签被改写为 msg.<field>（取值经桥接 change 落 msg 根）
     dsl_ok = """
 场景: t
 触发: 每天 08:00
@@ -887,7 +887,7 @@ def test_wb85_f1_undefined_label_rejected():
 """
     flow = compile_dsl(dsl_ok)
     sw = next(n for n in flow["nodes"] if n["type"] == "switch")
-    assert any("payload.亮度" in (r.get("v", "") or "") for r in sw["rules"]), sw["rules"]
+    assert any("msg.亮度" in (r.get("v", "") or "") for r in sw["rules"]), sw["rules"]
 
 
 def test_wb85_f1_jsonata_safe_no_false_positive():
