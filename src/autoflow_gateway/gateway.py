@@ -2394,6 +2394,46 @@ class Gateway:
                                       resolved_entities=resolved_entities,
                                       vhass_store=vhass_store)
 
+        # 【WB92·O2 收口】黑箱 propose 对「未知实体」fail-open 修复（P3-F3 闭环）
+        # 背景：run_staging_gate 能检出未知实体（stage=entity_check），但 propose_dsl 对
+        # 闸门结果 fail-open —— 照常 ok=True 落提案，只有 verify_flow 才会拦。于是
+        # 「NL→DSL→propose、不调 verify」的黑箱-only 路径可把编造/失效 entity_id 送进
+        # 提案（WB84 P3-F3 / WB92 O2，六项未闭环中唯一「方向不安全」的一项）。
+        # 与 run_e2e_trace（6749）与 deploy_raw（7275）对齐 —— 二者对 entity_check 均
+        # fail-closed，此处也必须 fail-closed、绝不落提案。
+        #
+        # 爆炸半径实证（prod proposals 683 条）：gate.passed=False 共 97 条，其中本类 65 条；
+        # 涉及 127 个去重未知实体里 119 个为测试探针构造（light.fake_* / *.invalid_* /
+        # switch.xxx），唯一「像真实」的 media_player.xiaomi_cn_1108723976_lx05 经 HA 实况
+        # 404 确认不存在（真实设备为同族的 _l17a）→ 真实误伤面 ≈ 0，fail-closed 安全。
+        #
+        # ★ 仅此一类硬拦；staging 闸的断言失败 / 保守拦截（verdict=拦截|未充分验证）仍保持
+        #   advisory 落提案供人审，避免误伤合法流（O1/F12 的保守拦已知会误伤合法流）。
+        if isinstance(gate, dict) and gate.get("stage") == "entity_check" \
+                and not gate.get("passed"):
+            _unknown = list(gate.get("failures") or [])
+            _msg = ("DSL 引用了设备目录中不存在的 entity_id：" + "、".join(_unknown) +
+                    "。请用 autoflow_resolve_entity / autoflow_list_entities 取真实 "
+                    "entity_id 后重写 DSL 再提交；禁止编造或凭印象拼写 entity_id。"
+                    "（未知实体硬拦，绝不落提案 —— 详见 O2/P3-F3 收口）")
+            lint_error_count += 1
+            lint_summary.append({"rule": "R_unknown_entity", "level": "error",
+                                 "message": _msg})
+            result = {"ok": False, "stage": "entity_check",
+                      "error": "R_unknown_entity",
+                      "unknown_entities": _unknown,
+                      "proposal_id": None,   # 显式声明：绝不落提案（fail-closed 自证）
+                      "gate": gate,
+                      "lint": lint_issues, "lint_summary": lint_summary,
+                      "lint_error_count": lint_error_count,
+                      "lint_warning_count": lint_warning_count,
+                      "message": _msg}
+            result["_telemetry"] = _tag_action("propose_dsl", result, agent_id,
+                                               log_path=self._telemetry_log)
+            _slog(_tid, "propose_dsl.unknown_entity_blocked", agent_id=agent_id,
+                  unknown=_unknown, elapsed=round(time.perf_counter() - _t0, 3))
+            return result
+
         # 落提案（raw，等人审升格）。内容为 dsl + 闸门结果，便于人类复核。
         try:
             store = ProposalStore(self.cfg)

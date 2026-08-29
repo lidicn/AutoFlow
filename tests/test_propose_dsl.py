@@ -125,6 +125,16 @@ def test_propose_dsl_compile_error_action_format():
 
 def test_propose_dsl_entity_check_rejects_unknown():
     # 引用目录里不存在的实体 → 闸门应在 entity_check 阶段 FAIL（防假阳性）
+    #
+    # 【WB92·O2 收口（P3-F3 闭环）】本用例原断言 `assert res["ok"]`（fail-open）——
+    # 那是「propose_dsl 对闸门结果 fail-open」这一缺陷的附带记录，并非本用例目的
+    # （用例名与注释写的都是「闸门应 FAIL」，不是「提案应放行」）。
+    # 缺陷：黑箱-only 路径（NL→DSL→propose、不调 verify）可把编造/失效 entity_id
+    # 送进提案，只有 verify 才拦 —— 与 README「AI 编错实体闸门当场拦下」的承诺相悖。
+    # 现与 run_e2e_trace / deploy_raw 对齐为 fail-closed：未知实体 → ok=False 且绝不
+    # 落提案。闸门明细仍随回执透出（res["gate"]），agent 可据此自查重写。
+    # 爆炸半径实证：prod 683 条提案中本类 65 条，127 个未知实体里 119 个为测试探针
+    # 构造，唯一「像真实」者经 HA 实况 404 确认不存在 → 真实误伤面 ≈ 0。
     bad = ("场景: x\n"
            "触发: binary_sensor.not_exist_motion 有人\n"
            "动作: light.turn_on(light.not_exist, brightness=80)\n"
@@ -132,7 +142,9 @@ def test_propose_dsl_entity_check_rejects_unknown():
     res = GW.propose_dsl(bad, "agent_test",
                          [{"entity_id": "light.not_exist", "state": "on"}],
                          vhass_store=_vhass_with())
-    assert res["ok"]
+    assert res["ok"] is False, res          # O2：未知实体硬拦，不再 fail-open
+    assert res["stage"] == "entity_check", res
+    assert res["proposal_id"] is None, res  # 绝不落提案（fail-closed 的实质）
     assert res["gate"]["passed"] is False
     assert res["gate"]["stage"] == "entity_check", res["gate"]
     assert "binary_sensor.not_exist_motion" in res["gate"]["failures"]
