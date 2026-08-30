@@ -1,5 +1,11 @@
 # AutoFlow Core Changelog
 
+## 1.0.2 (2026-08-31) — nr_client.py v3.0.2（T012 复验收尾）
+- 护栏(0) 报错文案精确化（T012 建议1）：`GET /flows` 是扁平数组，缺失集合里既含
+  tab/subflow 也含其下节点；原文案笼统写成「缺失 N 个 tab/subflow」会误导排障，
+  现拆分为「tab/subflow N 个 + 节点 M 个」。行为不变，仅措辞。
+- 守卫测试增至 23 项：新增 `test_deploy_all_subset_guard_message_is_precise` 锁住该文案，防回退。
+
 ## 1.0.1 (2026-08-30) — nr_client.py v3.0.1（T011 回单修复）
 - **[P0] 修复 `restore_snapshot()` 全实例数据丢失**：旧实现逐条遍历扁平 GET /flows，
   把 tab 条目与 node 条目都当独立 flow PUT —— tab 被清空、node 孤儿化，会把整个实例写崩

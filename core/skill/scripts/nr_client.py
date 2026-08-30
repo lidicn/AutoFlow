@@ -76,7 +76,7 @@ def _log_operation(action: str, details: str):
 # 覆盖权威源位置：NR_CLIENT_AUTHORITY=<绝对路径>
 # 关闭自动同步：NR_CLIENT_DISABLE_AUTOSYNC=1
 
-NR_CLIENT_VERSION = "3.0.1"
+NR_CLIENT_VERSION = "3.0.2"
 
 # 默认权威源位置（可被 NR_CLIENT_AUTHORITY 环境变量或运行时注册表覆盖）。
 # 发行版：权威源 = autoflow-core skill 安装位（安装时由 repo core/ 下载落位）。
@@ -523,8 +523,19 @@ class NodeRedClient:
                 prop_ids = {f.get("id") for f in flows if f.get("id")}
                 missing = live_ids - prop_ids
                 if missing:
+                    # 文案精确化（T012 建议1）：GET /flows 是扁平数组，missing 里既含
+                    # tab/subflow 也含 tab 下的节点，笼统说「N 个 tab/subflow」会误导排障。
+                    live_containers, live_leafs = 0, 0
+                    for f in live_list:
+                        if f.get("id") not in missing:
+                            continue
+                        if f.get("type") in ("tab", "subflow"):
+                            live_containers += 1
+                        else:
+                            live_leafs += 1
                     raise NRGuardError(
-                        f"⚠️ 熔断：deploy_all 提案缺失线上已有的 {len(missing)} 个 tab/subflow，"
+                        f"⚠️ 熔断：deploy_all 提案缺失线上已有的 {len(missing)} 个对象"
+                        f"（tab/subflow {live_containers} 个 + 节点 {live_leafs} 个），"
                         f"属「部分 payload 整实例替换」根因模式（会清场）。\n"
                         f"已存快照: {snap}\n如需真实整实例替换，请传 allow_partial=True。"
                     )

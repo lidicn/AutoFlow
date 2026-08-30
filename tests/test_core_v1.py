@@ -304,6 +304,20 @@ def test_doctor_report_shape():
 
 # ── 5. T011 回单修复守卫（P0 还原 / A档红线 / P2 lint 误报）──────────
 
+def test_deploy_all_subset_guard_message_is_precise():
+    """T012 建议1：护栏(0) 报错须区分 tab/subflow 与节点数，别笼统都说成 tab/subflow。
+
+    GET /flows 是扁平数组，缺失集合里既有 tab 也有其下节点，措辞不准会误导排障。
+    """
+    flows = [f for f in FLOWS_FLAT
+             if f.get("id") != TAB_USER and f.get("z") != TAB_USER]
+    with pytest.raises(core.NRGuardError) as ei:
+        _client().deploy_all(flows, force=True)   # allow_partial 默认 False
+    msg = str(ei.value)
+    assert "tab/subflow 1 个" in msg, msg
+    assert "节点 2 个" in msg, msg
+
+
 def test_restore_snapshot_uses_atomic_deploy_all():
     """T011 [P0]：还原必须走 POST /flows 整包，绝不可逐条 PUT（会把实例写崩）。"""
     st = _H.state
