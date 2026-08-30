@@ -30,9 +30,13 @@ class _StageFake:
         self.cfg = types.SimpleNamespace(data_dir=data_dir)
         self.state = None
         self.nr = None
+        # 测试替身无真实 HA：方案A 播种桥（_seed_read_value_entities_from_ha）
+        # 见 self.ha is None 即 no-op，维持 fail-closed 安全不变。
+        self.ha = None
     _build_vhass_from_staging = G.Gateway._build_vhass_from_staging
     _gate_node_types = G.Gateway._gate_node_types
     run_staging_gate = G.Gateway.run_staging_gate
+    _seed_read_value_entities_from_ha = G.Gateway._seed_read_value_entities_from_ha
 
 
 def _make_stage_fake(cat_entities):

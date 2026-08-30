@@ -5859,6 +5859,11 @@ class Gateway:
 
         store = vhass_store or self._build_vhass_from_staging()
 
+        # 方案A（§1.3 增强）：取值实体实时态只读播种——打通 O1 正确路径。
+        # 仅默认 staging store 自动播种；外部注入 store 的调用方自管种子（不动其 store）。
+        if vhass_store is None:
+            self._seed_read_value_entities_from_ha(flow, store)
+
         # 0) 世界态读取器（供条件门控评估）
         def _world(eid):
             rec = store.get_state(eid) if eid else None
@@ -8084,6 +8089,42 @@ class Gateway:
             except Exception:
                 pass
         return store
+
+    def _seed_read_value_entities_from_ha(self, flow, store):
+        """方案A（§1.3 增强）：把流中「读值」节点引用的实体，向真实 HA 只读取当前态，
+        注入内存 staging store，使取值-label 分支能真正求值（打通 O1 正确路径）。
+
+        安全 / 爆炸半径约束：
+        - 纯只读 GET /api/states，绝不写真实 HA。
+        - 仅处理 api-current-state 的「读值」节点（halt_if 为空）；条件门控节点本轮不动。
+        - 取不到 / HA 不可达 / 异常 → 跳过该实体，维持现状 fail-closed（安全不变）。
+        - 实体不在 staging store（幽灵）→ 不造实体，维持 fail-closed。
+        """
+        if self.ha is None:
+            return
+        seen = set()
+        for n in flow.get("nodes", []):
+            if n.get("type") != "api-current-state":
+                continue
+            if n.get("halt_if") not in (None, ""):
+                continue  # 条件门控节点：本轮不动，避免行为变更
+            eid = n.get("entityId") or n.get("entity_id")
+            if not eid or eid in seen:
+                continue
+            seen.add(eid)
+            try:
+                st = self.ha.get_state(eid)
+            except Exception:
+                continue  # HA 不可达 → 不播种，维持 fail-closed
+            if not isinstance(st, dict):
+                continue
+            live = st.get("state")
+            if live is None:
+                continue
+            rec = store.get_state(eid)
+            if rec is None:
+                continue  # 不在 staging store → 不造幽灵实体，维持 fail-closed
+            rec["state"] = live
 
     # ───────────── 确认闸操作 ─────────────
     def list_pending(self, agent_id: Optional[str] = None) -> List[Dict]:
