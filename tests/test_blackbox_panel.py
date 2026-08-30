@@ -48,25 +48,26 @@ class TestP2ConditionalBrightnessTemplate(unittest.TestCase):
         self.assertEqual(len(r31), 0, f"R31 未定义字段告警应清零: {r31}")
         sw = [n for n in flow["nodes"] if n.get("type") == "switch"]
         self.assertTrue(sw, "应有分支 switch 节点")
-        # 分支引用的是经 `取值:` 绑定的真实字段 payload.光照（而非未定义的 状态.光照）
+        # WB90 F11(89a616a) 后落点改为 msg 根：分支引用的是经 `取值:` 桥接的
+        # msg.光照（而非未定义的 状态.光照、也不是 F11 前的 payload.光照）
         rule_vals = " ".join(str(r.get("v", "")) for r in sw[0].get("rules", []))
-        self.assertIn("payload.光照", rule_vals)
+        self.assertIn("msg.光照", rule_vals)
+        self.assertNotIn("payload.光照", rule_vals)
 
     def test_old_template_would_have_failed(self):
-        """回归护栏：若有人把分支改回 `状态.光照`，编译器必须重新报 R31 未定义字段告警。"""
-        dsl = """场景: x
+        """回归护栏：若有人把分支改回 `状态.光照`，编译器必须报未定义标签。
+        WB85 F5a 起为编译期 fail-closed（DSLError/C_LABEL_UNDEFINED），
+        强度高于旧 R31 lint 告警——guard 意图不变，断言随契约升级。"""
+        with self.assertRaises(E.DSLError) as ctx:
+            E.compile(E.parse("""场景: x
 触发: binary_sensor.motion 有人
 变量: night_start = 22
 分支: 状态.光照 < night_start
   动作: light.turn_on(light.x, brightness=100)
 否则
   动作: light.turn_on(light.x, brightness=30)
-"""
-        scene = E.parse(dsl)
-        flow = E.compile(scene)
-        r31 = [i for i in lint_flow(flow) if i.get("rule") == "R31"]
-        self.assertGreaterEqual(len(r31), 1,
-                                "旧模板（未声明 状态.光照）应触发 R31 未定义字段告警")
+"""))
+        self.assertEqual(ctx.exception.code, "C_LABEL_UNDEFINED")
 
 
 class TestP3GetFlowProposal(unittest.TestCase):

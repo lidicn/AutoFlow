@@ -409,9 +409,18 @@ def _vg_val_eq(val, expect, vt):
     return a == b
 
 def _vg_lookup(msg, var):
-    """从 msg 取变量（支持顶级键、payload、payload.xxx）。"""
+    """从 msg 取变量（支持顶级键、msg. 前缀、payload、payload.xxx）。
+
+    O1（2026-08-29，WB93）：F11 后编译器分支 jsonata 用 `msg.<field>` 引用取值标签
+    （如 `$number(msg.亮度)`），本函数此前不认 `msg.` 前缀 → 恒 unknown → 闸门
+    保守视为命中 → 取值-label 分支永远「未充分验证」。现剥离 `msg.` 前缀后按
+    msg 根/payload 路径解析（`msg.payload.x` 等价 `payload.x`）。"""
     if not isinstance(msg, dict):
         return None
+    if var.startswith("msg."):
+        var = var[4:]
+        if var.startswith("msg."):  # 防御：真实字段名就叫 "msg.x" 时不二次剥离
+            var = "msg." + var[4:]
     if var in msg:
         return msg[var]
     if var == "payload":
@@ -484,6 +493,10 @@ def _vg_eval_jsonata_expr(expr, msg):
     m = re.match(r"^\$number\(\s*([\w.]+)\s*\)\s*(<=|>=|!=|<>|<|>|=)\s*(-?\d+(?:\.\d+)?)$", e)
     if m:
         var, op, num = m.group(1), m.group(2), float(m.group(3))
+        # O1（2026-08-29，WB93）：$number(<数值字面量>) 是纯常量比较，此前被当变量名
+        # 查不到 → known=False → 保守视为命中 → 未充分验证。常量无需 msg 数据即可求值。
+        if re.fullmatch(r"-?\d+(?:\.\d+)?", var):
+            return (_vg_jsonata_cmp(float(var), op, num), True)
         val = _vg_lookup(msg, var)
         if val is None:
             return (False, False)
@@ -681,6 +694,11 @@ def _vg_apply_change(node, msg):
                 val = to
         elif tot == "bool":
             val = str(to).lower() == "true"
+        elif tot == "msg":
+            # O1（2026-08-29，WB93）：tot="msg" 表示 to 是 msg 路径引用（真实 NR 语义），
+            # 旧代码落到 else 当字面量 → 绑定节点把 msg.亮度 写成字符串 "payload.state"。
+            # 必须按点路径解析（如 payload.state），取不到值时与 NR 对齐置 None。
+            val = _vg_resolve_path(m, to)
         else:
             val = to
         _vg_set_path(m, p, val)

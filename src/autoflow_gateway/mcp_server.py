@@ -131,6 +131,8 @@ def autoflow_list_entities(domain: str = "", area: str = "", keyword: str = "",
     possible_states(该域可能状态)}；possible_states 直接告诉你它能同步到哪些状态
     （如 light→["on","off"]、cover→["open","closed"]），写 flow 立即知道目标状态怎么填。
     并透明回报 matched_count / returned / truncated / next_offset，方便翻页。
+    顶层实际还含 ok / total / offset / area_hint / area_resolved / area_warning / freshness
+    （分页与区域解析反馈），取数以实际返回为准。
     💡 默认已按 limit=50 裁剪（全屋 2976 实体不会一次撑爆上下文）；需要更多时再放宽 limit。"""
     r = _gw().list_entities(domain or None, area or None, keyword or None, limit, offset)
     return _js(_with_ok(r))
@@ -236,7 +238,10 @@ async def autoflow_propose_dsl(dsl: Optional[str] = None, expected_postcondition
       （仅依赖 DSL 内实体引用 + 闸门强制校验）。闸门只放行白名单内实体，引用白名单外实体直接判 FAIL。
     - 注意：实体一律用 autoflow_resolve_entity 返回的真实 entity_id；引用目录外的实体闸门直接判 FAIL。
     - agent_id 由已认证身份自动注入；提案进入 raw，等待人类在 WebUI 审核升格。
-    - 返回 {ok, proposal_id, scene_name, gate:{passed,replayed_services,assertions}, flow}。
+    - 返回 {ok, proposal_id, scene_name, gate, flow, ...}；gate 实际含
+      {passed, fully_verified, verdict, reasons, warnings, dead_branches,
+       entity_count, external_calls, failures, replay_zero, replay_zero_policy,
+       replayed_services, assertions}（写码以实际返回为准，勿仅依赖本节列举）。
     - strict：True 时 lint 存在任何 error/warning 即阻断提案（默认 False，仅随回执透出）。
     - require_e2e：True 时提案带 e2e 意图，人类在 WebUI 点「部署到 NR」时会真正先跑一次
       实机验证闸（verdict≠通过即拦截部署）。默认 False（沿用 env AUTOFLLOW_WHITEBOX_REQUIRE_E2E）。
@@ -659,8 +664,10 @@ def autoflow_get_entity_state(entity_id: str) -> str:
 
     用法：autoflow_get_entity_state(entity_id="light.study_main")
     - entity_id：真实实体 id（先用 autoflow_resolve_entity 取，勿凭记忆编造）。
-    - 返回 HA REST /api/states/<id> 原样结构：{entity_id, state, attributes,
-      last_changed, last_updated, context}；source="live" 表示实时读取。
+    - 返回信封 {ok, source, state}：state 为 HA REST /api/states/<id> 原样结构
+      {entity_id, state, attributes, last_changed, last_updated, context}；
+      source="live" 表示实时读取。取字段请用 resp["state"]["entity_id"]，
+      勿直接 resp["entity_id"]（HA 实体结构已嵌套在 state 下，与全网关工具信封一致）。
     - 若实时 HA 不可达（离线/令牌失效），自动回退到网关设备目录缓存（source="catalog_cache"，
       并在 note 标注『可能非最新』），便于离线也能拿到大致状态。
     - 三面板均可调，纯只读、不改任何设备状态。"""
@@ -1327,8 +1334,11 @@ def autoflow_run_e2e_trace(dsl: str = "", flow_json: str = "",
         （NRGuardError）。需要在该实例上追踪时显式传 allow_prod=True 知情放行；
         默认 False，prod 锁保持生效。
 
-    返回：{e2e, flow_id, verdict(通过/断点/拦截), reasons, report, trace, triggered, entity_warnings}
+    返回（成功/断点路径）：{e2e, flow_id, verdict(通过/断点/拦截), reasons,
+      report, trace, triggered, entity_warnings, unhit_branches}
       —— 直接消费 report.breakpoint 即知「在哪断、为什么」。
+    返回（拦截路径，如 prod 写护栏拦下）：{e2e, ok, error, stage, flow_id,
+      reasons, report}（无 trace/triggered，verdict="拦截"）。取数以实际返回为准。
 
     ⚠️ 仅原生手写/管理员身份可经 /mcp-white（或 /mcp-admin）调用。追踪是自愈式的：
       部署的插桩副本会在比对后自动回滚 + 清空 trace context，不留残留。"""

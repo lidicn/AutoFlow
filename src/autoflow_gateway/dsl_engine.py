@@ -2926,7 +2926,15 @@ def _emit_read_state(em: _Emitter, st: ReadState) -> str:
              "to": "payload.state", "tot": "msg"},
         ])
         em.connect(nid, vid)
-        return vid
+        # O1（2026-08-29，WB93）：F11 引入桥接 change 时 `return vid`（链尾），导致
+        # _emit_body 把触发器/上游直连到 change —— 取值 acs 被绕过、在真实 NR 上
+        # 永远不执行（无人喂它 msg）→ payload.state 读到的是触发器 payload 的
+        # .state（典型为 undefined）→ msg.<field> 恒 undefined → 分支恒走 else
+        # （F11 要修的「静默反向执行」以布线形态回归）。正解：返回 (head, tail)
+        # 二元组（_emit_step 对 tuple 透传、_emit_body 已按 (head, tail) 编排），
+        # 上游连到链首 acs，下游续接链尾 change，恢复「触发 → 取值 → 绑定 → 下游」
+        # 的真实执行序。
+        return (nid, vid)
     else:
         output_properties = [
             {"property": "payload", "propertyType": "msg",
