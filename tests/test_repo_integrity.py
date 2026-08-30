@@ -59,6 +59,14 @@ _SRC_ABS = os.path.join(_REPO_ROOT, _SRC_REL.replace("/", os.sep))
 # data/subflows/nr_defs/，因此 .py 与 .json 两个扫描都套用此豁免。
 _EXEMPT_DIR_PARTS = ("nr_subflows",)
 
+# JSON 扫描的额外窄豁免：`data/prod/snapshots/` 是网关【运行时写出】的快照
+# （apply/回滚前后镜像），不是「启动即读」依赖；其中 test_* 快照按 .gitignore
+# 有意不入库（2026-08-04 遗留 712KB 曾致本用例误红）。
+# 刻意【不】采用「跳过所有 gitignored 文件」的宽豁免——本用例本职就是抓
+# .gitignore 目录级排除误伤启动依赖（api_specs.json 事故，#708 同类），
+# 宽豁免会让防线自废；故只按目录名窄豁免运行时输出区。
+_JSON_EXEMPT_DIR_PARTS = _EXEMPT_DIR_PARTS + ("snapshots",)
+
 
 def _git(*args: str):
     """跑 git 子命令；失败返回 None（用于优雅降级而非误报）。"""
@@ -109,7 +117,8 @@ def _disk_json_files():
         rel_dir = os.path.relpath(dirpath, _REPO_ROOT).replace(os.sep, "/")
         if "__pycache__" in rel_dir:
             continue
-        if all(p in rel_dir.split("/") for p in _EXEMPT_DIR_PARTS):
+        # 豁免：dev 构建目录 + 运行时写出快照区（见 _JSON_EXEMPT_DIR_PARTS 注释）
+        if any(p in rel_dir.split("/") for p in _JSON_EXEMPT_DIR_PARTS):
             continue
         for fn in filenames:
             if fn.endswith(".json"):
