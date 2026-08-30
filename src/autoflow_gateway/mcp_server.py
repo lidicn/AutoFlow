@@ -1305,6 +1305,8 @@ def autoflow_simulate_flow(flow_json: str, virtual_states_json: str = "") -> str
 def autoflow_run_e2e_trace(dsl: str = "", flow_json: str = "",
                            expected_path_json: str = "",
                            expected_postconditions_json: str = "",
+                           expected_services_json: str = "",
+                           expected_branch_taken_json: str = "",
                            trigger_json: str = "",
                            live: bool = False,
                            allow_prod: bool = False) -> str:
@@ -1326,6 +1328,13 @@ def autoflow_run_e2e_trace(dsl: str = "", flow_json: str = "",
     参数：
       - expected_path_json：可选，期望经过的节点 id/name 列表（JSON 数组字符串）。
         缺省自动按入口 BFS 推导计划路径。
+      - expected_services_json：可选，F12 分支正确性断言——期望实际 replay 命中的
+        HA 动作集合（JSON 数组字符串，元素形如 "light.turn_on(light.lamp)"）。
+        与 replay 实际 api-call-service 集合做对称比对，不一致即升级 verdict=断点
+        （条件反置/走错分支仍判可达的缺口由 WB93 补上）。
+      - expected_branch_taken_json：可选，结构化分支断言（JSON 数组，元素
+        {"switch":<节点id>, "branch":<输出口序号 0/1/...>}）；自动解析该分支首个
+        api-call-service 并入 expected_services 参与对称断言。
       - expected_postconditions_json：可选，HA 副作用后置校验（需 live HA，软失败不阻断）。
       - trigger_json：可选，合成触发事件 {"entity_id","state","old_state"}（state 入口替换用）。
       - live：是否真实 HA 模式（影响后置校验语义），默认 False。
@@ -1365,6 +1374,12 @@ def autoflow_run_e2e_trace(dsl: str = "", flow_json: str = "",
     exp_post = _parse(expected_postconditions_json, "expected_postconditions_json")
     if isinstance(exp_post, str):
         return exp_post
+    exp_services = _parse(expected_services_json, "expected_services_json")
+    if isinstance(exp_services, str):
+        return exp_services
+    exp_branch = _parse(expected_branch_taken_json, "expected_branch_taken_json")
+    if isinstance(exp_branch, str):
+        return exp_branch
     trig = _parse(trigger_json, "trigger_json", as_list=False)
     if isinstance(trig, str):
         return trig
@@ -1379,6 +1394,8 @@ def autoflow_run_e2e_trace(dsl: str = "", flow_json: str = "",
                 live=live,
                 trigger=trig,
                 allow_prod=allow_prod,
+                expected_services=exp_services,
+                expected_branch_taken=exp_branch,
             )
         elif dsl:
             result = gw.run_e2e_trace(
@@ -1387,6 +1404,8 @@ def autoflow_run_e2e_trace(dsl: str = "", flow_json: str = "",
                 expected_postconditions=exp_post,
                 live=live,
                 allow_prod=allow_prod,
+                expected_services=exp_services,
+                expected_branch_taken=exp_branch,
             )
         else:
             return _js({"ok": False, "error": "必须提供 flow_json 或 dsl 之一。"})

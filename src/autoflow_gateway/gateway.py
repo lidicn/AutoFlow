@@ -6550,7 +6550,9 @@ class Gateway:
 
     def _compare_trace(self, flow: Dict, trace: List[Dict],
                        expected_path: Optional[List] = None,
-                       trigger_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+                       trigger_ids: Optional[List[str]] = None,
+                       expected_services: Optional[List[str]] = None,
+                       expected_branch_taken: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """把真实 trace 与期望路径比对，产出断点报告。
 
         D8/round6：switch 的未命中分支 ≠ 断点——若某 switch 有其它分支被 reached，
@@ -6619,7 +6621,65 @@ class Gateway:
                 missing.append(e)
         extra = [e for e in reached if e not in set(expected_ids)]
         failed_at = missing[0] if missing else None
-        verdict = "通过" if (not missing and not errors) else "断点"
+
+        # ── F12 (WB93)：期望动作集对称断言 ──
+        # e2e 此前只判「节点可达」，不判「走的分支是否符合意图/世界态」：条件反置流
+        # 仍判通过（wb93_f12_counterexample.py 坐实）。引入 expected_services /
+        # expected_branch_taken：把实际 replay 的 api-call-service 集合与期望动作集做
+        # 对称比对，不一致即升级 verdict 为「断点」（分支逻辑/意图校验失败）。
+        def _svc_str(n):
+            if not isinstance(n, dict) or n.get("type") != "api-call-service":
+                return None
+            d = (n.get("domain") or "").lower()
+            s = (n.get("service") or "").lower()
+            eid = n.get("entityId") or ""
+            return f"{d}.{s}({eid})" if eid else f"{d}.{s}"
+        reached_services = set()
+        for _rid in reached:
+            _s = _svc_str(nodes.get(_rid))
+            if _s:
+                reached_services.add(_s)
+        _exp_services = set()
+        if expected_services:
+            for _s in expected_services:
+                if _s:
+                    _exp_services.add(str(_s).strip())
+        if expected_branch_taken:
+            for _bt in expected_branch_taken:
+                if not isinstance(_bt, dict):
+                    continue
+                _sw = nodes.get(_bt.get("switch"))
+                if not _sw or _sw.get("type") != "switch":
+                    continue
+                _br = int(_bt.get("branch", 0) or 0)
+                _outs = _sw.get("wires") or []
+                if _br < 0 or _br >= len(_outs) or not _outs[_br]:
+                    continue
+                # BFS 收该分支首个 api-call-service（其服务即该分支意图动作）
+                _q = list(_outs[_br]); _seen = set()
+                while _q:
+                    _x = _q.pop(0)
+                    if _x in _seen:
+                        continue
+                    _seen.add(_x)
+                    _xn = nodes.get(_x)
+                    if not _xn:
+                        continue
+                    _s = _svc_str(_xn)
+                    if _s:
+                        _exp_services.add(_s)
+                        break
+                    for _w in (_xn.get("wires") or []):
+                        if isinstance(_w, list):
+                            _q.extend(_w)
+        service_mismatch = []
+        if _exp_services:
+            for _s in sorted(_exp_services - reached_services):
+                service_mismatch.append({"kind": "missing", "service": _s})
+            for _s in sorted(reached_services - _exp_services):
+                service_mismatch.append({"kind": "extra", "service": _s})
+
+        verdict = "通过" if (not missing and not errors and not service_mismatch) else "断点"
         # D9：动作参数审计——对 reached 的 api-call-service 输出参数快照 +
         # 字符串化动态参数检测（dataType=json 但值含 "payload.x" 引号包裹的动态引用）
         param_audit = []
@@ -6665,6 +6725,8 @@ class Gateway:
                  "message": e.get("message")}
                 for e in errors
             ],
+            "service_mismatch": service_mismatch,
+            "expected_services": sorted(_exp_services),
             "breakpoint": self._breakpoint_message(failed_at, nodes, errors),
         }
 
@@ -6763,7 +6825,9 @@ class Gateway:
                        expected_postconditions: Optional[List[Dict]] = None,
                        target: str = "staging",
                        live: bool = False,
-                       allow_prod: bool = False) -> Dict[str, Any]:
+                       allow_prod: bool = False,
+                       expected_services: Optional[List[str]] = None,
+                       expected_branch_taken: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """P5 · 端到端执行追踪：把 DSL 编译产物**真实部署到 1990**并触发，
         用插桩（tap + catch）抓取信息流实际跑到的每个环节，与期望路径比对，
         产出**断点报告**——明确流程跑到哪个环节、在哪里断、报错是什么。
@@ -6897,7 +6961,9 @@ class Gateway:
                         e["id"] = id_map[e["id"]]
                 return e
             exp = [_map_ep(x) for x in exp]
-        report = self._compare_trace(remapped, trace, exp, trigger_ids=inject_ids)
+        report = self._compare_trace(remapped, trace, exp, trigger_ids=inject_ids,
+                                      expected_services=expected_services,
+                                      expected_branch_taken=expected_branch_taken)
         # 8) 可选：HA 副作用后置校验
         post = None
         if expected_postconditions:
@@ -6915,6 +6981,9 @@ class Gateway:
             reasons.append(f"断点在：{report['failed_at']}")
         if report.get("runtime_errors"):
             reasons.append(f"运行时错误 {len(report['runtime_errors'])} 处")
+        if report.get("service_mismatch"):
+            reasons.append(f"动作与预期不符 {len(report['service_mismatch'])} 处"
+                           f"（分支逻辑/意图校验失败）")
         return {
             "e2e": True,
             "flow_id": real_fid,
@@ -7138,7 +7207,9 @@ class Gateway:
     def run_e2e_trace_raw(self, flow_json, expected_path=None,
                           expected_postconditions=None, target="staging",
                           live=False, trigger=None,
-                          allow_prod: bool = False) -> Dict[str, Any]:
+                          allow_prod: bool = False,
+                          expected_services: Optional[List[str]] = None,
+                          expected_branch_taken: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """C1 · 白箱 L3 运行时追踪：直接吃**原始 NR flow**（不经 DSL 编译），
         真实部署到 1990 并触发，用插桩抓取实际执行轨迹，与期望路径比对 → 断点报告。
 
@@ -7255,7 +7326,9 @@ class Gateway:
                         e["id"] = id_map[e["id"]]
                 return e
             exp = [_map_ep(x) for x in exp]
-        report = self._compare_trace(compare_flow, trace, exp, trigger_ids=inject_ids)
+        report = self._compare_trace(compare_flow, trace, exp, trigger_ids=inject_ids,
+                                      expected_services=expected_services,
+                                      expected_branch_taken=expected_branch_taken)
         if entity_warns:
             report["entity_warnings"] = entity_warns
 
@@ -7282,6 +7355,9 @@ class Gateway:
             reasons.append(f"断点在：{report['failed_at']}")
         if report.get("runtime_errors"):
             reasons.append(f"运行时错误 {len(report['runtime_errors'])} 处")
+        if report.get("service_mismatch"):
+            reasons.append(f"动作与预期不符 {len(report['service_mismatch'])} 处"
+                           f"（分支逻辑/意图校验失败）")
         if entity_warns:
             reasons.append(f"实体软校验：{len(entity_warns)} 处未知引用（未拦截）")
         return {
