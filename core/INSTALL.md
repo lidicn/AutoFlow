@@ -58,8 +58,19 @@ export HASS_TOKEN=<长期访问令牌>
 nr_client.py 内置权威源自动同步：重装时重新执行一句话安装即可覆盖为最新版；
 也可手动重新下载第 2 步的文件。版本查询：`python scripts/nr_client.py version`。
 
+## 排障
+
+- `Client sent an HTTP request to an HTTPS server` → 端点其实是 HTTPS，url 改 `https://`。
+- TLS 证书错误（如 `TLSV1_ALERT_INTERNAL_ERROR`）→ 用带有效证书的域名
+  （Tailscale 的 `*.ts.net` 等），不要用裸 IP。
+- `--compact` 省 token 幅度有限（实测约 3%，只剔除 x/y 坐标）；要大幅省请按需裁剪字段。
+- 只想撤销单条 flow 的改动：别用 `restore_snapshot`（它是整实例还原），
+  从快照里取出那一条用 `write-flow` 写回。
+
 ## 安全说明
 
-- 本核心版不内置任何默认地址/账密/令牌；配置只存本机 `~/.autoflow-core/`。
-- 黄金法则：`af_*` 前缀 flow 才可写，用户手工 flow 一律只读；prod 实例默认禁写。
+- 本核心版不内置任何默认地址/账密/令牌；配置只存本机 `~/.autoflow-core/`
+  （明文密码文件，建议优先用环境变量 `NR_URL/NR_USER/NR_PASS`）。
+- **硬拦截**：`af_*` 前缀 flow 才可写，非 `af_*` 目标默认拒绝（需显式 `--allow-user-flow`）；
+  prod 实例默认禁写。
 - 全部写入留痕：`~/.autoflow-core/logs/nr_operations.log`；写前自动快照可回滚。

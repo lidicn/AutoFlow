@@ -58,6 +58,8 @@ class _State:
         self.inject_seen = False
         self.context_vals = {}        # (store,key) -> value（inject 后生效）
         self.put_bodies = {}
+        self.posted_flows = None      # POST /flows 的整包 payload（deploy_all/restore）
+        self.flows_state = {}         # flow_id -> 最近 PUT 的内容（有状态回显）
         self.drop_one_on_get = False
 
 
@@ -87,14 +89,22 @@ class _H(BaseHTTPRequestHandler):
         if method == "GET" and p.startswith("/flow/"):
             fid = p.split("/flow/", 1)[1]
             label = "af_demo" if fid == TAB_AF else "客厅灯（手工）"
-            fl = _flow_full(fid, label)
+            # 有状态：优先回显最近一次 PUT 的内容（贴近真实 NR）
+            fl = st.flows_state.get(fid) or _flow_full(fid, label)
             if st.drop_one_on_get and fid == TAB_AF:
+                fl = dict(fl)
                 fl["nodes"] = fl["nodes"][:-1]
             return self._send(200, fl)
         if method == "PUT" and p.startswith("/flow/"):
             fid = p.split("/flow/", 1)[1]
             n = int(self.headers.get("Content-Length", 0))
-            st.put_bodies[fid] = json.loads(self.rfile.read(n) or b"{}")
+            body = json.loads(self.rfile.read(n) or b"{}")
+            st.put_bodies[fid] = body
+            st.flows_state[fid] = body      # 有状态回显
+            return self._send(200, {})
+        if method == "POST" and p == "/flows":
+            n = int(self.headers.get("Content-Length", 0))
+            st.posted_flows = json.loads(self.rfile.read(n) or b"[]")
             return self._send(200, {})
         if method == "POST" and p.startswith("/inject/"):
             st.inject_seen = True
@@ -153,9 +163,23 @@ def _client():
     return core.NodeRedClient()
 
 
+@pytest.fixture(autouse=True)
+def _reset_fake_state():
+    """每个用例前重置 fake server 状态，保证用例互不污染。"""
+    st = _H.state
+    st.requests.clear()
+    st.inject_seen = False
+    st.put_bodies = {}
+    st.posted_flows = None
+    st.flows_state = {}
+    st.drop_one_on_get = False
+    yield
+
+
 # ── 1. 脱敏守卫（D3）─────────────────────────────────────────────
 
-_SECRET_PATTERNS = ("192.168.2.", "100.112.138.64", "longyin", "eyJhbGci",
+# 私网段只写前两段（完整内网地址不得入库：本仓库将公开）
+_SECRET_PATTERNS = ("192.168.", "100.112.", "longyin", "eyJhbGci",
                     "D:/Documents", "qclaw")
 
 
@@ -276,3 +300,65 @@ def test_doctor_report_shape():
         assert any("HASS_SERVER" in i for i in rep["issues"])
     finally:
         (core.NodeRedClient._HA_SERVER, core.NodeRedClient._HA_TOKEN) = saved
+
+
+# ── 5. T011 回单修复守卫（P0 还原 / A档红线 / P2 lint 误报）──────────
+
+def test_restore_snapshot_uses_atomic_deploy_all():
+    """T011 [P0]：还原必须走 POST /flows 整包，绝不可逐条 PUT（会把实例写崩）。"""
+    st = _H.state
+    st.requests.clear()
+    st.posted_flows = None
+    snap = os.path.join(_TMP, "snap_restore.json")
+    with open(snap, "w", encoding="utf-8") as f:
+        json.dump({"_meta": {"label": "t"}, "flows": FLOWS_FLAT}, f)
+    r = _client().restore_snapshot(snap)
+    assert r["restored_items"] == len(FLOWS_FLAT)
+    assert st.posted_flows is not None, "必须整包 POST /flows"
+    # 关键断言：不得出现针对节点 id 的 PUT（旧实现的写崩根因）
+    put_ids = [p.split("/flow/")[1] for m, p in st.requests
+               if m == "PUT" and p.startswith("/flow/")]
+    assert put_ids == [], f"还原不得逐条 PUT flow，实得: {put_ids}"
+
+
+def test_restore_snapshot_rejects_empty_payload():
+    """空快照不得发起整实例部署（防清场）。"""
+    snap = os.path.join(_TMP, "snap_empty.json")
+    with open(snap, "w", encoding="utf-8") as f:
+        json.dump({"flows": []}, f)
+    with pytest.raises(ValueError, match="无 flows"):
+        _client().restore_snapshot(snap)
+
+
+def test_write_flow_blocks_user_tab_by_default():
+    """T011 §6 A档：非 af_* tab 默认拒绝写（红线从纪律升级为硬拦截）。"""
+    st = _H.state
+    st.drop_one_on_get = False
+    with pytest.raises(core.NRGuardError, match="所有权红线"):
+        _client().write_flow(TAB_USER, _flow_full(TAB_USER, "客厅灯（手工）"))
+
+
+def test_write_flow_allows_user_tab_with_explicit_optin():
+    """显式 opt-in 仍可写用户流（照常快照留底），保证不锁死合法用途。"""
+    st = _H.state
+    st.drop_one_on_get = False
+    r = _client().write_flow(TAB_USER, _flow_full(TAB_USER, "客厅灯（手工）"),
+                             allow_user_flow=True, label="t_optin")
+    assert r["verified"] is True
+
+
+def test_create_tab_blocks_non_af_label():
+    """建 tab 同样受所有权红线约束。"""
+    with pytest.raises(core.NRGuardError, match="af_"):
+        _client().create_tab("我的场景")
+    assert _client().create_tab("af_我的场景")["label"] == "af_我的场景"
+
+
+def test_lint_no_false_positive_on_terminal_debug():
+    """T011 [P2]：末端 debug 节点（wires=[]，无 outputs 字段）不得被 lint 误报。"""
+    flow = {"id": TAB_AF, "label": "af_demo", "nodes": [
+        {"id": INJ_ID, "type": "inject", "z": TAB_AF, "wires": [[DBG_ID]]},
+        {"id": DBG_ID, "type": "debug", "z": TAB_AF, "wires": []},
+    ]}
+    r = _client().write_flow(TAB_AF, flow, label="t_debug")
+    assert r["verified"] is True and r["nodes"] == 2

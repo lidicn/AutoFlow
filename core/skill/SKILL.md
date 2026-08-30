@@ -11,9 +11,10 @@ description: AutoFlow Core — 让 agent 安全编写/修改/验证 Node-RED flo
 
 ## 🚨 黄金法则（违反任何一条立即停止）
 
-1. **`af_*` 前缀 = 你的所有权**。你新建的 tab/flow 一律 `af_<场景名>` 命名，只有这些可写可删。
-2. **用户手工流只读**。label 不带 `af_` 前缀的 flow 是用户亲手搭的：可以读、可以引用，
-   **绝不修改、绝不删节点、绝不断线**。inventory 命令会标注归属，以它为准。
+1. **`af_*` 前缀 = 你的所有权**（代码层硬拦截）。新建 tab/flow 一律 `af_<场景名>` 命名。
+2. **用户手工流只读——硬拦截，不靠自觉**。`write-flow` / `create_tab` 对不带 `af_` 前缀的
+   目标**默认抛 `NRGuardError` 拒绝**；确需改动用户流必须显式加 `--allow-user-flow`
+   （仍会照常快照留底）。归属以**线上 label 为准**，伪造前缀绕不过。
 3. **写前必快照，写后必回读**。用 `write-flow`（内置快照+回读校验），不要手工拼 PUT。
 4. **prod 默认禁写**。URL 含 `:1880` 或用户明确说是生产实例 → 需用户显式同意才可 `--allow-prod`。
 5. **禁止整体替换**。任何"把整个 flows 数组 PUT 回去"的操作都是禁区（会删掉未列出的节点）。
@@ -27,7 +28,12 @@ description: AutoFlow Core — 让 agent 安全编写/修改/验证 Node-RED flo
 ```
 
 优先级：环境变量 NR_URL/NR_USER/NR_PASS > 配置文件 > 函数参数。
+**推荐用环境变量**（配置文件是明文密码文件，仅限本机、勿入版本库/勿外发）。
 可选（verify 的 HA 断言用）：`HASS_SERVER` + `HASS_TOKEN` 环境变量。
+
+连接排障：若报 `Client sent an HTTP request to an HTTPS server` → 端点其实是 HTTPS，
+把 url 改 `https://`；若报证书错误 → 用带有效证书的域名（如 Tailscale 的 `*.ts.net`），
+不要用裸 IP。
 
 ## 标准写入流程（每次写 flow 都走这七步）
 
@@ -94,6 +100,14 @@ python scripts/nr_client.py verify <flow-id> --yes     # 端到端（含可选 H
 
 ## 红线声明（给用户看的安全承诺）
 
-- 用户手工 flow 只读，想误伤都做不到（write-flow 的节点数熔断 + inventory 归属标注双保险）。
-- 每次写入前自动全量快照，出事可用 `restore_snapshot` 一键回滚。
+- **用户手工 flow 只读是硬拦截**：不带 `af_` 前缀的目标，`write-flow` / `create_tab` 默认直接拒绝，
+  想误伤都做不到（外加 inventory 归属标注 + 节点数熔断三层保险）。
+- 每次写入前自动全量快照，出事可 `restore_snapshot` 回滚。
 - 所有写入操作记录在 `~/.autoflow-core/logs/nr_operations.log`。
+
+## ⚠️ 回滚须知（v1.0.1 起）
+
+- `restore_snapshot` = **整实例还原**（内部走 `POST /flows` 全量重部署），不是单 flow 回滚。
+- 它不会只回滚某一条 flow：快照之后新建的 tab 会**被删除**，除非你传 `allow_partial=False`
+  让护栏先把这次还原拦下（默认即如此，遇子集快照会拒绝）。
+- 只想撤销单条 flow 的改动 → 从快照里取出那一条，用 `write-flow` 写回即可，不要用整实例还原。

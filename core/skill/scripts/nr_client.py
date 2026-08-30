@@ -76,7 +76,7 @@ def _log_operation(action: str, details: str):
 # 覆盖权威源位置：NR_CLIENT_AUTHORITY=<绝对路径>
 # 关闭自动同步：NR_CLIENT_DISABLE_AUTOSYNC=1
 
-NR_CLIENT_VERSION = "3.0.0"
+NR_CLIENT_VERSION = "3.0.1"
 
 # 默认权威源位置（可被 NR_CLIENT_AUTHORITY 环境变量或运行时注册表覆盖）。
 # 发行版：权威源 = autoflow-core skill 安装位（安装时由 repo core/ 下载落位）。
@@ -452,33 +452,36 @@ class NodeRedClient:
             _log_operation("GUARD_SNAPSHOT_WRITE_FAIL", f"{e}")
             return None
 
-    def restore_snapshot(self, path: str, allow_prod: bool = False) -> int:
-        """把 _snapshot_raw 生成的快照回滚（重放）到 NR。
+    def restore_snapshot(self, path: str, allow_prod: bool = False,
+                         allow_partial: bool = False) -> Dict[str, Any]:
+        """全实例原子还原（P0 修复：改为经 deploy_all 整包 POST /flows）。
 
-        行为级回滚的核心逃逸口：deploy_all / create_tab 写前已拍全量快照，
-        任一写操作失败时可调用本方法把整实例恢复到部署前 last-good。
-        逐 flow 走 create_or_update_flow（force=True 跳过节点数熔断，
-        lint 仍拦数据损坏；prod 需 allow_prod 显式 opt-in）。
-        返回成功恢复的 flow 数。
+        ⚠️ 旧实现的历史缺陷（T011 §6 实测，会把实例写崩，已废弃）：
+        逐条遍历扁平 `GET /flows` 数组，把 **tab 条目与 node 条目都当成独立 flow** 交给
+        create_or_update_flow → tab 条目被 PUT 成空 tab（原节点全清），node 条目被当成
+        新 tab 重建（孤儿化）。结果：全实例节点数归零。
+
+        正解：NR 的 `/flows` 是**全量扁平数组**（tab + 各 tab 的节点以 z 归属），
+        还原必须整包 POST 交回 NR 自己重建归属关系 —— 即 deploy_all。
+        故本方法现在是 deploy_all 的薄封装（保留 force=True 跳过节点数熔断，
+        护栏(0)(3) 与 lint 仍生效）。
+
+        allow_partial=True：快照是线上真子集时（快照后又新建了 tab/subflow）仍需强制
+        还原 —— 差集会被删除，慎用。默认 False 时这种情况会被护栏(0)拦下。
+
+        返回 {"restored_items": n, "result": deploy_all 结果}。
         """
         if not os.path.exists(path):
             raise FileNotFoundError(f"快照不存在：{path}")
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         flows = data.get("flows", [])
-        restored = 0
-        for fl in flows:
-            if not isinstance(fl, dict) or "id" not in fl:
-                continue
-            try:
-                self.create_or_update_flow(
-                    fl["id"], fl, force=True, allow_prod=allow_prod)
-                restored += 1
-            except Exception as e:  # pragma: no cover - 回滚自身失败兜底
-                _log_operation("RESTORE_FAIL",
-                               f"flow={fl.get('id')} | {e}")
-        _log_operation("RESTORE", f"path={path} | restored={restored}/{len(flows)}")
-        return restored
+        if not flows:
+            raise ValueError(f"快照无 flows 内容，拒绝还原：{path}")
+        res = self.deploy_all(flows, force=True, allow_prod=allow_prod,
+                              allow_partial=allow_partial)
+        _log_operation("RESTORE", f"path={path} | items={len(flows)} | deploy_all")
+        return {"restored_items": len(flows), "result": res}
 
     def _live_counts(self):
         """返回 (tab_count, node_count, flows_list)。
@@ -610,9 +613,16 @@ class NodeRedClient:
 
     # 已知单 output 节点类型（declared outputs 缺失时回退用）。
     # 多 output 节点（switch/api-current-state 等）靠节点自身 outputs 字段判断。
+    # 注（T011 §6 P2 修复）：本表登记「默认 1 个 output」的节点类型；
+    # 节点自带 outputs 字段时以其为准，本表仅作兜底。
+    # 真机实证（1234+ 节点）后移除两项误映射 —— debug 175/175、link out 50/51
+    # 实测为【零出边】末端节点（wires=[]），留在本表会把合法 flow 判为 R10 类问题：
+    #   · "debug"（曾致 174 个节点误报，合法流被拒，须手塞 outputs:0 才能过）
+    #   · "link out"（50 个节点误报；它是连线终点，天然 0 输出）
+    # 两者都不再参与「期望 1 个 output」判定。
     _SINGLE_OUTPUT_TYPES = {
         "inject": 1, "delay": 1, "api-current-state": 1, "change": 1,
-        "http request": 1, "link out": 1, "link call": 1, "debug": 1,
+        "http request": 1, "link call": 1,
         "function": 1, "api-call-service": 1, "event-state": 1,
     }
 
@@ -763,8 +773,13 @@ class NodeRedClient:
         """返回 NR 中第一个 HA server 节点 id（部署时填补触发器 server 字段）。"""
         return self._get_default_server()
 
-    def create_tab(self, label: str, allow_prod: bool = False) -> Dict:
+    def create_tab(self, label: str, allow_prod: bool = False,
+                   allow_user_flow: bool = False) -> Dict:
         """创建新 flow tab（安全增量路径，绝不整实例替换）。
+
+        所有权红线（A 档硬拦截）：label 不带 `af_` 前缀 → 默认拒绝，防止 agent 在
+        用户手工命名空间里建壳。确需建非 af_ tab 显式传 allow_user_flow=True。
+
 
         安全模型：走 create_or_update_flow 的「POST /flow 建壳 → PUT /flow/:id 补节点」
         单 flow 路径（1990 验证稳定），仅新增 1 个 tab，绝不触碰其它 tab / 子流程。
@@ -773,6 +788,7 @@ class NodeRedClient:
         清场后整实例只剩那一个子流程）。
         返回 {'id': <真实 tab id>, 'label': label, 'nodes': []}。
         """
+        self._guard_ownership(label, allow_user_flow, "create_tab")
         tab_id = str(uuid.uuid4()).replace('-', '')[:16]
         new_flow = {
             "id": tab_id,
@@ -2073,14 +2089,41 @@ class NodeRedClient:
         self._inv_subflows = subflows
         return rows
 
+    @staticmethod
+    def _guard_ownership(flow_label: str, allow_user_flow: bool, action: str):
+        """所有权红线硬拦截（A 档）：非 af_* 命名空间默认拒绝写。
+
+        用户手工流只读是核心版对外承诺的红线。此前仅靠 SKILL.md 纪律（T011 §6 实测
+        可被绕过），现升级为代码层默认拒绝；确需写用户流时必须显式 allow_user_flow=True。
+        """
+        if allow_user_flow:
+            return
+        name = str(flow_label or "")
+        if not name.startswith("af_"):
+            raise NRGuardError(
+                f"⛔ 所有权红线：{action} 目标 '{name}' 不带 af_ 前缀，判为用户手工流，"
+                f"默认禁止写入。\n"
+                f"· 写自己建的 flow：请用 af_ 前缀命名（如 af_书房场景）\n"
+                f"· 确需改动用户手工流：显式传 allow_user_flow=True（会照常快照留底）")
+
     def write_flow(self, flow_id: str, flow_data: Dict,
                    force: bool = False, allow_prod: bool = False,
                    dry_run: bool = False,
-                   label: str = "write_flow") -> Dict[str, Any]:
+                   label: str = "write_flow",
+                   allow_user_flow: bool = False) -> Dict[str, Any]:
         """一键安全写入（agent 写 flow 的标准入口）：
-        dry_run 预览 → 快照 → update_flow（lint+prod 闸+节点数熔断）→ 回读校验。
+        所有权红线 → dry_run 预览 → 快照 → update_flow（lint+prod 闸+节点数熔断）→ 回读校验。
         回读发现节点数/ID 不符 → 抛 NRRollbackError（附快照路径，可 restore_snapshot）。
+
+        目标 tab 归属以**线上 label 为准**（不是调用方传的 label），防伪造前缀绕过。
         """
+        live_label = None
+        try:
+            live_label = (self._json("GET", f"/flow/{flow_id}") or {}).get("label")
+        except Exception:
+            live_label = None
+        self._guard_ownership(live_label or flow_data.get("label", ""),
+                              allow_user_flow, "write_flow")
         if dry_run:
             return {"dry_run": True, "flow_id": flow_id,
                     "nodes": len(flow_data.get("nodes", [])),

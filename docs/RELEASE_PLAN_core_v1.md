@@ -27,7 +27,8 @@
    - `core/INSTALL.md`（一句话安装 prompt 文案 + 手动安装兜底步骤）
    - `core/VERSION` + `core/CHANGELOG.md`
 2. **公开前专项清理（关键，易漏）**：
-   - 全 `core/` 扫描内网 IP（192.168.2.x / 100.112.138.64）、NAS 路径、账密、`NR_PASS` 硬编码默认值（nr_client.py 现有硬编码默认密码，**必须改为必填环境变量**）；
+   - 全 `core/` 扫描内网 IP（192.168.x / 100.x 等私网段）、NAS 路径、账密、`NR_PASS` 硬编码默认值（nr_client.py 现有硬编码默认密码，**必须改为必填环境变量**）；
+     （注：团队共享盘地址不得写进本仓库正文，一律用 `<share-host>` 占位）
    - `test_no_secrets.py` 门禁接入 core 目录；
    - 确认 GitHub 仓库公开可匿名 raw 访问。
 3. 版本策略：core 独立版本号（v1.0 起），与网关版本解耦。
