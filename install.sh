@@ -6,12 +6,18 @@
 #   curl -fsSL https://raw.githubusercontent.com/lidicn/AutoFlow/main/install.sh | bash
 #
 # 环境变量 / 参数：
-#   REPO=lidicn/AutoFlow   仓库（fork 时改这里）
-#   BRANCH=main                    分支
-#   INSTALL_DIR=/opt/autoflow      安装目录（macOS 默认 ~/autoflow）
-#   bash install.sh --install-docker 本机没装 Docker 时顺带安装（仅 Linux）
-#   bash install.sh --update         拉最新代码并重建镜像（保留 data/ 与 .env）
-#   bash install.sh -d <dir>         指定安装目录
+#   REPO=lidicn/AutoFlow                仓库（fork 时改这里）
+#   BRANCH=main                         分支
+#   INSTALL_DIR=/opt/autoflow           安装目录（macOS 默认 ~/autoflow）
+#   GITHUB_PROXY=https://ghproxy.com/   GitHub 代理（中国大陆网络用，ghproxy/jsdelivr 等）
+#   bash install.sh --install-docker    本机没装 Docker 时顺带安装（仅 Linux）
+#   bash install.sh --update            拉最新代码并重建镜像（保留 data/ 与 .env）
+#   bash install.sh -d <dir>            指定安装目录
+#
+# 中国大陆网络示例：
+#   export GITHUB_PROXY=https://ghproxy.com/
+#   curl -fsSL "${GITHUB_PROXY}https://raw.githubusercontent.com/lidicn/AutoFlow/main/install.sh" \
+#     | GITHUB_PROXY=$GITHUB_PROXY bash -s -- -d "$(pwd)"
 # ============================================================
 set -euo pipefail
 
@@ -23,9 +29,20 @@ else
   DEFAULT_DIR="/opt/autoflow"
 fi
 INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_DIR}"
+GITHUB_PROXY="${GITHUB_PROXY:-}"
 DID_SPECIFY_DIR=0
 UPDATE=0
 INSTALL_DOCKER=0
+
+# 若配置了 GITHUB_PROXY，把代理前缀拼到原始 URL 前面（仅当原始 URL 尚未以该前缀开头，避免重复）
+proxy_url() {
+  local url="$1"
+  if [ -n "$GITHUB_PROXY" ] && [ "${url#"$GITHUB_PROXY"}" = "$url" ]; then
+    printf '%s%s\n' "${GITHUB_PROXY%/}/" "$url"
+  else
+    printf '%s\n' "$url"
+  fi
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -106,7 +123,7 @@ fi
 
 # ── 3. 拉取构建上下文（tarball，无需 git）──
 mkdir -p "$TMP/repo"
-TARBALL_URL="https://github.com/${REPO}/archive/refs/heads/${BRANCH}.tar.gz"
+TARBALL_URL=$(proxy_url "https://github.com/${REPO}/archive/refs/heads/${BRANCH}.tar.gz")
 info "下载仓库快照：$TARBALL_URL"
 if ! curl -fsSL "$TARBALL_URL" -o "$TMP/autoflow.tar.gz"; then
   err "下载失败。请确认 REPO/BRANCH 正确且能访问 GitHub。"
