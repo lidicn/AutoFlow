@@ -2118,9 +2118,13 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             return await raw(scope, receive, send)
 
         # 4) 无任何身份。
-        # ★S-4 止血：token_only 模式、或系统还没有任何账号（未初始化）时，
+        # ★S-4 止血：token_only 模式，或「未初始化且仍依赖旧令牌体系」时，
         #   远程无认证访问一律 403，防止 Docker 0.0.0.0 把控制面裸奔到公网。
-        no_auth_possible = (auth.auth_mode == "token_only") or (not auth.has_users())
+        # password_only 模式下首次注册必须允许远程访问（用户从 LAN 浏览器初始化）；
+        # 未命中白名单的非公开路径返回 401，由前端弹出注册向导。
+        no_auth_possible = (auth.auth_mode == "token_only") or (
+            (not auth.has_users()) and auth.auth_mode != "password_only"
+        )
         if no_auth_possible:
             if not _is_loopback(scope):
                 await JSONResponse(

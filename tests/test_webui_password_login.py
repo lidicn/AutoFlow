@@ -224,15 +224,22 @@ class TestPasswordLogin(TmpCfgMixin, unittest.TestCase):
         self.assertEqual(r.status_code, 403)
         self.assertIn("forbidden", r.text)
 
-    def test_s4_zero_users_remote_403_and_xff_spoof(self):
-        c = self.make_client()  # 零账号、无令牌
+    def test_s4_password_only_zero_users_remote_401_and_xff_spoof(self):
+        # password_only 默认模式：零账号时远程访问应引导注册，而非 403 拦截。
+        c = self.make_client()  # 零账号、无令牌、password_only
         st, _, _ = _raw_status(c.app, "/api/pending", client_ip="203.0.113.7")
-        self.assertEqual(st, 403, "S-4: 零账号 + 远程 → 403")
-        # 伪造 XFF 回环仍 403
+        self.assertEqual(st, 401, "password_only 零账号 + 远程 → 401，前端弹注册向导")
+        # 伪造 XFF 回环仍按真实 client IP 处理
         st2, _, _ = _raw_status(
             c.app, "/api/pending", client_ip="203.0.113.7",
             headers=[(b"x-forwarded-for", b"127.0.0.1")])
-        self.assertEqual(st2, 403, "S-4: 伪造 XFF 不被采信")
+        self.assertEqual(st2, 401, "伪造 XFF 不被采信")
+
+    def test_s4_token_only_zero_users_remote_403(self):
+        # token_only 回滚模式：没有密码注册通道，远程无令牌必须 403 封闭。
+        c = self.make_client(mode="token_only")  # 零账号、无令牌
+        st, _, _ = _raw_status(c.app, "/api/pending", client_ip="203.0.113.7")
+        self.assertEqual(st, 403, "token_only 零账号 + 远程 → 403")
 
     def test_password_hash_not_plaintext_and_salted(self):
         h1 = _wa.hash_password("SamePass123")
