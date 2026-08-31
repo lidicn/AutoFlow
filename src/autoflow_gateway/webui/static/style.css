@@ -248,6 +248,8 @@ body {
 .guide-panel { width: 320px; flex-shrink: 0; position: sticky; top: 20px; align-self: flex-start; }
 .guide-panel .mode-item { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 .guide-panel .mode-item:first-child { border-top: none; padding-top: 0; margin-top: 8px; }
+.guide-panel h3 { margin: 0 0 6px; }
+.guide-panel h3:not(:first-of-type) { margin-top: 18px; }
 .guide-panel .mode-item h4 { margin: 0 0 4px; font-size: 14px; color: var(--text); }
 .guide-panel .mode-item p { margin: 0; font-size: 13px; color: var(--text-dim); line-height: 1.6; }
 .guide-panel .mode-item code { font-size: 12px; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; color: var(--text); }

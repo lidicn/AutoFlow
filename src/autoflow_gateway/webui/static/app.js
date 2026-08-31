@@ -91,7 +91,7 @@ function modeLabel(m) {
 function endpointForMode(m) {
   return ({ black: "/mcp", white: "/mcp-white", dual: "/mcp-white", both: "/mcp", admin: "/mcp-admin" })[m] || "/mcp";
 }
-// 新建 Agent 页右侧的模式说明面板
+// 新建 Agent 页右侧的身份模式 + 权限级别说明面板
 function renderAgentModeGuide() {
   return `
     <div class="card guide-panel">
@@ -117,7 +117,22 @@ function renderAgentModeGuide() {
         <h4>管理员 admin — 运维专用</h4>
         <p>连 <code>/mcp-admin</code>。可调用全部工具（含运维刀、测试杠杆、任务池）。普通 agent 不应使用。</p>
       </div>
-      <div class="hint">安全原则：agent 不能自己批准自己的写操作。即使白箱能直接部署，也建议在 WebUI 中复核变更。</div>
+
+      <h3>权限级别说明</h3>
+      <p class="desc">权限级别（tier）是 agent 的环境归属标签，用于区分生产/测试身份。</p>
+      <div class="mode-item">
+        <h4>prod — 真实环境</h4>
+        <p>连接真实 HA/NR。创建后身份码应谨慎保管，避免泄露给不受信任的 agent。</p>
+      </div>
+      <div class="mode-item">
+        <h4>staging — 练手 / 虚拟 HA</h4>
+        <p>用于 vhass 虚拟孪生或测试场景。配合网关 <code>AUTOFLLOW_ENV=staging</code> 使用，可在不碰真实设备的情况下验证 flow。</p>
+      </div>
+      <div class="mode-item">
+        <h4>sandbox — 受限沙箱</h4>
+        <p>设计为受限环境。当前版本主要作为分类标签；若需要严格的沙箱策略（如禁止部署到 prod），请在 <b>设置 → 功能开关</b> 中确认或后续版本启用。</p>
+      </div>
+      <div class="hint">当前版本：agent 的 tier 不限制任务领取或部署目标，实际环境隔离由网关 <code>AUTOFLLOW_ENV</code> 与任务自身决定。若你需要按 tier 强制隔离，可提需求实现。</div>
     </div>`;
 }
 function fmtTime(s) {
