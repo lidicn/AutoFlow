@@ -241,6 +241,19 @@ body {
 .field textarea { resize: vertical; min-height: 80px; }
 .form-card { max-width: 560px; }
 
+/* Agents 新建页：表单 + 右侧模式说明面板 */
+.agent-layout { display: flex; gap: 20px; align-items: flex-start; }
+.agent-form { flex: 1; min-width: 0; }
+.agent-form .form-card { max-width: none; }
+.guide-panel { width: 320px; flex-shrink: 0; position: sticky; top: 20px; align-self: flex-start; }
+.guide-panel .mode-item { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.guide-panel .mode-item:first-child { border-top: none; padding-top: 0; margin-top: 8px; }
+.guide-panel .mode-item h4 { margin: 0 0 4px; font-size: 14px; color: var(--text); }
+.guide-panel .mode-item p { margin: 0; font-size: 13px; color: var(--text-dim); line-height: 1.6; }
+.guide-panel .mode-item code { font-size: 12px; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; color: var(--text); }
+.guide-panel .hint { margin-top: 14px; padding: 10px; background: var(--primary-weak); border-radius: var(--radius-sm); font-size: 13px; color: var(--primary-700); line-height: 1.5; }
+@media (max-width: 900px) { .agent-layout { flex-direction: column; } .guide-panel { position: static; width: 100%; } }
+
 /* 空态 */
 .empty { color: var(--text-dim); text-align: center; padding: 40px 10px; }
 .empty.err { color: #b91c1c; }

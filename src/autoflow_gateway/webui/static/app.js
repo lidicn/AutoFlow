@@ -91,6 +91,35 @@ function modeLabel(m) {
 function endpointForMode(m) {
   return ({ black: "/mcp", white: "/mcp-white", dual: "/mcp-white", both: "/mcp", admin: "/mcp-admin" })[m] || "/mcp";
 }
+// 新建 Agent 页右侧的模式说明面板
+function renderAgentModeGuide() {
+  return `
+    <div class="card guide-panel">
+      <h3>身份模式说明</h3>
+      <p class="desc">模式决定该 agent 能领什么任务、看到哪些 MCP 工具、能否直接部署。</p>
+      <div class="mode-item">
+        <h4>黑箱 black — 仅 DSL</h4>
+        <p>连 <code>/mcp</code>。只能写 DSL 提案，<b>看不到部署刀</b>。所有上线必须经 WebUI 人工批准。适合公开/不可信的 LLM agent。</p>
+      </div>
+      <div class="mode-item">
+        <h4>白箱 white — 可自由部署</h4>
+        <p>连 <code>/mcp-white</code>。可手写原生节点、自由部署、使用测试杠杆。不能进 <code>/mcp-admin</code>。适合你信任的内部 agent。</p>
+      </div>
+      <div class="mode-item">
+        <h4>双箱 dual — 先白后黑</h4>
+        <p>连 <code>/mcp</code> 或 <code>/mcp-white</code> 均可。既能领白箱原生任务，也能领黑箱 DSL 任务。开发调试与正式提案可共用同一身份。</p>
+      </div>
+      <div class="mode-item">
+        <h4>不限 both — 旧身份兼容</h4>
+        <p>连 <code>/mcp</code>。行为与早期无模式版本一致。新部署建议明确选 black/white/dual，便于审计和权限隔离。</p>
+      </div>
+      <div class="mode-item">
+        <h4>管理员 admin — 运维专用</h4>
+        <p>连 <code>/mcp-admin</code>。可调用全部工具（含运维刀、测试杠杆、任务池）。普通 agent 不应使用。</p>
+      </div>
+      <div class="hint">安全原则：agent 不能自己批准自己的写操作。即使白箱能直接部署，也建议在 WebUI 中复核变更。</div>
+    </div>`;
+}
 function fmtTime(s) {
   if (!s) return "—";
   try { return new Date(s).toLocaleString("zh-CN", { hour12: false }); } catch { return s; }
@@ -331,15 +360,20 @@ function stopWsAutoRefresh() {
 async function loadAgents() {
   const v = $("#view-agents");
   v.innerHTML = `<div class="view-head"><h2>Agents</h2></div>
-    <div class="card form-card">
-      <h3>新建 Agent</h3>
-      <div class="field"><label>名称（如 deepseek++）</label><input id="a-name" placeholder="deepseek++"></div>
-      <div class="field"><label>权限级别</label>
-        <select id="a-tier"><option value="staging">staging（练手/虚拟HA）</option><option value="prod">prod（真实环境）</option><option value="sandbox">sandbox（受限）</option></select></div>
-      <div class="field"><label>身份模式</label>
-        <select id="a-mode">${MODES.map((m) => `<option value="${m}">${modeLabel(m)}</option>`).join("")}</select></div>
-      <div class="field"><label>备注</label><textarea id="a-notes" placeholder="可选"></textarea></div>
-      <button class="btn primary" id="a-create">生成身份识别码</button>
+    <div class="agent-layout">
+      <div class="agent-form">
+        <div class="card form-card">
+          <h3>新建 Agent</h3>
+          <div class="field"><label>名称（如 deepseek++）</label><input id="a-name" placeholder="deepseek++"></div>
+          <div class="field"><label>权限级别</label>
+            <select id="a-tier"><option value="staging">staging（练手/虚拟HA）</option><option value="prod">prod（真实环境）</option><option value="sandbox">sandbox（受限）</option></select></div>
+          <div class="field"><label>身份模式</label>
+            <select id="a-mode">${MODES.map((m) => `<option value="${m}">${modeLabel(m)}</option>`).join("")}</select></div>
+          <div class="field"><label>备注</label><textarea id="a-notes" placeholder="可选"></textarea></div>
+          <button class="btn primary" id="a-create">生成身份识别码</button>
+        </div>
+      </div>
+      ${renderAgentModeGuide()}
     </div>
     <div id="a-list" style="margin-top:14px"><div class="empty">加载中…</div></div>`;
   $("#a-create").onclick = createAgent;
