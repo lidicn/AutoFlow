@@ -12,22 +12,26 @@ function uiToken() { return localStorage.getItem("af_ui_token") || readCookie("a
 function qs(token) { return token ? (token.startsWith("?") ? token : "?token=" + token) : ""; }
 
 async function api(method, path, body, opts = {}) {
-  const token = uiToken();
-  const url = "/api" + path + (method === "GET" && token ? (path.includes("?") ? "&" : "?") + "token=" + token : "");
+  const url = "/api" + path;
   const ctrl = new AbortController();
   const timeoutMs = opts.timeout || 25000;
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  const fetchOpts = { method, headers: {}, signal: ctrl.signal };
-  if (token && method !== "GET") fetchOpts.headers["Authorization"] = "Bearer " + token;
+  // I-9：会话 Cookie 是环境权限，所有写请求带同源自定义头，防 CSRF 跨站调用。
+  const fetchOpts = { method, headers: { "X-Requested-With": "autoflow" }, signal: ctrl.signal, credentials: "same-origin" };
   if (body !== undefined) {
     fetchOpts.headers["Content-Type"] = "application/json";
     fetchOpts.body = JSON.stringify(body);
   }
   try {
     const res = await fetch(url, fetchOpts);
-    if (res.status === 403) throw new Error("访问被拒绝：需要 WebUI 令牌（点右上角 🔑 设置）");
     let data = null;
     try { data = await res.json(); } catch (e) {}
+    if (res.status === 401) {
+      // 未登录 / 会话失效：交给账号模块弹登录或注册框（后端区分 401=要登录 / 403=权限不足）
+      if (window.__afAuth) window.__afAuth.onUnauthorized();
+      throw new Error((data && data.error) || "需要登录");
+    }
+    if (res.status === 403) throw new Error((data && data.error) || "请求被拒绝");
     return { ok: res.ok, status: res.status, data };
   } catch (e) {
     if (e && e.name === "AbortError") {
@@ -1273,21 +1277,8 @@ async function loadDiagnostics() {
   }
 }
 
-// ── 令牌设置 ──
-$("#tokenBtn").onclick = () => {
-  const cur = uiToken();
-  modal("WebUI 访问令牌",
-    `<p class="desc">若网关启动时设了 <code>AF_WEBUI_TOKEN</code>，所有 /api 请求需带此令牌。留空表示无需令牌（仅本机）。</p>
-     <div class="field"><label>当前</label><input id="tk" value="${esc(cur)}" placeholder="留空=无"></div>
-     <button class="btn primary" id="tk-save">保存</button>`);
-  $("#tk-save").onclick = () => {
-    const v = $("#tk").value.trim();
-    localStorage.setItem("af_ui_token", v);
-    if (v) document.cookie = "af_ui_token=" + encodeURIComponent(v) + "; path=/; max-age=31536000; SameSite=Lax";
-    else document.cookie = "af_ui_token=; path=/; max-age=0";
-    closeModal(); toast("已保存");
-  };
-};
+// ── 账号区（登录/注册/改密/会话/用户管理）统一由文件末尾的 afAuth 模块渲染到 #authZone ──
+// 旧「🔑 粘贴访问令牌」交互已废弃：账号密码登录见 webui_auth.py + afAuth。
 
 // ── DSL 验证任务池开关 ──
 $("#tpBtn").onclick = async () => {
@@ -2853,8 +2844,203 @@ async function loadLlmAgent() {
   }
 }
 
+// ════════════════════════════════════════════════════════════════
+// 账号登录（WebUI 改造）：登录 / 注册 / 改密 / 会话 / 用户管理
+// 对应后端 webui_auth.py。会话 Cookie 由浏览器自动携带（HttpOnly），
+// 前端不读不存令牌，只在 401 时弹登录框。CSRF 头由 api() 统一加。
+// ════════════════════════════════════════════════════════════════
+const afAuth = (() => {
+  let state = {
+    auth_mode: "password_only", initialized: false, logged_in: false, user: null,
+    csrf_header: "x-requested-with", csrf_value: "autoflow",
+    min_password_len: 8, roles: ["viewer", "admin", "owner"], registration_open: false,
+  };
+  let busy = false;
+
+  async function refresh() {
+    try {
+      const r = await api("GET", "/auth/state");
+      if (r.ok) state = Object.assign(state, r.data || {});
+    } catch (e) {}
+    renderZone();
+    return state;
+  }
+
+  function renderZone() {
+    const z = $("#authZone"); if (!z) return;
+    if (state.logged_in && state.user) {
+      z.innerHTML = `<button class="btn ghost" id="afUserBtn">${esc(state.user.username)} ▾</button>`;
+      $("#afUserBtn").onclick = openMenu;
+    } else {
+      z.innerHTML = `<button class="btn primary sm" id="afLoginBtn">登录</button>`;
+      $("#afLoginBtn").onclick = () => onUnauthorized();
+    }
+  }
+
+  async function boot() {
+    await refresh();
+    if (state.logged_in && state.user && state.user.must_change) showChangePassword(true);
+  }
+
+  function openMenu() {
+    const u = state.user || {};
+    const isOwner = u.role === "owner";
+    const items = [
+      `<button class="btn sm" data-act="pw">修改密码</button>`,
+      `<button class="btn sm" data-act="sess">我的会话</button>`,
+    ];
+    if (isOwner) items.push(`<button class="btn sm" data-act="users">用户管理</button>`);
+    items.push(`<button class="btn sm danger" data-act="logout">退出登录</button>`);
+    modal("账号：" + esc(u.username || ""),
+      `<div class="col gap8">${items.join("")}</div>
+       <p class="desc">角色：${esc(u.role || "")}${u.must_change ? "（需修改密码）" : ""}</p>`);
+    $$("#modalBody [data-act]").forEach((b) => {
+      b.onclick = () => {
+        const a = b.dataset.act;
+        closeModal();
+        if (a === "pw") showChangePassword(false);
+        else if (a === "sess") showSessions();
+        else if (a === "users") showUsers();
+        else if (a === "logout") logout();
+      };
+    });
+  }
+
+  function onUnauthorized() {
+    if (busy) return; busy = true;
+    refresh().then(() => {
+      if (!state.initialized) showRegister();
+      else showLogin();
+    }).finally(() => { busy = false; });
+  }
+
+  function showLogin() {
+    modal("登录 AutoFlow", `
+      <div class="field"><label>用户名</label><input id="afUser" autocomplete="username" autofocus></div>
+      <div class="field"><label>密码</label><input id="afPass" type="password" autocomplete="current-password"></div>
+      <label class="chk"><input type="checkbox" id="afRemember"> 记住我（7 天）</label>
+      <div id="afErr" class="errbox" hidden></div>
+      <button class="btn primary" id="afLogin">登录</button>`);
+    const go = async () => {
+      $("#afErr").hidden = true;
+      const r = await api("POST", "/auth/login", {
+        username: $("#afUser").value.trim(), password: $("#afPass").value,
+        remember: $("#afRemember").checked,
+      });
+      if (r.ok) location.reload();
+      else { $("#afErr").hidden = false; $("#afErr").textContent = (r.data && r.data.error) || "登录失败"; }
+    };
+    $("#afLogin").onclick = go;
+    $("#afPass").addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+  }
+
+  function showRegister() {
+    modal("初始化管理员账号", `
+      <p class="desc">首次使用，请创建管理员账号（创建后注册入口永久关闭）。</p>
+      <div class="field"><label>用户名</label><input id="afUser" autocomplete="username" autofocus></div>
+      <div class="field"><label>密码</label><input id="afPass" type="password" autocomplete="new-password"></div>
+      <div class="field"><label>确认密码</label><input id="afConf" type="password" autocomplete="new-password"></div>
+      <p class="desc">密码至少 ${state.min_password_len} 位，且不能过于简单（不能与用户名相同）。</p>
+      <div id="afErr" class="errbox" hidden></div>
+      <button class="btn primary" id="afReg">创建并登录</button>`);
+    const go = async () => {
+      $("#afErr").hidden = true;
+      const pw = $("#afPass").value, conf = $("#afConf").value;
+      if (pw !== conf) { $("#afErr").hidden = false; $("#afErr").textContent = "两次输入的密码不一致"; return; }
+      const r = await api("POST", "/auth/register", { username: $("#afUser").value.trim(), password: pw, confirm: conf });
+      if (r.ok) location.reload();
+      else { $("#afErr").hidden = false; $("#afErr").textContent = (r.data && r.data.error) || "创建失败"; }
+    };
+    $("#afReg").onclick = go;
+    $("#afConf").addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+  }
+
+  function showChangePassword(forced) {
+    modal(forced ? "请先修改密码" : "修改密码", `
+      <div class="field"><label>原密码</label><input id="afOld" type="password" autocomplete="current-password" autofocus></div>
+      <div class="field"><label>新密码</label><input id="afNew" type="password" autocomplete="new-password"></div>
+      <div class="field"><label>确认新密码</label><input id="afNew2" type="password" autocomplete="new-password"></div>
+      <div id="afErr" class="errbox" hidden></div>
+      <button class="btn primary" id="afChg">保存</button>
+      ${forced ? "" : `<button class="btn ghost" id="afChgCancel">取消</button>`}`);
+    const go = async () => {
+      $("#afErr").hidden = true;
+      const nw = $("#afNew").value, n2 = $("#afNew2").value;
+      if (nw !== n2) { $("#afErr").hidden = false; $("#afErr").textContent = "两次新密码不一致"; return; }
+      const r = await api("POST", "/auth/change-password", { old_password: $("#afOld").value, new_password: nw, confirm: n2 });
+      if (r.ok) { toast("密码已更新"); if (forced) location.reload(); else closeModal(); }
+      else { $("#afErr").hidden = false; $("#afErr").textContent = (r.data && r.data.error) || "修改失败"; }
+    };
+    $("#afChg").onclick = go;
+    if (!forced && $("#afChgCancel")) $("#afChgCancel").onclick = closeModal;
+  }
+
+  async function showSessions() {
+    const r = await api("GET", "/auth/sessions");
+    if (!r.ok) { toast("加载会话失败"); return; }
+    const rows = (r.data && r.data.sessions || []).map((s) => `
+      <div class="row between"><span>${esc(s.ip || "")} · ${esc((s.user_agent || "").slice(0, 40))}<br>
+      <small>创建 ${esc(s.created_at || "")} · 过期 ${esc(s.expires_at || "")}</small></span>
+      <button class="btn sm danger" data-sid="${esc(s.session_id)}">踢出</button></div>`).join("") ||
+      `<p class="desc">暂无其它会话</p>`;
+    modal("我的会话", `<div class="col gap6">${rows}</div>`);
+    $$("#modalBody [data-sid]").forEach((b) => {
+      b.onclick = async () => { await api("DELETE", "/auth/sessions/" + b.dataset.sid); showSessions(); };
+    });
+  }
+
+  async function showUsers() {
+    const r = await api("GET", "/auth/users");
+    if (!r.ok) { toast("加载用户失败"); return; }
+    const me = (state.user && state.user.user_id) || "";
+    const rows = (r.data && r.data.users || []).map((u) => `
+      <div class="row between"><span>${esc(u.username)} · <b>${esc(u.role)}</b>${u.status !== "active" ? " · <i>已禁用</i>" : ""}</span>
+      <span>
+        <button class="btn sm" data-reset="${esc(u.user_id)}">重置密码</button>
+        ${u.user_id === me ? "" : `<button class="btn sm danger" data-del="${esc(u.user_id)}">删除</button>`}
+      </span></div>`).join("") || `<p class="desc">暂无用户</p>`;
+    modal("用户管理（仅 owner）", `
+      <div class="col gap6">${rows}</div>
+      <hr>
+      <div class="field"><label>新用户名</label><input id="nuName"></div>
+      <div class="field"><label>密码</label><input id="nuPass" type="password" autocomplete="new-password"></div>
+      <div class="field"><label>角色</label><select id="nuRole">${state.roles.map((x) => `<option>${x}</option>`).join("")}</select></div>
+      <button class="btn primary" id="nuAdd">新增用户</button>`);
+    $("#nuAdd").onclick = async () => {
+      const rr = await api("POST", "/auth/users", {
+        username: $("#nuName").value.trim(), password: $("#nuPass").value, role: $("#nuRole").value,
+      });
+      if (rr.ok) showUsers(); else toast((rr.data && rr.data.error) || "创建失败");
+    };
+    $$("#modalBody [data-reset]").forEach((b) => {
+      b.onclick = async () => {
+        const pw = prompt("设置新密码（该用户下次登录需改密）：");
+        if (!pw) return;
+        const rr = await api("POST", "/auth/users/" + b.dataset.reset + "/reset-password", { new_password: pw });
+        toast(rr.ok ? "已重置" : ((rr.data && rr.data.error) || "失败"));
+      };
+    });
+    $$("#modalBody [data-del]").forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm("确认删除该用户？")) return;
+        const rr = await api("DELETE", "/auth/users/" + b.dataset.del);
+        if (rr.ok) showUsers(); else toast((rr.data && rr.data.error) || "删除失败");
+      };
+    });
+  }
+
+  async function logout() {
+    await api("POST", "/auth/logout");
+    location.reload();
+  }
+
+  return { boot, refresh, renderZone, onUnauthorized, state: () => state };
+})();
+window.__afAuth = afAuth;
+
 // 启动
 (async () => {
+  if (window.__afAuth) { try { await window.__afAuth.boot(); } catch (e) {} }
   try {
     const c = await api("GET", "/config");
     $("#envBadge").textContent = "env: " + (c.data?.env || "?");

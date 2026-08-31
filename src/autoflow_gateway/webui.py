@@ -27,6 +27,8 @@ from starlette.requests import Request
 from .config import get_config, is_task_pool_enabled, is_raw_node_escape_enabled, is_submit_gate_enabled, set_feature_flag, get_deploy_policy, set_deploy_policy, load_feature_flags, is_acp_enabled, load_llm_config, save_llm_config
 from .gateway import Gateway
 from .identity import AgentStore, AcpTokenStore
+from . import webui_auth as _wa
+from .webui_auth import WebUIAuth
 # llm_client 含 `import httpx` —— 惰性导入（见 build_webui_asgi 启动处与 autoflow_ask_llm），
 # 避免 httpx 未安装时网关启动期 ImportError 全功能宕机（ACP 属小众，不应绑架 boot）。
 from .proposals import ProposalStore
@@ -162,6 +164,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     gw = gateway or Gateway(cfg)
     agents = AgentStore(cfg)
     acp_tokens = AcpTokenStore(cfg)  # ACP：kind=acp 令牌（acp_ 前缀），与 af_/WebUI JWT 三套隔离
+    auth = WebUIAuth(cfg)            # WebUI 账号密码登录与会话（与 af_/acp_ 三套隔离）
     # LLM 钩子：惰性建路由单例（按 env 配置多后端），未配置也不崩。
     # 惰性导入 llm_client：httpx 缺失时仅警告，不致命（ACP 关闭/未装 httpx 网关照常启动）。
     try:
@@ -191,6 +194,219 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             return await request.json()
         except Exception:
             return {}
+
+    # ─────────────────────────────────────────────────────────────
+    # 账号登录 / 会话 / 用户管理（WebUI 专用，与 af_ / acp_ 三套隔离）
+    # ─────────────────────────────────────────────────────────────
+    def _ua(request: Request) -> str:
+        for k, v in request.scope.get("headers", []):
+            if k.decode("latin-1").lower() == "user-agent":
+                return v.decode("latin-1", "ignore")[:300]
+        return ""
+
+    def _public_user(u: dict) -> dict:
+        """对外脱敏：绝不回传 pw_hash（I-1）。"""
+        return {k: u.get(k) for k in (
+            "user_id", "username", "role", "status", "must_change",
+            "created_at", "last_login_at", "notes", "locked")}
+
+    async def auth_state(request: Request):
+        """免鉴权探测：前端据此决定渲染 登录 / 注册向导 / 主界面。"""
+        sess = auth.resolve_session(_wa.session_id_from_scope(request.scope))
+        return _js({
+            "ok": True,
+            "auth_mode": auth.auth_mode,
+            "initialized": auth.has_users(),
+            "registration_open": auth.registration_open(),
+            "logged_in": bool(sess),
+            "user": (_public_user(sess) if sess else None),
+            "csrf_header": _wa.CSRF_HEADER,
+            "csrf_value": _wa.CSRF_VALUE,
+            "min_password_len": _wa.MIN_PASSWORD_LEN,
+            "roles": list(_wa.ROLES),
+        })
+
+    async def auth_register(request: Request):
+        """首开注册向导：仅在「零账号 + AF_WEBUI_OPEN_REGISTER≠0」时开放，建号后永久关闭。"""
+        if auth.auth_mode == "token_only":
+            # 回滚模式：密码子系统整体关闭，只认旧令牌。
+            # 返回 401（而非 403）：这是鉴权探测端点，401 = "请改用令牌认证"。
+            return _js({"ok": False, "error": "当前为 token_only 模式，已禁用账号密码注册，请使用访问令牌"}, 401)
+        if not auth.registration_open():
+            return _js({"ok": False, "error": "注册已关闭：系统已存在账号"}, 403)
+        b = await _body(request)
+        username = str(b.get("username") or "").strip()
+        password = b.get("password") or ""
+        if b.get("confirm") is not None and b["confirm"] != password:
+            return _js({"ok": False, "error": "两次输入的密码不一致"}, 400)
+        err = _wa.password_policy_error(password, username)
+        if err:
+            return _js({"ok": False, "error": err}, 400)
+        try:
+            u = auth.create_user(username, password, role="owner")
+        except ValueError as e:
+            return _js({"ok": False, "error": str(e)}, 400)
+        sid, max_age = auth.create_session(
+            u["user_id"], remember=True, ip=_client_host(request.scope), user_agent=_ua(request))
+        auth.audit("register", username=u["username"], ip=_client_host(request.scope), ok=True)
+        return JSONResponse(
+            {"ok": True, "user": _public_user(u)}, status_code=201,
+            headers={"Set-Cookie": _wa.build_session_cookie(sid, max_age, auth.secure_cookie)},
+        )
+
+    async def auth_login(request: Request):
+        if auth.auth_mode == "token_only":
+            # 回滚模式：密码子系统整体关闭，只认旧令牌。
+            # 返回 401（而非 403）：这是鉴权探测端点，401 = "请改用令牌认证"。
+            return _js({"ok": False, "error": "当前为 token_only 模式，已禁用账号密码登录，请使用访问令牌"}, 401)
+        b = await _body(request)
+        ip = _client_host(request.scope)
+        user, reason = auth.authenticate(
+            str(b.get("username") or "").strip(), b.get("password") or "", ip=ip)
+        if user is None:
+            # I-5：用户不存在 / 密码错 / 已禁用 一律同一句，防用户枚举
+            msg = {"locked": "账号已被临时锁定，请稍后再试",
+                   "ip_locked": "尝试过于频繁，请稍后再试"}.get(reason, "用户名或密码错误")
+            return _js({"ok": False, "error": msg}, 401)
+        sid, max_age = auth.create_session(
+            user["user_id"], remember=bool(b.get("remember")), ip=ip, user_agent=_ua(request))
+        return JSONResponse(
+            {"ok": True, "user": _public_user(user)},
+            headers={"Set-Cookie": _wa.build_session_cookie(sid, max_age, auth.secure_cookie)},
+        )
+
+    async def auth_logout(request: Request):
+        """免鉴权：会话不存在也返回成功（前端清态即可）。I-4：服务端删会话。"""
+        sid = _wa.session_id_from_scope(request.scope)
+        if sid:
+            s = auth.resolve_session(sid)
+            auth.revoke_session(sid)
+            if s:
+                auth.audit("logout", username=s["username"],
+                           ip=_client_host(request.scope), ok=True)
+        return JSONResponse(
+            {"ok": True},
+            headers={"Set-Cookie": _wa.clear_session_cookie(auth.secure_cookie)},
+        )
+
+    async def auth_me(request: Request):
+        a = request.scope.get("af_auth") or {}
+        u = auth.get_user(a.get("user_id") or "")
+        if not u:
+            return _js({"ok": False, "error": "unauthorized"}, 401)
+        return _js({"ok": True, "user": _public_user(u)})
+
+    async def auth_change_password(request: Request):
+        a = request.scope.get("af_auth") or {}
+        u = auth.get_user(a.get("user_id") or "")
+        if not u:
+            return _js({"ok": False, "error": "unauthorized"}, 401)
+        b = await _body(request)
+        new = b.get("new_password") or ""
+        if b.get("confirm") is not None and b["confirm"] != new:
+            return _js({"ok": False, "error": "两次输入的新密码不一致"}, 400)
+        # 必须校验旧密码（防止借用遗留会话改密）
+        ip = _client_host(request.scope)
+        ok_user, _ = auth.authenticate(u["username"], b.get("old_password") or "", ip=ip)
+        if not ok_user:
+            return _js({"ok": False, "error": "原密码不正确"}, 401)
+        try:
+            auth.set_password(u["user_id"], new, username=u["username"])
+        except ValueError as e:
+            return _js({"ok": False, "error": str(e)}, 400)
+        # 改密后踢掉该用户其它会话，只保留当前这个（不影响自己当前操作）
+        cur = _wa.session_hash(_wa.session_id_from_scope(request.scope))
+        n = auth.revoke_user_sessions(u["user_id"], keep_hash=cur)
+        auth.audit("change_password", username=u["username"], ip=ip, ok=True,
+                   note=f"revoked_other_sessions={n}")
+        return _js({"ok": True, "revoked_other_sessions": n})
+
+    async def auth_sessions_list(request: Request):
+        a = request.scope.get("af_auth") or {}
+        role = a.get("role")
+        # owner 看全员的；其余只看自己的（防越权）
+        rows = auth.list_sessions(None if role == "owner" else a.get("user_id"))
+        return _js({"ok": True, "sessions": rows})
+
+    async def auth_sessions_delete(request: Request):
+        a = request.scope.get("af_auth") or {}
+        role = a.get("role")
+        owner_scope = None if role == "owner" else a.get("user_id")
+        ok = auth.revoke_session_by_id(request.path_params["id"], user_id=owner_scope)
+        auth.audit("session_revoke", username=a.get("username") or "", ok=bool(ok),
+                   note=request.path_params["id"])
+        return _js({"ok": ok}, 200 if ok else 404)
+
+    # ── 用户管理（仅 owner，见 PERM_RULES）──
+    async def auth_users_list(request: Request):
+        return _js({"ok": True, "users": [_public_user(u) for u in auth.list_users()]})
+
+    async def auth_users_create(request: Request):
+        b = await _body(request)
+        try:
+            u = auth.create_user(
+                b.get("username") or "", b.get("password") or "",
+                role=b.get("role") or "viewer", notes=b.get("notes") or "",
+                must_change=1 if b.get("must_change") else 0)
+        except ValueError as e:
+            return _js({"ok": False, "error": str(e)}, 400)
+        auth.audit("user_create", username=u["username"], ok=True, note=u["role"])
+        return _js({"ok": True, "user": _public_user(u)}, 201)
+
+    async def auth_users_update(request: Request):
+        a = request.scope.get("af_auth") or {}
+        tid = request.path_params["id"]
+        if tid == a.get("user_id"):
+            # 防自锁：不能改自己的角色/状态，否则可能把系统唯一的 owner 弄没
+            return _js({"ok": False, "error": "不能修改自己的角色或状态"}, 400)
+        b = await _body(request)
+        role = b.get("role")
+        if role is not None and role == "viewer":
+            # 不允许把最后一个 owner 降级
+            owners = [u for u in auth.list_users() if u["role"] == "owner"]
+            tgt = auth.get_user(tid)
+            if tgt and tgt["role"] == "owner" and len(owners) <= 1:
+                return _js({"ok": False, "error": "系统至少需要保留一个 owner"}, 400)
+        try:
+            ok = auth.update_user(tid, role=role, status=b.get("status"),
+                                  notes=b.get("notes"), must_change=b.get("must_change"))
+        except ValueError as e:
+            return _js({"ok": False, "error": str(e)}, 400)
+        auth.audit("user_update", username=a.get("username") or "", ok=bool(ok), note=tid)
+        return _js({"ok": ok}, 200 if ok else 404)
+
+    async def auth_users_delete(request: Request):
+        a = request.scope.get("af_auth") or {}
+        tid = request.path_params["id"]
+        if tid == a.get("user_id"):
+            return _js({"ok": False, "error": "不能删除自己"}, 400)
+        tgt = auth.get_user(tid)
+        if tgt and tgt["role"] == "owner":
+            owners = [u for u in auth.list_users() if u["role"] == "owner"]
+            if len(owners) <= 1:
+                return _js({"ok": False, "error": "系统至少需要保留一个 owner"}, 400)
+        ok = auth.delete_user(tid)
+        auth.audit("user_delete", username=a.get("username") or "", ok=bool(ok), note=tid)
+        return _js({"ok": ok}, 200 if ok else 404)
+
+    async def auth_users_reset_password(request: Request):
+        """owner 给他人重置密码 → 强制下次登录改密（must_change=1）。"""
+        a = request.scope.get("af_auth") or {}
+        tid = request.path_params["id"]
+        tgt = auth.get_user(tid)
+        if not tgt:
+            return _js({"ok": False, "error": "用户不存在"}, 404)
+        b = await _body(request)
+        new = b.get("new_password") or ""
+        try:
+            auth.set_password(tid, new, username=tgt["username"])
+        except ValueError as e:
+            return _js({"ok": False, "error": str(e)}, 400)
+        auth.update_user(tid, must_change=1)
+        auth.revoke_user_sessions(tid)
+        auth.audit("user_reset_password", username=a.get("username") or "", ok=True,
+                   note=tgt["username"])
+        return _js({"ok": True, "must_change": True})
 
     # ── 健康检查 / 配置 ──
     async def health(request: Request):
@@ -1738,6 +1954,22 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/first-run", first_run_state, methods=["GET"]),
         Route("/api/first-run", first_run_accept, methods=["POST"]),
         Route("/api/diagnostics", diagnostics_view, methods=["GET"]),
+        # ── 账号登录 / 会话 / 用户管理（WebUI 专用）──
+        # 注意顺序：/api/auth/sessions/{id} 必须排在 /api/auth/sessions 之后
+        Route("/api/auth/state", auth_state, methods=["GET"]),
+        Route("/api/auth/register", auth_register, methods=["POST"]),
+        Route("/api/auth/login", auth_login, methods=["POST"]),
+        Route("/api/auth/logout", auth_logout, methods=["POST"]),
+        Route("/api/auth/me", auth_me, methods=["GET"]),
+        Route("/api/auth/change-password", auth_change_password, methods=["POST"]),
+        Route("/api/auth/sessions", auth_sessions_list, methods=["GET"]),
+        Route("/api/auth/sessions/{id}", auth_sessions_delete, methods=["DELETE"]),
+        Route("/api/auth/users", auth_users_list, methods=["GET"]),
+        Route("/api/auth/users", auth_users_create, methods=["POST"]),
+        Route("/api/auth/users/{id}", auth_users_update, methods=["PUT"]),
+        Route("/api/auth/users/{id}", auth_users_delete, methods=["DELETE"]),
+        Route("/api/auth/users/{id}/reset-password", auth_users_reset_password,
+              methods=["POST"]),
         # agents
         Route("/api/agents", list_agents, methods=["GET"]),
         Route("/api/agents", create_agent, methods=["POST"]),
@@ -1832,9 +2064,10 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
 
     app = no_cache_mw
 
-    # ── 可选 WebUI token 闸门 ──
-    # 每次请求实时解析令牌（支持：放文件/改环境变量后立即生效，无需重启网关）。
-    # 令牌缺失则整段跳过（仅本机/可信网络开放并打告警，符合原有默认行为）。
+    # ── WebUI 鉴权闸门：账号密码会话（主通道）+ 旧令牌（兼容通道）──
+    # ★ 三套令牌隔离铁律（I-2）：本闸门只覆盖 WebUI 的 /api。
+    #   /mcp* 的 af_ 身份码由 mcp_server 的中间件独立强制，/acp 用 acp_ 令牌，三者互不相认。
+    # 判定顺序：白名单 → 会话 Cookie → 旧令牌（仅 both/token_only）→ 拒绝。
     raw = app
 
     async def guarded(scope, receive, send):
@@ -1843,35 +2076,65 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         p = scope.get("path", "")
         if not p.startswith("/api"):
             return await raw(scope, receive, send)
-        token = _resolve_webui_token(cfg)
-        if not token:
-            # ★S-4 止血：未配置 token 时仅放行本机/回环；远程无认证访问一律拒（防 Docker 0.0.0.0 暴露）。
+        method = (scope.get("method") or "GET").upper()
+
+        # 1) 免鉴权白名单：登录/注册/探测必须匿名可达，否则登不进来
+        if _wa.is_public_path(p):
+            return await raw(scope, receive, send)
+
+        # 2) 主通道：服务端会话（Cookie）。★ token_only 回滚模式：密码子系统关闭，不受理会话
+        sess = None if auth.auth_mode == "token_only" else auth.resolve_session(_wa.session_id_from_scope(scope))
+        if sess is not None:
+            # I-9 第二层：Cookie 是环境权限，写请求必须带同源自定义头，防 CSRF
+            if _wa.needs_csrf(method) and not _wa.csrf_ok(scope):
+                await JSONResponse(
+                    {"ok": False, "error": "csrf: 写请求缺少同源请求头"},
+                    status_code=403,
+                )(scope, receive, send)
+                return
+            # RBAC（D1 多用户）：未登记路径的写操作 fail-closed 要求 admin
+            need = _wa.required_role_for(method, p)
+            if need and _wa.role_rank(sess["role"]) < _wa.role_rank(need):
+                await JSONResponse(
+                    {"ok": False, "error": f"forbidden: 需要 {need} 权限",
+                     "need_role": need, "role": sess["role"]},
+                    status_code=403,
+                )(scope, receive, send)
+                return
+            scope["af_auth"] = {
+                "mode": "session", "user_id": sess["user_id"],
+                "username": sess["username"], "role": sess["role"],
+                "session_id": sess["session_id"],
+            }
+            return await raw(scope, receive, send)
+
+        # 3) 兼容通道：旧令牌。★豁免 CSRF —— 令牌不是环境权限，跨站拿不到，
+        #    天然免疫 CSRF；同时给脚本/CI 留活路（I-9 第三层）。
+        if auth.resolve_legacy_token(scope):
+            scope["af_auth"] = {
+                "mode": "token", "user_id": "", "username": "legacy-token",
+                "role": "owner", "session_id": "",
+            }
+            return await raw(scope, receive, send)
+
+        # 4) 无任何身份。
+        # ★S-4 止血：token_only 模式、或系统还没有任何账号（未初始化）时，
+        #   远程无认证访问一律 403，防止 Docker 0.0.0.0 把控制面裸奔到公网。
+        no_auth_possible = (auth.auth_mode == "token_only") or (not auth.has_users())
+        if no_auth_possible:
             if not _is_loopback(scope):
                 await JSONResponse(
                     {"ok": False, "error": "unauthorized: WebUI token required for non-local access"},
                     status_code=403,
                 )(scope, receive, send)
                 return
+            # 本机/回环：沿用既有「未配置认证则本机开放」行为（便于本机完成初始化）
             return await raw(scope, receive, send)
-        headers = dict(scope.get("headers", []))
-        provided = None
-        auth = headers.get(b"authorization")
-        if auth:
-            provided = auth.decode().removeprefix("Bearer ").strip()
-        if not provided:
-            from urllib.parse import parse_qs
-            qs = parse_qs(scope.get("query_string", b"").decode())
-            provided = (qs.get("token") or [None])[0]
-        if not provided:
-            provided = _cookie_token(headers)
-        # ★S-1 安全修复：常量时间比较，避免时序攻击逐字节猜 token
-        # 转字节比较：hmac.compare_digest 对 str 要求纯 ASCII，非 ASCII token 会抛
-        # TypeError 致 500；转 utf-8 字节后对任意内容安全比较（仍拒绝，响应干净）。
-        if not hmac.compare_digest(
-            (provided or "").encode("utf-8"), (token or "").encode("utf-8")
-        ):
-            await JSONResponse({"ok": False, "error": "unauthorized"}, status_code=403)(scope, receive, send)
-            return
-        await raw(scope, receive, send)
+
+        # 已初始化 → 401（前端据此弹登录框；区别于 403 的「权限不足/来源被拒」）
+        await JSONResponse(
+            {"ok": False, "error": "unauthorized", "auth_required": True},
+            status_code=401,
+        )(scope, receive, send)
 
     return guarded

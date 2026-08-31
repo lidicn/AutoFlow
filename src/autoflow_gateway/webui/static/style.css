@@ -620,3 +620,10 @@ body {
     padding: 10px 8px;
   }
 }
+
+/* ── 账号登录模块（WebUI 改造）── */
+.auth-zone { display: inline-flex; align-items: center; }
+.gap8 { display: flex; flex-direction: column; gap: 8px; }
+.gap6 { display: flex; flex-direction: column; gap: 6px; }
+.errbox { color: var(--danger, #c0392b); font-size: 12px; margin: 4px 0; }
+.chk { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-2, #666); margin: 4px 0; }
