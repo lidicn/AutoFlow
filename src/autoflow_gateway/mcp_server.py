@@ -5,12 +5,12 @@ AutoFlow Gateway — MCP 服务（双面板）+ 身份鉴权 + WebUI 合一
 
 设计原则（使用者视角 · 三端点按能力分层）：
   · 用户面 /mcp        —— 任何 active 身份都能连，做「发现实体 → 写 DSL(编译器路径) → 提交 → 上报缺陷 / 自愈技能」。
-                          仅编译器身份(mode=black)的专属入口；原生手写/admin 连这里只能拿到用户工具（无部署刀）。
-  · 原生手写面 /mcp-white  —— 具原生手写能力(white/dual/admin)身份可连（拒仅编译器身份）；在用户工具基础上追加原生手写部署刀
+                          仅普通身份(mode=normal)的专属入口；专家/开发者连这里只能拿到用户工具（无部署刀）。
+  · 专家面 /mcp-white  —— 具原生手写能力(expert/developer)身份可连（拒普通身份）；在用户工具基础上追加原生手写部署刀
                           (deploy_raw / modify_flow / commit_ha_service)，即「直接写 flow」最小集。
-  · 管理员面 /mcp-admin —— 仅限管理员身份(mode=admin)可连（你专用）：原生手写部署刀 + 测试杠杆
+  · 开发者面 /mcp-admin —— 仅限开发者身份(mode=developer)可连（你专用）：原生手写部署刀 + 测试杠杆
                           (golden/acceptance 评测) + 网关自重启 + 任务池发布/重置/统计 + 缺陷闭环。
-                          普通原生手写身份连 /mcp-admin 会被中间件直接 403，看不到也调不到运维刀。
+                          普通/专家身份连 /mcp-admin 会被中间件直接 403，看不到也调不到运维刀。
   · 刻意不暴露：设备翻页浏览(discover/room_summary/export_room…)、废弃提交入口、
     经验沉淀(submit_proposal)、approve/reject 等冗余/危险/控制面工具，避免工具海与零信任破坏。
 
@@ -69,12 +69,12 @@ def _task_pool_disabled() -> str:
     return _js({"ok": False, "error": "DSL 验证任务池已关闭（由 WebUI 开关控制），暂不可用。"
                             "如需启用请在 WebUI 打开『DSL 验证任务池』开关。"})
 
-# 单用户面（编译器/原生手写/管理员身份都连这里；工具按 agent.mode 在 tools/list 分层显隐）
-#   · black：仅用户工具（无部署刀）
-#   · white/dual/both/admin：用户工具 + 6 部署/自检刀
-# /mcp-white 是 /mcp 的兼容别名（原生手写身份旧端点不失效）。
+# 单用户面（普通/专家/开发者身份都连这里；工具按 agent.mode 在 tools/list 分层显隐）
+#   · normal：仅用户工具（无部署刀）
+#   · expert/developer：用户工具 + 6 部署/自检刀
+# /mcp-white 是 /mcp 的兼容别名（专家身份旧端点不失效）。
 mcp = FastMCP("autoflow-gateway")
-# 管理面（仅管理员 mode=admin 可连：用户工具 + 部署刀 + 测试杠杆 + 运维刀 + 任务池 + 缺陷闭环）
+# 管理面（仅开发者 mode=developer 可连：用户工具 + 部署刀 + 测试杠杆 + 运维刀 + 任务池 + 缺陷闭环）
 mcp_admin = FastMCP("autoflow-gateway-admin")
 
 # autoflow_list_pending 的 settled（已落地提案）回吐条数上限。
@@ -82,7 +82,7 @@ mcp_admin = FastMCP("autoflow-gateway-admin")
 # 总数另以 settled_total 如实告知（WB72 F9）。
 _SETTLED_LIMIT = 20
 
-# 原生手写专属「部署/自检刀」——仅这些工具对 black 身份隐藏（其余用户工具三面板通用）
+# 原生手写专属「部署/自检刀」——仅这些工具对 普通身份隐藏（其余用户工具三面板通用）
 _DEPLOY_KNIVES = {
     "autoflow_deploy_raw", "autoflow_validate_flow", "autoflow_simulate_flow",
     "autoflow_run_e2e_trace", "autoflow_modify_flow", "autoflow_commit_ha_service",
@@ -560,16 +560,14 @@ def autoflow_claim_task(task_id: str = "") -> str:
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
-    # 按身份模式隔离 tier：
-    #   white → 只领 auto_wb（白箱专属原生节点任务，黑箱绝不误领）
-    #   black → 只领 auto（黑箱 DSL 任务）
-    #   dual  → 先领 auto_wb，空了再领 auto（一套身份干两池活）
-    #   both  → 向后兼容旧身份，按黑箱处理（仅 auto）
-    # （wb_* 原生节点任务为白箱专属，黑箱绝不误领）
-    agent_mode = getattr(agent, "mode", "black") or "black"
+    # 按身份模式隔离任务池：
+    #   expert/developer → 领 auto_wb + auto（专家原生节点池优先，空了再领普通 DSL 池）
+    #   normal           → 只领 auto（普通 DSL 任务；专家专属原生节点任务绝不误领）
+    # （wb_* 原生节点任务为专家专属，普通模式绝不误领）
+    agent_mode = getattr(agent, "mode", "normal") or "normal"
     tiers = {
-        "white": ["auto_wb"],
-        "dual": ["auto_wb", "auto"],
+        "expert": ["auto_wb", "auto"],
+        "developer": ["auto_wb", "auto"],
     }.get(agent_mode, ["auto"])
     # 直领指定 task_id（避免随机轮询）
     if task_id:
@@ -609,18 +607,14 @@ def _tools_of(server) -> list:
 
 # 各 mode 默认可连的面板（用于 whoami 报告「你此刻能调哪些工具」）
 _MODE_PANEL = {
-    "black": "mcp",
-    "white": "mcp-white",
-    "dual": "mcp-white",
-    "both": "mcp-white",   # both 为旧式未限制身份，白箱面板工具集为其超集
-    "admin": "mcp-admin",
+    "normal": "mcp",
+    "expert": "mcp-white",
+    "developer": "mcp-admin",
 }
 _MODE_CAP = {
-    "black": "只能走编译器路径（autoflow_propose_dsl），无原生手写部署刀；可写 DSL、查实体、领任务。",
-    "white": "可直写 Node-RED flow（autoflow_deploy_raw / modify_flow / commit_ha_service）+ 全部用户工具 + L2 逻辑仿真。",
-    "dual": "编译器/原生手写双任务池都能领（auto_wb 优先，空了再 auto）；其余同 white。",
-    "both": "旧式未限制身份（向后兼容）；可见原生手写面板全部工具。建议后续收敛为 white/black/dual。",
-    "admin": "全部用户工具 + 原生手写部署刀 + 测试杠杆(golden/acceptance 评测) + 运维刀(重启网关/发布重置任务池/缺陷闭环)。",
+    "normal": "普通模式：只能走编译器路径（autoflow_propose_dsl），无原生手写部署刀；可写 DSL、查实体、领任务。上线须经 WebUI 人工批准。",
+    "expert": "专家模式：可直写 Node-RED flow（autoflow_deploy_raw / modify_flow / commit_ha_service）+ 全部用户工具 + L2 逻辑仿真；双任务池都能领（auto_wb + auto）。",
+    "developer": "开发者模式：全部用户工具 + 原生手写部署刀 + 测试杠杆(golden/acceptance 评测) + 运维刀(重启网关/发布重置任务池/缺陷闭环)。仅限网关自身运维身份。",
 }
 
 @mcp.tool()
@@ -629,15 +623,15 @@ def autoflow_whoami() -> str:
     """【自检·我是谁】返回当前身份的连接信息，避免「不知道自己是谁/能干嘛/连错面板」的困惑。
     返回：agent 身份(name/agent_id/mode/tier/status) + 本 mode 的能力说明 +
           你当前面板实际可调用的工具清单（实时取自网关注册表，不会过期）+ 端点提示。
-    用户/原生手写/管理员三面板都能调；结果随你连的面板与身份模式自动适配。"""
+    用户/专家/开发者三面板都能调；结果随你连的面板与身份模式自动适配。"""
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
-    mode = getattr(agent, "mode", "black") or "black"
+    mode = getattr(agent, "mode", "normal") or "normal"
     panel = _MODE_PANEL.get(mode, "mcp")
     server = {"mcp": mcp, "mcp-white": mcp, "mcp-admin": mcp_admin}.get(panel, mcp)
     tools = _tools_of(server)
-    if mode == "black":
+    if mode == "normal":
         tools = [t for t in tools if t not in _DEPLOY_KNIVES]
     return _js({
         "ok": True,
@@ -771,13 +765,13 @@ def autoflow_submit_result(task_id: str, dsl: str) -> str:
         return _js({"ok": False, "result_kind": "task_not_found",
                     "error": "task_id 不存在，请先 autoflow_claim_task 领一条有效任务再提交。"
                              "常见原因：id 拼写错误（幻影 id）或任务未发布。"})
-    # tier 隔离：提交必须与领用同口径——原生手写只能交 wb_*、编译器只能交 auto_*、
-    # dual 可交两者。否则白箱 agent 拿黑箱 task_id 直接 submit 就能越界污染黑箱池
-    # （已发生的真实 bug：opencode【white】提交了 252 条 auto_*）。映射与 autoflow_claim_task 保持一致。
-    agent_mode = getattr(agent, "mode", "black") or "black"
+    # 任务池隔离：提交必须与领用同口径——专家/开发者只能交 wb_*、普通只能交 auto_*、
+    # 专家/开发者可交两者。否则普通 agent 拿专家 task_id 直接 submit 就能越界污染专家池
+    # （已发生的真实 bug：opencode【expert】提交了 252 条 auto_*）。映射与 autoflow_claim_task 保持一致。
+    agent_mode = getattr(agent, "mode", "normal") or "normal"
     _tiers = {
-        "white": ["auto_wb"],
-        "dual": ["auto_wb", "auto"],
+        "expert": ["auto_wb", "auto"],
+        "developer": ["auto_wb", "auto"],
     }.get(agent_mode, ["auto"])
     _task_tier = (t or {}).get("tier")
     if _task_tier not in _tiers:
@@ -862,7 +856,7 @@ def autoflow_get_skill(name: str) -> str:
                 "content": text, "bytes": len(text.encode("utf-8"))})
 
 # 用户工具挂到三个端点：/mcp（用户面，任何身份）、/mcp-white（原生手写面）、/mcp-admin（管理面）。
-# 原生手写/管理员在各自端点都拿到完整用户能力；原生手写部署刀/运维刀分别只在对应端点追加。
+# 专家/开发者在各自端点都拿到完整用户能力；原生手写部署刀/运维刀分别只在对应端点追加。
 _USER_TOOLS = (autoflow_resolve_entity, autoflow_list_entities, autoflow_refresh_catalog,
                autoflow_list_automations,
                autoflow_dsl_help,
@@ -879,7 +873,7 @@ for _fn in _USER_TOOLS:
 # ═══════════════════════════════════════════════════════════════════════════
 # 原生手写部署刀（deploy_raw / validate_flow / simulate_flow / run_e2e_trace / modify_flow / commit_ha_service）
 #   —— 注册在【用户面 /mcp】与【管理面 /mcp-admin】两处（admin 是全集）。
-#      编译器身份(mode=black)连 /mcp 时，tools/list 由 _MCPApp 过滤掉这 6 把刀（调用时也有守卫兜底）。
+#      普通身份(mode=normal)连 /mcp 时，tools/list 由 _MCPApp 过滤掉这 6 把刀（调用时也有守卫兜底）。
 # ═══════════════════════════════════════════════════════════════════════════
 
 @mcp_admin.tool()
@@ -919,12 +913,12 @@ def autoflow_deploy_raw(flow_json: str, label: str = "", target: str = "staging"
     ⚠️ 此工具**不再直接部署**：返回 {ok, proposal_id, ...}。提案需人类在 WebUI「场景提案」
        面板审核后，点「部署到 NR」才真正写入 Node-RED。这是与编译器 DSL 路径（autoflow_propose_dsl）
        完全统一的提案闸，避免一轮原生手写任务就刷出几十个未经人审的 tab。
-    ⚠️ 仅原生手写/管理员身份可经 /mcp-white（或 /mcp-admin）调用；黑箱身份只能用 autoflow_propose_dsl。"""
+    ⚠️ 仅专家/开发者身份可经 /mcp-white（或 /mcp-admin）调用；普通身份只能用 autoflow_propose_dsl。"""
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
-    if agent.mode == "black":
-        return _js({"ok": False, "error": "当前身份为『黑箱』(mode=black)，只能用 "
+    if agent.mode == "normal":
+        return _js({"ok": False, "error": "当前身份为『普通』(mode=normal)，只能用 "
                     "autoflow_propose_dsl 走 DSL 规则路径；原生手写直写请改用『原生手写身份码』。"})
     aid = agent.agent_id
     try:
@@ -975,13 +969,13 @@ def autoflow_create_subflow(dsl_name: str, name: str, definition_json: str,
        面板审核后，点「部署到 NR」才真正写入 Node-RED 子流程实例并登记到网关子流程注册表
        （subflow_registry），此后 DSL / 原生手写即可用 调用子流程 <dsl_name> 引用它。
       这是与 DSL 路径（autoflow_propose_dsl）/ 原生手写路径（autoflow_deploy_raw）完全统一的提案闸。
-    ⚠️ 仅原生手写/管理员身份可经 /mcp-white（或 /mcp-admin）调用；黑箱身份只能用 autoflow_propose_dsl。"""
+    ⚠️ 仅专家/开发者身份可经 /mcp-white（或 /mcp-admin）调用；普通身份只能用 autoflow_propose_dsl。"""
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
-    if agent.mode == "black":
-        return _js({"ok": False, "error": "当前身份为『黑箱』(mode=black)，只能用 "
-                    "autoflow_propose_dsl 走 DSL 规则路径；子流程编写请改用『原生手写/管理员身份码』。"})
+    if agent.mode == "normal":
+        return _js({"ok": False, "error": "当前身份为『普通』(mode=normal)，只能用 "
+                    "autoflow_propose_dsl 走 DSL 规则路径；子流程编写请改用『专家/开发者身份码』。"})
     aid = agent.agent_id
     try:
         if isinstance(definition_json, str):
@@ -1036,12 +1030,12 @@ def autoflow_validate_flow(flow_json: str) -> str:
     ⚠️ 关键约定：构造完 flow 后**先调本工具自检**，errors 非空（或 will_deploy_block=true）
        必须先修再调 autoflow_deploy_raw。实体 id 先用 autoflow_resolve_entity 取真实
        entity_id 填入 `entityId` 字段（NR5 ha-websocket 契约是 camelCase，不是 entity_id）。
-    ⚠️ 仅原生手写/管理员身份可经 /mcp-white（或 /mcp-admin）调用。"""
+    ⚠️ 仅专家/开发者身份可经 /mcp-white（或 /mcp-admin）调用。"""
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
-    if agent.mode == "black":
-        return _js({"ok": False, "error": "当前身份为『黑箱』(mode=black)，"
+    if agent.mode == "normal":
+        return _js({"ok": False, "error": "当前身份为『普通』(mode=normal)，"
                     "请改用『原生手写身份码』调用本工具。"})
     # 解析 flow_json（与 deploy_raw 同逻辑）
     try:
@@ -1140,7 +1134,7 @@ def autoflow_validate_flow(flow_json: str) -> str:
 def autoflow_verify_flow(flow_json: str, run_gate: bool = True,
                         require_e2e: bool = False, target: str = "staging",
                         allow_prod: bool = False) -> str:
-    """【白箱质量验证·只读·绝不部署】按需跑与 deploy_raw 同源的质量闸，但不写 NR / 不登记 catalog。
+    """【质量验证·只读·绝不部署】按需跑与 deploy_raw 同源的质量闸，但不写 NR / 不登记 catalog。
 
     用法：
       autoflow_verify_flow(
@@ -1170,7 +1164,7 @@ def autoflow_verify_flow(flow_json: str, run_gate: bool = True,
         "lint_error_count": N, "lint_warning_count": M
       }
 
-    ⚠️ 仅原生手写/管理员身份可经 /mcp-white（或 /mcp-admin）调用；黑箱身份不可见。
+    ⚠️ 仅专家/开发者身份可经 /mcp-white（或 /mcp-admin）调用；普通身份不可见。
     ⚠️ 与 autoflow_validate_flow 区别：本工具额外跑 vhass / e2e / 结构金丝雀，给出统一
         deploy 前质量 verdict；validate_flow 只做静态 schema+lint+logic 仿真。
     ⚠️ allow_prod（A20）：require_e2e=True 时 e2e 会往 NR 实例临时写插桩副本再回滚。
@@ -1180,8 +1174,8 @@ def autoflow_verify_flow(flow_json: str, run_gate: bool = True,
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
-    if agent.mode == "black":
-        return _js({"ok": False, "error": "当前身份为『黑箱』(mode=black)，"
+    if agent.mode == "normal":
+        return _js({"ok": False, "error": "当前身份为『普通』(mode=normal)，"
                     "请改用『原生手写身份码』调用本工具。"})
     aid = agent.agent_id
     # 解析 flow_json（与 validate_flow / deploy_raw 同逻辑）
@@ -1242,12 +1236,12 @@ def autoflow_simulate_flow(flow_json: str, virtual_states_json: str = "") -> str
     ⚠️ 本工具仅【报告】逻辑问题，绝不阻断部署（阻断由 autoflow_deploy_raw 的逻辑闸门
        按配置决定）。本工具与 validate 一样，仿真器异常时 fail-open（ok=true+跳过说明），
        不影响你继续其他检查。
-    ⚠️ 仅原生手写/管理员身份可经 /mcp-white（或 /mcp-admin）调用。"""
+    ⚠️ 仅专家/开发者身份可经 /mcp-white（或 /mcp-admin）调用。"""
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
-    if agent.mode == "black":
-        return _js({"ok": False, "error": "当前身份为『黑箱』(mode=black)，"
+    if agent.mode == "normal":
+        return _js({"ok": False, "error": "当前身份为『普通』(mode=normal)，"
                     "逻辑预检属原生手写能力，请改用『原生手写身份码』调用本工具。"})
 
     # 解析 flow_json（与 validate_flow / deploy_raw 同逻辑）
@@ -1349,13 +1343,13 @@ def autoflow_run_e2e_trace(dsl: str = "", flow_json: str = "",
     返回（拦截路径，如 prod 写护栏拦下）：{e2e, ok, error, stage, flow_id,
       reasons, report}（无 trace/triggered，verdict="拦截"）。取数以实际返回为准。
 
-    ⚠️ 仅原生手写/管理员身份可经 /mcp-white（或 /mcp-admin）调用。追踪是自愈式的：
+    ⚠️ 仅专家/开发者身份可经 /mcp-white（或 /mcp-admin）调用。追踪是自愈式的：
       部署的插桩副本会在比对后自动回滚 + 清空 trace context，不留残留。"""
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
-    if agent.mode == "black":
-        return _js({"ok": False, "error": "当前身份为『黑箱』(mode=black)，"
+    if agent.mode == "normal":
+        return _js({"ok": False, "error": "当前身份为『普通』(mode=normal)，"
                     "运行时追踪属原生手写能力，请改用『原生手写身份码』调用本工具。"})
 
     # 解析可选 JSON 参数
@@ -1437,8 +1431,8 @@ def autoflow_modify_flow(flow_id: str, dsl: str = "", node_patches: str = "",
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
-    if agent.mode == "black":
-        return _js({"ok": False, "error": "当前身份为『黑箱』(mode=black)，"
+    if agent.mode == "normal":
+        return _js({"ok": False, "error": "当前身份为『普通』(mode=normal)，"
                     "外科式改 flow 仅『原生手写身份』可用。"})
     patches = None
     if node_patches:
@@ -1454,7 +1448,7 @@ def autoflow_modify_flow(flow_id: str, dsl: str = "", node_patches: str = "",
 @mcp.tool()
 def autoflow_apply(mode: str, correction_json: str, flow_id: str = "",
                    auto_approve: bool = False, trace_id: str = "") -> str:
-    """【apply 闭环·唯一落地入口】把「触发→回读→归因」得出的修正真正落回系统（原生手写/管理员专用）。
+    """【apply 闭环·唯一落地入口】把「触发→回读→归因」得出的修正真正落回系统（专家/开发者专用）。
 
     这是 inject 触发(autoflow_trigger_inject) → debug 回读(autoflow_debug_read) 之后的最后一环。
     三种 mode：
@@ -1481,12 +1475,12 @@ def autoflow_apply(mode: str, correction_json: str, flow_id: str = "",
       - 目标 tab 处于禁用态 → 返回 tab_disabled:true + warnings（含 #607 提示）。禁用 tab 不产生
         debug 帧，若你的修正是基于空回读推断出来的，先补证据别硬改。
       - 改砸了：调 autoflow_apply_rollback(trace_id) 还原到 apply 前快照。
-    ⚠️ 黑箱身份不可见也不可调（_DEPLOY_KNIVES）。"""
+    ⚠️ 普通身份不可见也不可调（_DEPLOY_KNIVES）。"""
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
-    if agent.mode == "black":
-        return _js({"ok": False, "error": "当前身份为『黑箱』(mode=black)；"
+    if agent.mode == "normal":
+        return _js({"ok": False, "error": "当前身份为『普通』(mode=normal)；"
                     "apply 闭环属原生手写能力，请改用『原生手写身份码』调用本工具。"})
     try:
         correction = json.loads(correction_json or "{}")
@@ -1512,8 +1506,8 @@ def autoflow_apply_rollback(trace_id: str, auto_approve: bool = False) -> str:
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
-    if agent.mode == "black":
-        return _js({"ok": False, "error": "当前身份为『黑箱』(mode=black)；"
+    if agent.mode == "normal":
+        return _js({"ok": False, "error": "当前身份为『普通』(mode=normal)；"
                     "apply 回滚属原生手写能力，请改用『原生手写身份码』调用本工具。"})
     return _js(_gw().apply_rollback(trace_id, agent_id=agent.agent_id,
                                     auto_approve=auto_approve, allow_prod=True))
@@ -1527,12 +1521,12 @@ def autoflow_get_trace(trace_id: str) -> str:
     pending→approved 是否真写回、ROLLBACK 是否落痕、审计字段（mode/agent_id/reason）是否齐全。
     - trace_id 来自 autoflow_apply / autoflow_apply_rollback 的返回值（两阶段全程同一个）。
     - 返回 {ok, trace_id, trace:{events:[...], flow_id, snapshot_path, ...}}；不存在返回 {ok:False, error}。
-    - 只读，不改任何状态；⚠️ 黑箱身份不可见也不可调（_DEPLOY_KNIVES）。"""
+    - 只读，不改任何状态；⚠️ 普通身份不可见也不可调（_DEPLOY_KNIVES）。"""
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
-    if agent.mode == "black":
-        return _js({"ok": False, "error": "当前身份为『黑箱』(mode=black)；"
+    if agent.mode == "normal":
+        return _js({"ok": False, "error": "当前身份为『普通』(mode=normal)；"
                     "apply 轨迹读取属原生手写/运维能力，请改用『原生手写身份码』调用本工具。"})
     return _js(_gw().get_apply_trace(trace_id))
 
@@ -1556,12 +1550,12 @@ def autoflow_apply_state_from_debug(flow_id: str = "", node_id: str = "", since:
     行为：
       - 帧为空 / 无法推断 → 直接报错，绝不基于空观测写回 HA（#607 证据要求）。
       - mode=B 低风险，本层直接放行给 HA 写服务确认闸（返回 pending_id，人批准即执行）。
-    ⚠️ 黑箱身份不可见也不可调（_DEPLOY_KNIVES）。"""
+    ⚠️ 普通身份不可见也不可调（_DEPLOY_KNIVES）。"""
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
-    if agent.mode == "black":
-        return _js({"ok": False, "error": "当前身份为『黑箱』(mode=black)；"
+    if agent.mode == "normal":
+        return _js({"ok": False, "error": "当前身份为『普通』(mode=normal)；"
                     "apply 闭环属原生手写能力，请改用『原生手写身份码』调用本工具。"})
     return _js(_gw().apply_state_from_debug(
         flow_id=flow_id, node_id=node_id, since=since, limit=limit,
@@ -1594,7 +1588,7 @@ def autoflow_set_tab_state(flow_id: str, enabled: bool, reason: str = "") -> str
       * 提交即校验 flow_id 存在性（不存在 → unknown=True 直接拒绝，不会落个「幽灵待确认」）。
       * 禁用『核心受保护 tab』（心跳/HA 桥接）会被拦截（防误关全家瘫痪）；启用核心 tab 不受限。
       * 提交后返回 {ok, pending_id, needs_approval:true}；WebUI 批准后才能真正切 NR 的 tab.disabled。
-    仅管理员/原生手写面板可见；黑箱身份不可见（_DEPLOY_KNIVES）。
+    仅管理员/原生手写面板可见；普通身份不可见（_DEPLOY_KNIVES）。
     注意：这是「切开关」不是「删 flow」——要彻底移除已部署的 flow，请在 WebUI 提案面板
     撤回/驳回对应提案（网关侧不暴露 MCP 删除工具，删除仅 WebUI 可操作）。"""
     agent = get_current_agent()
@@ -1603,7 +1597,7 @@ def autoflow_set_tab_state(flow_id: str, enabled: bool, reason: str = "") -> str
     return _js(_gw().set_tab_state_submit(
         flow_id, enabled, agent.agent_id, reason=reason))
 
-# ───────────── 以下工具【仅管理面 /mcp-admin 暴露，且只认 mode=admin】─────────────
+# ───────────── 以下工具【仅管理面 /mcp-admin 暴露，且只认 mode=developer】─────────────
 # 网关自重启 + 任务池发布/重置/统计 + 缺陷闭环（golden/acceptance 评测杠杆已迁 archive，见 C4）。
 # 普通原生手写身份连 /mcp-admin 会被中间件 403，上述工具对其不可见也不可调。
 
@@ -1686,14 +1680,14 @@ def autoflow_publish_tasks(json_path: str = "", scenes_json: str = "") -> str:
     - scenes_json：内联 JSON 字符串（数组，或含 "prompts" 字段的对象）。
     每条场景形如 {id, tier, task, entities:[entity_id...], subflows:[...], expected:[...]}；
     实体 hint 在发布时即时从 device_catalog.json 富化（补 friendly_name/domain/area/possible_states）。
-    返回 {inserted, skipped, errors}。黑箱身份(mode=black)禁止发布。"""
+    返回 {inserted, skipped, errors}。普通身份(mode=normal)禁止发布。"""
     if not is_task_pool_enabled(get_config()):
         return _task_pool_disabled()
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent。"})
-    if agent.mode == "black":
-        return _js({"ok": False, "error": "当前身份为『黑箱』(mode=black)，只有原生手写/管理员可发布任务。"})
+    if agent.mode == "normal":
+        return _js({"ok": False, "error": "当前身份为『普通』(mode=normal)，只有专家/开发者可发布任务。"})
     if json_path:
         try:
             with open(json_path, "r", encoding="utf-8") as f:
@@ -1723,8 +1717,8 @@ def autoflow_reset_pool() -> str:
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent。"})
-    if agent.mode == "black":
-        return _js({"ok": False, "error": "当前身份为『黑箱』(mode=black)，只有原生手写/管理员可重置任务池。"})
+    if agent.mode == "normal":
+        return _js({"ok": False, "error": "当前身份为『普通』(mode=normal)，只有专家/开发者可重置任务池。"})
     return _js(_gw().tasks.reset())
 
 @mcp_admin.tool()
@@ -1788,8 +1782,8 @@ class AgentAuthMiddleware:
     """在 /mcp、/mcp-white、/mcp-admin 三端点请求上强制校验 Bearer 身份码；
     解析不到/失效 → 401 拒绝匿名。认证成功后把 agent 注入 contextvars，供 tool 读取。
     端点级零信任门禁：
-      · /mcp-admin 仅管理员身份(mode=admin)可进；
-      · /mcp-white 拒编译器身份(mode=black)，原生手写/管理员/双箱可进；
+      · /mcp-admin 仅开发者身份(mode=developer)可进；
+      · /mcp-white 拒普通身份(mode=normal)，专家/开发者可进；
       · /mcp 任意 active 身份均可。"""
 
     def __init__(self, user_path: str, white_path: str, admin_path: str, store: AgentStore,
@@ -2008,19 +2002,19 @@ class AgentAuthMiddleware:
                 await self._unauthorized(send_with_cors)
                 return
             # 端点级零信任门禁：
-            #  · /mcp-admin 仅管理员身份(mode=admin)可进；普通原生手写/编译器均 403。
-            if ep == "admin" and getattr(agent, "mode", None) != "admin":
+            #  · /mcp-admin 仅开发者身份(mode=developer)可进；普通/专家均 403。
+            if ep == "admin" and getattr(agent, "mode", None) != "developer":
                 await self._forbidden(send_with_cors,
-                    "管理面 /mcp-admin 仅限管理员身份(mode=admin)；"
+                    "管理面 /mcp-admin 仅限开发者身份(mode=developer)；"
                     "原生手写部署刀请连 /mcp-white，用户工具请连 /mcp。")
                 return
-            #  · /mcp-white 拒编译器身份；原生手写/管理员/双箱可进。
-            if ep == "white" and getattr(agent, "mode", None) == "black":
+            #  · /mcp-white 拒普通身份；专家/开发者可进。
+            if ep == "white" and getattr(agent, "mode", None) == "normal":
                 await self._forbidden(send_with_cors,
-                    "编译器身份(mode=black)禁止访问原生手写面 /mcp-white；"
-                    "请改用原生手写身份码，或连 /mcp 走 DSL 路径。")
+                    "普通身份(mode=normal)禁止访问专家面 /mcp-white；"
+                    "请改用专家/开发者身份码，或连 /mcp 走 DSL 路径。")
                 return
-            #  · /mcp 任意 active 身份均可（编译器/原生手写/管理员/双箱/both）。
+            #  · /mcp 任意 active 身份均可（普通/专家/开发者）。
             self.store.record_last_seen(agent.agent_id)
             t = get_current_agent_var().set(agent)
             try:
@@ -2407,7 +2401,7 @@ def get_current_agent_var():
     return current_agent
 
 def _filter_tools_list(body: bytes) -> bytes:
-    """若 body 是 tools/list 的 JSON-RPC 响应，剥除 _DEPLOY_KNIVES（black 身份不可见）。
+    """若 body 是 tools/list 的 JSON-RPC 响应，剥除 _DEPLOY_KNIVES（普通身份不可见）。
     非 tools/list / 解析失败 / 无变化 → 原样返回（不改字节）。"""
     if not body:
         return body
@@ -2446,7 +2440,7 @@ def _peek_tools_call(events):
     return (None, None)
 
 def _blackbox_should_block(events):
-    """black 身份调用级身份闸判定：若 tools/call 的工具属于 _DEPLOY_KNIVES 返回该工具名，否则 None。"""
+    """普通身份调用级身份闸判定：若 tools/call 的工具属于 _DEPLOY_KNIVES 返回该工具名，否则 None。"""
     tool, _ = _peek_tools_call(events)
     if tool is not None and tool in _DEPLOY_KNIVES:
         return tool
@@ -2472,9 +2466,9 @@ async def _send_jsonrpc_error(send, req_id, code, message):
 # ───────────── 组合应用（MCP + WebUI + 鉴权）─────────────
 def build_app(cfg=None, with_webui: bool = True, gateway: Gateway = None):
     """返回一个可交给 uvicorn 的 ASGI app：MCP 挂 /mcp（用户面，按 mode 分层显隐工具）、
-    /mcp-white（/mcp 的兼容别名，原生手写旧端点）、/mcp-admin（管理面，仅 admin）三端点，
+    /mcp-white（/mcp 的兼容别名，专家旧端点）、/mcp-admin（管理面，仅 developer）三端点，
     WebUI 挂 / 与 /api，并对三个 MCP path 强制身份鉴权
-    （/mcp-admin 仅 admin；/mcp-white 拒编译器；/mcp 任意 active 身份；black 在 /mcp 仅见用户工具）。"""
+    （/mcp-admin 仅 developer；/mcp-white 拒普通身份；/mcp 任意 active 身份；普通身份在 /mcp 仅见用户工具）。"""
     from starlette.applications import Starlette
     from starlette.routing import Mount, Route
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
@@ -2491,7 +2485,7 @@ def build_app(cfg=None, with_webui: bool = True, gateway: Gateway = None):
 
     # 关键：用 Route 而非 Mount。Mount 会剥离 path 前缀导致 session manager 收到空 path → 404；
     # Route 保留完整 path，与 FastMCP 官方挂载方式一致。
-    # _MCPApp 对 user/white 端点包裹 tools/list 过滤：black 身份看不到部署/自检刀。
+    # _MCPApp 对 user/white 端点包裹 tools/list 过滤：普通身份看不到部署/自检刀。
     class _MCPApp:
         def __init__(self, sm, filter_tools: bool = False):
             self.sm = sm
@@ -2501,9 +2495,9 @@ def build_app(cfg=None, with_webui: bool = True, gateway: Gateway = None):
             if not self.filter_tools:
                 await self.sm.handle_request(scope, receive, send)
                 return
-            # 仅对 black 身份过滤 tools/list 响应，剥除部署/自检刀（其余响应原样透传）
+            # 仅对 普通身份过滤 tools/list 响应，剥除部署/自检刀（其余响应原样透传）
             agent = get_current_agent()
-            if agent is None or getattr(agent, "mode", None) != "black":
+            if agent is None or getattr(agent, "mode", None) != "normal":
                 await self.sm.handle_request(scope, receive, send)
                 return
 
@@ -2526,7 +2520,7 @@ def build_app(cfg=None, with_webui: bool = True, gateway: Gateway = None):
                 _, caller_id = _peek_tools_call(req_events)
                 await _send_jsonrpc_error(
                     send, caller_id, -32601,
-                    f"tool '{blocked_tool}' is not available to black-box agents "
+                    f"tool '{blocked_tool}' is not available to normal-mode agents "
                     f"(deployment/self-test knives are hidden by design)")
                 return
 
@@ -2608,7 +2602,7 @@ def main():
           f"{' + WebUI(/)' if args.webui else ''} at http://{host}:{port}")
     print(f"[AutoFlow] 拒绝匿名 MCP 连接；agent 需在 WebUI 生成身份码后配置。")
     print(f"[AutoFlow] 单用户端点 {cfg.mcp_path}：工具按 agent.mode 分层显隐"
-          f"（black=用户工具；white/dual/admin=用户工具+部署刀）；管理员连 {cfg.mcp_admin_path}（全量+运维刀）。")
+          f"（normal=用户工具；expert/developer=用户工具+部署刀）；开发者连 {cfg.mcp_admin_path}（全量+运维刀）。")
     uvicorn.run(app, host=host, port=port)
 
 if __name__ == "__main__":

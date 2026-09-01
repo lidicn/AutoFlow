@@ -238,6 +238,8 @@ _STAGE_WHITELIST = {
     "nr_canary", "nr_create_subflow", "patch", "proposal_store",
     "register_subflow", "resolve_whitelist", "restored",
     "retry_budget_exhausted", "semantic_gap", "verified",
+    "direct_write_applied", "direct_write_pending",
+    "dsl_too_long", "empty_dsl", "schema_block",
 }
 
 _STAGE_RE = re.compile(r'"stage"\s*:\s*"([a-z_0-9]+)"')

@@ -44,13 +44,23 @@ def _sha256(token: str) -> str:
 
 def _parse_mode(notes: str) -> str:
     """从旧式 notes 魔法串解析 mode（向后兼容：列空时回退）。
-    返回 black / white / both。"""
+    返回 normal / expert / developer。同时兼容旧式 black/white/dual/both/admin 魔法串。"""
     n = (notes or "").lower()
-    if "mode=black" in n:
-        return "black"
-    if "mode=white" in n:
-        return "white"
-    return "both"
+    # 新式枚举
+    if "mode=developer" in n:
+        return "developer"
+    if "mode=expert" in n:
+        return "expert"
+    if "mode=normal" in n:
+        return "normal"
+    # 旧式向后兼容
+    if "mode=white" in n or "mode=dual" in n:
+        return "expert"
+    if "mode=admin" in n:
+        return "developer"
+    if "mode=black" in n or "mode=both" in n:
+        return "normal"
+    return "normal"
 
 
 @dataclass
@@ -63,13 +73,10 @@ class Agent:
     created_at: str
     last_seen: Optional[str] = None
     notes: str = ""
-    mode: str = "both"        # black | white | dual | both | admin
-                               # black：只允许 DSL 路径（propose_dsl），禁白箱刀
-                               # white：允许白箱刀（autoflow_deploy_raw 现已统一为提案闸，落提案待人审，不再直写 NR）
-                               # dual ：黑白双池都领（auto_wb 优先，空了再 auto）
-                               # both （缺省/未标记）：不限制（向后兼容旧身份）
-                               # admin：仅限连 /mcp-admin（管理面），可通吃白箱刀+运维刀+测试杠杆；
-                               #        普通 agent 不可持有，避免白箱身份越权重启/发布任务池。
+    mode: str = "normal"      # normal | expert | developer
+                               # normal  ：普通模式。只允许 DSL 路径（propose_dsl），禁部署刀；上线须经 WebUI 人工批准。默认、最安全。
+                               # expert  ：专家模式。可直写 Node-RED flow（部署刀），双任务池都能领（auto_wb + auto）。
+                               # developer：开发者模式。连 /mcp-admin（管理面），通吃部署刀+运维刀+测试杠杆；仅限网关自身运维身份。
 
     def to_dict(self, include_code: bool = False, code: Optional[str] = None):
         d = {
@@ -118,29 +125,34 @@ class AgentStore:
                         created_at TEXT NOT NULL,
                         last_seen TEXT,
                         notes TEXT DEFAULT '',
-                        mode TEXT DEFAULT 'both'
+                        mode TEXT DEFAULT 'normal'
                     )"""
                 )
                 # 迁移：旧库可能没有 mode 列 → 加列并把 notes 里的魔法串回填
                 cols = [c[1] for c in conn.execute("PRAGMA table_info(agents)")]
                 if "mode" not in cols:
-                    conn.execute("ALTER TABLE agents ADD COLUMN mode TEXT DEFAULT 'both'")
+                    conn.execute("ALTER TABLE agents ADD COLUMN mode TEXT DEFAULT 'normal'")
                     for row in conn.execute("SELECT agent_id, notes FROM agents"):
                         conn.execute(
                             "UPDATE agents SET mode=? WHERE agent_id=?",
                             (_parse_mode(row["notes"]), row["agent_id"]),
                         )
+                # 模式枚举重命名（black/white/dual/both/admin → normal/expert/developer）
+                # 幂等：仅命中旧值才更新，重跑无副作用。
+                conn.execute("UPDATE agents SET mode='normal' WHERE mode IN ('black','both')")
+                conn.execute("UPDATE agents SET mode='expert' WHERE mode IN ('white','dual')")
+                conn.execute("UPDATE agents SET mode='developer' WHERE mode='admin'")
                 conn.commit()
             finally:
                 conn.close()
 
     # ── CRUD ──
     def create_agent(self, name: str, tier: str = "staging", notes: str = "",
-                     mode: str = "both") -> (Agent, str):
+                     mode: str = "normal") -> (Agent, str):
         """创建 agent，返回 (Agent, 明文身份码)。身份码仅此刻可见。
-        mode: black | white | dual | both | admin（黑白箱路由，存为列）。
-        admin 仅用于网关自身运维身份（连 /mcp-admin），普通 agent 不应持有。"""
-        if mode not in ("black", "white", "dual", "both", "admin"):
+        mode: normal | expert | developer（信任等级路由，存为列）。
+        developer 仅用于网关自身运维身份（连 /mcp-admin），普通 agent 不应持有。"""
+        if mode not in ("normal", "expert", "developer"):
             raise ValueError(f"非法 mode: {mode}")
         import secrets
         code = "af_" + secrets.token_urlsafe(24)
@@ -252,7 +264,7 @@ class AgentStore:
             fields.append("notes=?")
             vals.append(notes)
         if mode is not None:
-            if mode not in ("black", "white", "dual", "both", "admin"):
+            if mode not in ("normal", "expert", "developer"):
                 raise ValueError(f"非法 mode: {mode}")
             fields.append("mode=?")
             vals.append(mode)

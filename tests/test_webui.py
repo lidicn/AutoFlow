@@ -46,14 +46,32 @@ class TmpCfgMixin:
 class TestWebUI(TmpCfgMixin, unittest.TestCase):
     def setUp(self):
         super().setUp()
+        # 端点行为测试走「旧令牌兼容通道」：both 模式 + 固定令牌。该通道 CSRF 豁免
+        # （webui_auth.py 注释「给脚本/CI 留活路」）且解析为 owner，覆盖全部 RBAC；
+        # 账号密码 / CSRF / RBAC 多角色流程由 test_webui_password_login.py 单独回归。
+        # 令牌仅在本类 setUp 注入，tearDown 还原，不污染其他测试。
+        self._wa_env = {
+            "AF_WEBUI_TOKEN_MODE": os.environ.get("AF_WEBUI_TOKEN_MODE"),
+            "AF_WEBUI_TOKEN": os.environ.get("AF_WEBUI_TOKEN"),
+            "AF_WEBUI_OPEN_REGISTER": os.environ.get("AF_WEBUI_OPEN_REGISTER"),
+        }
+        os.environ["AF_WEBUI_TOKEN_MODE"] = "both"
+        os.environ["AF_WEBUI_TOKEN"] = "test-webui-shared-token"
+        os.environ["AF_WEBUI_OPEN_REGISTER"] = "1"
         self.gw = Gateway(self.cfg)
         self.app = build_webui_asgi(self.cfg, gateway=self.gw)
         self.client = TestClient(self.app)
+        self.client.headers["Authorization"] = "Bearer test-webui-shared-token"
         self.client.__enter__()
 
     def tearDown(self):
         self.client.__exit__(None, None, None)
         super().tearDown()
+        for k, v in self._wa_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     def test_health_and_config(self):
         self.assertEqual(self.client.get("/api/health").status_code, 200)

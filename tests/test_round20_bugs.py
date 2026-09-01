@@ -39,7 +39,7 @@ def test_d32_allow_prod_passthrough_to_gateway(monkeypatch):
             return {"ok": True, "flow_id": flow_id, "changed_nodes": 0, "mode": "node_patches"}
 
     class _StubAgent:
-        mode = "white"
+        mode = "expert"
 
     monkeypatch.setattr(mcp_server, "_gw", lambda: _StubGw())
     monkeypatch.setattr(mcp_server, "get_current_agent", lambda: _StubAgent())

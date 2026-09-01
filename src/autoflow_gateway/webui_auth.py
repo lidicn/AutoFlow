@@ -75,6 +75,7 @@ PUBLIC_PATHS = (
     "/api/auth/register",
     "/api/auth/logout",
     "/health",
+    "/api/health",
 )
 
 # ── RBAC 权限矩阵（D1：一步到位多用户）──

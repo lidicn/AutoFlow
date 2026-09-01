@@ -62,11 +62,11 @@ class TestIdentity(TmpCfgMixin, unittest.TestCase):
 
     def test_update_agent_fields_and_mode(self):
         store = AgentStore(self.cfg)
-        agent, _ = store.create_agent("ds", "staging", mode="white")
-        self.assertEqual(agent.mode, "white")
+        agent, _ = store.create_agent("ds", "staging", mode="expert")
+        self.assertEqual(agent.mode, "expert")
         # mode 为显式列：直接更新 mode（不再从 notes 魔法串推断）
-        self.assertTrue(store.update_agent(agent.agent_id, mode="black"))
-        self.assertEqual(store.get_agent(agent.agent_id).mode, "black")
+        self.assertTrue(store.update_agent(agent.agent_id, mode="normal"))
+        self.assertEqual(store.get_agent(agent.agent_id).mode, "normal")
         # 改 tier
         self.assertTrue(store.update_agent(agent.agent_id, tier="prod"))
         self.assertEqual(store.get_agent(agent.agent_id).tier, "prod")

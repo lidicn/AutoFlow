@@ -77,62 +77,37 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 function badge(cls, text) { return `<span class="badge ${cls}">${esc(text)}</span>`; }
-const MODES = ["black", "white", "dual", "both", "admin"];
+const MODES = ["normal", "expert", "developer"];
 function modeLabel(m) {
   return ({
-    black: "黑箱（仅DSL，连 /mcp）",
-    white: "白箱（可自由部署，连 /mcp-white）",
-    dual: "双箱（先白后黑，连 /mcp 或 /mcp-white）",
-    both: "不限（旧身份，连 /mcp）",
-    admin: "管理员（运维专用，连 /mcp-admin）"
+    normal: "普通模式（仅DSL提案，连 /mcp）",
+    expert: "专家模式（可自由部署，连 /mcp-white）",
+    developer: "开发者模式（运维/调试，连 /mcp-admin）"
   })[m] || m;
 }
 // 身份模式 → MCP 端点 path（用于新建后展示正确连接地址）
 function endpointForMode(m) {
-  return ({ black: "/mcp", white: "/mcp-white", dual: "/mcp-white", both: "/mcp", admin: "/mcp-admin" })[m] || "/mcp";
+  return ({ normal: "/mcp", expert: "/mcp-white", developer: "/mcp-admin" })[m] || "/mcp";
 }
-// 新建 Agent 页右侧的身份模式 + 权限级别说明面板
+// 新建 Agent 页右侧的身份模式说明面板
 function renderAgentModeGuide() {
   return `
     <div class="card guide-panel">
       <h3>身份模式说明</h3>
-      <p class="desc">模式决定该 agent 能领什么任务、看到哪些 MCP 工具、能否直接部署。</p>
+      <p class="desc">模式决定该 agent 能领什么任务、看到哪些 MCP 工具、能否直接部署。创建后由你在 WebUI 设定，agent 自身不可更改。</p>
       <div class="mode-item">
-        <h4>黑箱 black — 仅 DSL</h4>
-        <p>连 <code>/mcp</code>。只能写 DSL 提案，<b>看不到部署刀</b>。所有上线必须经 WebUI 人工批准。适合公开/不可信的 LLM agent。</p>
+        <h4>普通模式 normal — 仅 DSL 提案</h4>
+        <p>连 <code>/mcp</code>。只能写 DSL 提案，<b>看不到部署刀</b>。所有上线必须经 WebUI 人工批准。默认、最安全，适合公开/不可信的 LLM agent。</p>
       </div>
       <div class="mode-item">
-        <h4>白箱 white — 可自由部署</h4>
-        <p>连 <code>/mcp-white</code>。可手写原生节点、自由部署、使用测试杠杆。不能进 <code>/mcp-admin</code>。适合你信任的内部 agent。</p>
+        <h4>专家模式 expert — 可自由部署</h4>
+        <p>连 <code>/mcp-white</code>。可手写原生节点、自由部署、使用测试杠杆；双任务池都能领（auto_wb + auto）。适合你信任的内部 agent。</p>
       </div>
       <div class="mode-item">
-        <h4>双箱 dual — 先白后黑</h4>
-        <p>连 <code>/mcp</code> 或 <code>/mcp-white</code> 均可。既能领白箱原生任务，也能领黑箱 DSL 任务。开发调试与正式提案可共用同一身份。</p>
+        <h4>开发者模式 developer — 运维/调试专用</h4>
+        <p>连 <code>/mcp-admin</code>。可调用全部工具（含运维刀、测试杠杆、任务池）。仅限网关自身运维身份，普通 agent 不应持有。</p>
       </div>
-      <div class="mode-item">
-        <h4>不限 both — 旧身份兼容</h4>
-        <p>连 <code>/mcp</code>。行为与早期无模式版本一致。新部署建议明确选 black/white/dual，便于审计和权限隔离。</p>
-      </div>
-      <div class="mode-item">
-        <h4>管理员 admin — 运维专用</h4>
-        <p>连 <code>/mcp-admin</code>。可调用全部工具（含运维刀、测试杠杆、任务池）。普通 agent 不应使用。</p>
-      </div>
-
-      <h3>权限级别说明</h3>
-      <p class="desc">权限级别（tier）是 agent 的环境归属标签，用于区分生产/测试身份。</p>
-      <div class="mode-item">
-        <h4>prod — 真实环境</h4>
-        <p>连接真实 HA/NR。创建后身份码应谨慎保管，避免泄露给不受信任的 agent。</p>
-      </div>
-      <div class="mode-item">
-        <h4>staging — 练手 / 虚拟 HA</h4>
-        <p>用于 vhass 虚拟孪生或测试场景。配合网关 <code>AUTOFLLOW_ENV=staging</code> 使用，可在不碰真实设备的情况下验证 flow。</p>
-      </div>
-      <div class="mode-item">
-        <h4>sandbox — 受限沙箱</h4>
-        <p>设计为受限环境。当前版本主要作为分类标签；若需要严格的沙箱策略（如禁止部署到 prod），请在 <b>设置 → 功能开关</b> 中确认或后续版本启用。</p>
-      </div>
-      <div class="hint">当前版本：agent 的 tier 不限制任务领取或部署目标，实际环境隔离由网关 <code>AUTOFLLOW_ENV</code> 与任务自身决定。若你需要按 tier 强制隔离，可提需求实现。</div>
+      <div class="hint">安全模型：模式是部署时由你设定的<b>信任等级</b>，不是 agent 运行时自选——普通模式永远无法绕过 verify+人工批准闸。底层端点隔离（/mcp、/mcp-white、/mcp-admin）保持不变。</div>
     </div>`;
 }
 function fmtTime(s) {
@@ -190,7 +165,7 @@ async function loadDashboard() {
       notes: (no.data?.notes || []).length,
     };
     v.innerHTML = `
-      <div class="view-head"><h2>概览</h2><span class="sub">环境 ${esc(c.env || "")} ｜ 黑箱 ${esc(c.mcp || "")} ｜ 白箱 ${esc(c.mcp_white || "")} ｜ 管理 ${esc(c.mcp_admin || "")}</span></div>
+      <div class="view-head"><h2>概览</h2><span class="sub">环境 ${esc(c.env || "")} ｜ 普通 ${esc(c.mcp || "")} ｜ 专家 ${esc(c.mcp_white || "")} ｜ 开发者 ${esc(c.mcp_admin || "")}</span></div>
       <div class="grid cols-4">
         <div class="card"><div class="meta">已注册 Agent</div><div class="stat">${counts.agents}</div></div>
         <div class="card"><div class="meta">待确认操作</div><div class="stat">${counts.pending}</div></div>
@@ -250,7 +225,7 @@ async function loadWorkspace() {
         <div class="card">
           <h3>🎯 总体计划</h3>
           <p class="desc">长期目标 / 里程碑（你在此编辑，agent 一般不动）。</p>
-          <textarea id="ws-overall" style="width:100%;min-height:90px;border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px;background:var(--bg);color:var(--text)" placeholder="例如：M2 完成后跑 H1–H10 评测，验证编译器修复拉升黑箱通过率">${esc(plan.overall || "")}</textarea>
+          <textarea id="ws-overall" style="width:100%;min-height:90px;border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px;background:var(--bg);color:var(--text)" placeholder="例如：M2 完成后跑 H1–H10 评测，验证编译器修复拉升普通模式通过率">${esc(plan.overall || "")}</textarea>
           <button class="btn primary sm" id="ws-save-overall" style="margin-top:8px">保存总体计划</button>
         </div>
         <div class="card">
@@ -380,8 +355,6 @@ async function loadAgents() {
         <div class="card form-card">
           <h3>新建 Agent</h3>
           <div class="field"><label>名称（如 deepseek++）</label><input id="a-name" placeholder="deepseek++"></div>
-          <div class="field"><label>权限级别</label>
-            <select id="a-tier"><option value="staging">staging（练手/虚拟HA）</option><option value="prod">prod（真实环境）</option><option value="sandbox">sandbox（受限）</option></select></div>
           <div class="field"><label>身份模式</label>
             <select id="a-mode">${MODES.map((m) => `<option value="${m}">${modeLabel(m)}</option>`).join("")}</select></div>
           <div class="field"><label>备注</label><textarea id="a-notes" placeholder="可选"></textarea></div>
@@ -402,10 +375,10 @@ async function loadAgents() {
       <div class="item">
         <div class="row">
           <div><span class="title">${esc(a.name)}</span> <span class="meta">(${esc(a.agent_id)})</span></div>
-          <div>${badge("tier-" + a.tier, a.tier)} ${badge("status-" + a.status, a.status)}</div>
+          <div>${badge("status-" + a.status, a.status)}</div>
         </div>
         <div class="desc">创建：${fmtTime(a.created_at)} ｜ 最近连接：${fmtTime(a.last_seen)}</div>
-        ${badge("mode-" + (a.mode || "both"), modeLabel(a.mode || "both"))}
+        ${badge("mode-" + (a.mode || "normal"), modeLabel(a.mode || "normal"))}
         ${a.notes ? `<div class="desc">备注：${esc(a.notes)}</div>` : ""}
         <div class="actions">
           <button class="btn sm" data-edit="${esc(a.agent_id)}">编辑</button>
@@ -423,7 +396,7 @@ async function loadAgents() {
 async function createAgent() {
   const name = $("#a-name").value.trim();
   if (!name) return toast("请填名称");
-  const r = await api("POST", "/agents", { name, tier: $("#a-tier").value, mode: $("#a-mode").value, notes: $("#a-notes").value });
+  const r = await api("POST", "/agents", { name, mode: $("#a-mode").value, notes: $("#a-notes").value });
   if (!r.ok) return toast("创建失败：" + (r.data?.error || r.status));
   const a = r.data.agent;
   const ep = endpointForMode(a.mode);
@@ -457,14 +430,11 @@ async function editAgent(id) {
   const r = await api("GET", "/agents");
   const a = (r.data?.agents || []).find((x) => x.agent_id === id);
   if (!a) return toast("找不到该 agent");
-  const tiers = ["staging", "prod", "sandbox"];
   modal("编辑 Agent", `
-    <p class="desc">身份码不可改（需重置请点卡片上「重置身份码」）。身份模式（黑/白/双箱）用下方下拉框设置，无需再写 notes 魔法串。</p>
+    <p class="desc">身份码不可改（需重置请点卡片上「重置身份码」）。身份模式（普通/专家/开发者）用下方下拉框设置，无需再写 notes 魔法串。</p>
     <div class="field"><label>名称</label><input id="e-name" value="${esc(a.name)}"></div>
-    <div class="field"><label>权限级别</label>
-      <select id="e-tier">${tiers.map((t) => `<option value="${t}" ${t === a.tier ? "selected" : ""}>${t}</option>`).join("")}</select></div>
     <div class="field"><label>身份模式</label>
-      <select id="e-mode">${MODES.map((m) => `<option value="${m}" ${m === (a.mode || "both") ? "selected" : ""}>${modeLabel(m)}</option>`).join("")}</select></div>
+      <select id="e-mode">${MODES.map((m) => `<option value="${m}" ${m === (a.mode || "normal") ? "selected" : ""}>${modeLabel(m)}</option>`).join("")}</select></div>
     <div class="field"><label>状态</label>
       <select id="e-status"><option value="active" ${a.status === "active" ? "selected" : ""}>active</option><option value="revoked" ${a.status === "revoked" ? "selected" : ""}>revoked</option></select></div>
     <div class="field"><label>备注（其他说明）</label><textarea id="e-notes" placeholder="可选">${esc(a.notes || "")}</textarea></div>
@@ -478,7 +448,6 @@ async function editAgent(id) {
 async function saveAgent(id) {
   const r = await api("PUT", `/agents/${id}`, {
     name: $("#e-name").value.trim(),
-    tier: $("#e-tier").value,
     mode: $("#e-mode").value,
     status: $("#e-status").value,
     notes: $("#e-notes").value,
@@ -1147,11 +1116,11 @@ async function loadLabHistory() {
 
 async function loadLab() { renderLab(); }
 
-// ── 人工抽查（合并三家白箱提交 → 单 tab，触发器禁用）──
+// ── 人工抽查（合并三家专家提交 → 单 tab，触发器禁用）──
 async function loadSpotcheck() {
   const v = $("#view-spotcheck");
   v.innerHTML = `
-    <div class="view-head"><h2>🔎 人工抽查</h2><span class="sub">挑选同一任务的 3 家白箱提交，合并为一份白盒提案（触发器默认禁用，不会自动点火；审核后部署到 NR）</span></div>
+    <div class="view-head"><h2>🔎 人工抽查</h2><span class="sub">挑选同一任务的 3 家专家提交，合并为一份专家提案（触发器默认禁用，不会自动点火；审核后部署到 NR）</span></div>
     <div class="card form-card">
       <div class="field">
         <label>任务</label>
@@ -1300,7 +1269,7 @@ async function loadDiagnostics() {
         <h3>环境 / 健康</h3>
         <div class="desc">环境 <b>${esc(d.env || "?")}</b> ｜ 部署策略 <b>${esc(d.deploy_policy || "review_all")}</b></div>
         <div class="desc">NR: <code>${esc(d.nr_url || "")}</code> ｜ HA: <code>${esc(d.hass_server || "")}</code></div>
-        <div class="desc">黑箱 <code>${esc(d.mcp || "")}</code> ｜ 白箱 <code>${esc(d.mcp_white || "")}</code> ｜ 管理 <code>${esc(d.mcp_admin || "")}</code></div>
+        <div class="desc">普通 <code>${esc(d.mcp || "")}</code> ｜ 专家 <code>${esc(d.mcp_white || "")}</code> ｜ 开发者 <code>${esc(d.mcp_admin || "")}</code></div>
         <div class="desc" style="margin-top:6px">提案状态分布：${statusHtml} ｜ 已落地部署 ${c.proposals_deployed ?? 0}</div>
       </div>
       <div class="card" style="margin-top:14px">
@@ -1476,8 +1445,8 @@ function loadEval() {
         <div class="field">
           <label>模式</label>
           <div class="seg" id="eval-mode">
-            <button class="seg-btn active" data-v="black">黑箱</button>
-            <button class="seg-btn" data-v="white">白箱</button>
+            <button class="seg-btn active" data-v="black">普通（DSL 提案）</button>
+            <button class="seg-btn" data-v="white">专家（直部署）</button>
           </div>
         </div>
         <div class="grid cols-2">

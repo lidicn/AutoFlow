@@ -143,7 +143,7 @@ def _stub_selfheal_path(gw, tmp_path, monkeypatch):
     return calls
 
 
-def _make_agent(mode="both"):
+def _make_agent(mode="expert"):
     return Agent(agent_id="ag-selfheal", name="selfheal", tier="prod",
                  status="active", identity_code_hash="x", created_at="now",
                  mode=mode)
@@ -228,7 +228,7 @@ def test_autoflow_apply_passes_allow_prod(prod_env, gw, tmp_path, monkeypatch):
     monkeypatch.setattr(gw, "apply_flow", _apply_flow_spy)
     monkeypatch.setattr(mcp_server, "_gw", lambda: gw)
     var = mcp_server.get_current_agent_var()
-    tok = var.set(_make_agent(mode="both"))
+    tok = var.set(_make_agent(mode="expert"))
     try:
         out = json.loads(mcp_server.autoflow_apply(
             mode="A",
@@ -254,7 +254,7 @@ def test_autoflow_apply_rollback_passes_allow_prod(prod_env, gw, tmp_path, monke
     monkeypatch.setattr(gw, "apply_rollback", _rollback_spy)
     monkeypatch.setattr(mcp_server, "_gw", lambda: gw)
     var = mcp_server.get_current_agent_var()
-    tok = var.set(_make_agent(mode="both"))
+    tok = var.set(_make_agent(mode="expert"))
     try:
         out = json.loads(mcp_server.autoflow_apply_rollback("trace_x"))
     finally:

@@ -44,7 +44,7 @@ class _FakeGW:
 def _call(monkeypatch, store, aid):
     monkeypatch.setattr(ms, "_gw", lambda: _FakeGW(store.cfg))
     monkeypatch.setattr(ms, "get_current_agent",
-                        lambda: type("A", (), {"mode": "white", "agent_id": aid})())
+                        lambda: type("A", (), {"mode": "expert", "agent_id": aid})())
     return json.loads(ms.autoflow_list_pending())
 
 

@@ -536,7 +536,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         tier = b.get("tier", "staging")
         try:
             agent, code = agents.create_agent(
-                name, tier, b.get("notes", ""), mode=b.get("mode", "both")
+                name, tier, b.get("notes", ""), mode=b.get("mode", "normal")
             )
         except ValueError as e:
             return _js({"ok": False, "error": str(e)}, 409)
@@ -785,7 +785,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                 name=llm_agent_name,
                 tier="prod",
                 notes="AutoFlow 内置 LLM 助手（WebUI 用户态）",
-                mode="black",
+                mode="normal",
             )
         steps = []
 
