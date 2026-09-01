@@ -10,8 +10,10 @@ COPY skills /app/skills
 COPY run.py /app/run.py
 WORKDIR /app
 
-# 受控自更新（方案 C）：容器内需要 git 以执行 fetch/checkout 自更新
-RUN apt-get update && apt-get install -y --no-install-recommends git \
+# 受控自更新（方案 C）：容器内需要 git + openssh-client 以执行 fetch/checkout 自更新。
+# 两者固化进镜像，避免「docker compose up -d 重建后丢失运行时装的可写层」（此前在 NAS 网络差时
+# 被迫运行时 apt 安装，重建即丢）。GIT_SSH_COMMAND 由 compose env 指定私钥，跳过挂载的 ~/.ssh/config。
+RUN apt-get update && apt-get install -y --no-install-recommends git openssh-client ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # 用 uv 在虚拟环境安装（镜像内 /app/.venv）
