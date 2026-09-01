@@ -1,5 +1,8 @@
 # 对齐参考项目 mcp_caiyun_weather 的 uv 配方
-FROM ghcr.io/astral-sh/uv:latest
+# ⚠️ 不要再用浮动 tag `ghcr.io/astral-sh/uv:latest`：该 tag 已漂移到无 /bin/sh 的 distroless 基础镜像，
+# 会导致 `RUN apt-get` 全部失败（exec: "/bin/sh": no such file or directory）。固定到 Debian bookworm 变体
+# （含 shell + apt，与既有运行镜像的 Debian 12 一致），保证可复现构建。
+FROM ghcr.io/astral-sh/uv:latest-bookworm
 
 ENV PYTHONUNBUFFERED=1
 
