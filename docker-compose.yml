@@ -32,7 +32,9 @@ services:
       # https 并设 AF_GIT_PROXY=http://<代理>。
       AF_REPO_DIR: "/repo"
       AF_GIT_REMOTE: "git@github.com:lidicn/AutoFlow.git"
-      GIT_SSH_COMMAND: "ssh -o StrictHostKeyChecking=accept-new"
+      # 容器内以 root 运行，挂载的 ~/.ssh 属主为 lidicn → 用 -F /dev/null 跳过 config，
+      # 直接 -i 指定 github 私钥，避免「Bad owner or permissions on ~/.ssh/config」。
+      GIT_SSH_COMMAND: "ssh -F /dev/null -i /root/.ssh/id_ed25519_github -o StrictHostKeyChecking=accept-new"
     volumes:
       # 源码热编辑：NAS 共享盘改 src，docker compose restart 即生效（配合 Dockerfile 的 -e 安装）
       - ./src:/app/src

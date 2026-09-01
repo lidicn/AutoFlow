@@ -68,8 +68,10 @@ def _remote_url() -> str:
 
 
 def _run_git(repo: str, args: List[str], check: bool = True) -> subprocess.CompletedProcess:
+    # safe.directory=*：容器内以 root 运行，/repo 属主为 lidicn，git 默认拒访；
+    # 自更新本就需要写入该仓库，放宽属主检查（仅对本仓操作，不波及其他）。
     return subprocess.run(
-        ["git", "-C", repo] + list(args),
+        ["git", "-c", "safe.directory=*", "-C", repo] + list(args),
         capture_output=True, text=True, env=_git_env(), check=check,
     )
 
@@ -93,7 +95,7 @@ def list_remote_tags(repo: str) -> List[Dict[str, str]]:
         return []
     try:
         r = subprocess.run(
-            ["git", "ls-remote", "--tags", _remote_url()],
+            ["git", "-c", "safe.directory=*", "ls-remote", "--tags", _remote_url()],
             capture_output=True, text=True, env=_git_env(), check=True, timeout=30,
         )
     except Exception:
