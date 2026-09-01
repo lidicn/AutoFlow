@@ -35,7 +35,10 @@ from .proposals import ProposalStore
 from .notes import NoteStore
 from .device_guard import DeviceGuardStore
 from .audit import AuditStore
-from .subflows import introspect_nr_subflow, validate_subflow_registration
+from .subflows import (
+    introspect_nr_subflow, validate_subflow_registration,
+    introspect_nr_tab, _parse_tab_url, _KEY_RE,
+)
 from .api_config_store import ApiConfigStore
 from .api_specs import (
     SYSTEM_PLACEHOLDERS,
@@ -1266,6 +1269,128 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             return _js({"ok": False, "error": reg.get("error")}, 400)
         return _js({"ok": True, "key": key, "introspect": info}, 201)
 
+    # ── #C-tab：tab 链接逆生成 Link API ──
+    # 用户在 NR 编辑器复制 tab 链接（http://host:port/#flow/<id>），网关只读自省该 tab，
+    # 判断能否注册成 link_out 型 Link API（agent DSL 调用时经 link out 命中 tab 入口 link in）。
+    # 两步：① import-from-url 检测并返回草稿；② register-from-tab 落注册表。
+    def _slugify_key(title: str):
+        """把 tab 标题尽量收敛成合法 DSL 标识符；非 ASCII 标题返回 None（让用户手填）。"""
+        if not title:
+            return None
+        s = re.sub(r"[^A-Za-z0-9_]+", "_", str(title).strip().lower())
+        s = re.sub(r"_+", "_", s).strip("_")
+        if not s or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", s):
+            return None
+        return s or None
+
+    async def import_link_api_from_tab_endpoint(request: Request):
+        """POST /link-apis/import-from-url：解析 tab 链接 → 只读自省 → 返回能否注册。
+
+        body: {url, key?}
+        返回 {ok, tab_id, registerable, reason, title, entry_kind, entry_id,
+              params, suggested_key}。
+          - entry_id 是关键的接线目标（link_out 指向它），仅服务端权威给出；
+          - suggested_key 由 tab 标题 slugify 得到，用户可在 UI 覆盖；非 ASCII 标题为 None。
+        """
+        b = await _body(request)
+        url = (b.get("url") or "").strip()
+        if not url:
+            return _js({"ok": False, "error": "url 必填（NR tab 编辑器链接）"}, 400)
+        tab_id = _parse_tab_url(url)
+        if not tab_id:
+            return _js({"ok": False, "error": "无法从链接解析出 tab id（期望 #flow/<id>）"}, 400)
+        info = await asyncio.to_thread(introspect_nr_tab, gw.nr, tab_id)
+        if not info.get("ok"):
+            return _js({"ok": False, "error": info.get("error", "自省失败")}, 502)
+        suggested = (b.get("key") or "").strip() or _slugify_key(info.get("title") or "")
+        return _js({
+            "ok": True,
+            "tab_id": tab_id,
+            "registerable": info.get("registerable", False),
+            "reason": info.get("reason", ""),
+            "title": info.get("title", ""),
+            "entry_kind": info.get("entry_kind"),
+            "entry_id": info.get("entry_id"),
+            "params": info.get("params", []),
+            "suggested_key": suggested,
+        })
+
+    async def register_link_api_from_tab_endpoint(request: Request):
+        """POST /link-apis/register-from-tab：把自省出的 tab 注册成 link_out 型 Link API。
+
+        body: {url, key, title?, params?, owner?, status?}
+          - key：DSL 调用名（用户填，如 TTS）；必填。
+          - params：用户可在 UI 增删/改的入参列表（[{name,required,type,default,enum,desc}]）；
+            服务端信任用户编辑后的结构，但仍逐条校验 name 合法性。
+          - 服务端**重新**自省 url 取得权威 entry_id（绝不信任客户端给出的接线目标）。
+        返回 {ok, key, entry_id}；注册后即出现在 Link API 列表，agent 可调用。
+        """
+        b = await _body(request)
+        url = (b.get("url") or "").strip()
+        key = (b.get("key") or "").strip()
+        if not url:
+            return _js({"ok": False, "error": "url 必填"}, 400)
+        if not key:
+            return _js({"ok": False, "error": "key（DSL 调用名）必填"}, 400)
+        tab_id = _parse_tab_url(url)
+        if not tab_id:
+            return _js({"ok": False, "error": "无法从链接解析出 tab id"}, 400)
+        # 1) 服务端重新自省，取权威 entry_id 并复核可注册性
+        info = await asyncio.to_thread(introspect_nr_tab, gw.nr, tab_id)
+        if not info.get("ok"):
+            return _js({"ok": False, "error": info.get("error", "自省失败")}, 502)
+        if not info.get("registerable"):
+            return _js({"ok": False,
+                        "error": "该 tab 不能注册为 Link API：" + (info.get("reason") or ""),
+                        "reason": info.get("reason")}, 400)
+        entry_id = info.get("entry_id")
+        if not entry_id:
+            return _js({"ok": False, "error": "自省未拿到入口 link in 节点 id"}, 502)
+        # 2) params 校验（用户可能编辑过）：name 必为合法标识符，结构归一
+        params = b.get("params") or info.get("params") or []
+        if not isinstance(params, list):
+            return _js({"ok": False, "error": "params 必须是列表"}, 400)
+        cleaned_params = []
+        for i, p in enumerate(params):
+            if not isinstance(p, dict) or not isinstance(p.get("name"), str) or not p.get("name"):
+                return _js({"ok": False,
+                            "error": f"params[{i}] 缺 name 或 name 非字符串"}, 400)
+            if not _KEY_RE.match(p["name"]):
+                return _js({"ok": False,
+                            "error": f"params[{i}].name 必须是合法标识符：{p['name']}"}, 400)
+            cleaned_params.append({
+                "name": p["name"],
+                "required": bool(p.get("required", False)),
+                "type": p.get("type", "str") or "str",
+                "default": p.get("default"),
+                "enum": p.get("enum"),
+                "desc": p.get("desc", ""),
+            })
+        # 3) 注册校验门（link_out 路径：要求 entry_link_id，不要 nr_subflow_id）
+        gv = validate_subflow_registration(
+            key=key, nr_subflow_id=None, source_type="imported",
+            title=b.get("title") or info.get("title") or key,
+            input_schema=cleaned_params, env_requirements=[],
+            kind="link_out", entry_link_id=entry_id,
+        )
+        if not gv["ok"]:
+            return _js({"ok": False, "error": gv["error"]}, 400)
+        cleaned = gv["cleaned"]
+        # 4) 注册（imported，link_out，薄桥接；不写用户 NR 流）
+        reg = await asyncio.to_thread(
+            gw.tasks.register_subflow, cleaned["key"],
+            title=cleaned["title"],
+            nr_subflow_id=None, source_type="imported",
+            input_schema=cleaned["input_schema"],
+            env_requirements=cleaned["env_requirements"],
+            owner=b.get("owner", "webui"), status=b.get("status", "active"),
+            spec_ref=None, kind="link_out", entry_link_id=cleaned["entry_link_id"],
+        )
+        if not reg["ok"]:
+            return _js({"ok": False, "error": reg.get("error")}, 400)
+        return _js({"ok": True, "key": key, "entry_id": entry_id,
+                    "title": cleaned["title"]}, 201)
+
     async def set_subflow_status(request: Request):
         """变更子流程状态（active / disabled / pending_review）。
 
@@ -2049,6 +2174,11 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
               methods=["GET", "PUT"]),
         # A3：安装「AutoFlow API」tab 到 NR（增量合并，绝不整体覆盖）
         Route("/api/link-apis/install-tab", install_link_api_tab_endpoint,
+              methods=["POST"]),
+        # #C-tab：tab 链接逆生成 Link API（只读自省 → 注册薄桥接 link_out）
+        Route("/api/link-apis/import-from-url", import_link_api_from_tab_endpoint,
+              methods=["POST"]),
+        Route("/api/link-apis/register-from-tab", register_link_api_from_tab_endpoint,
               methods=["POST"]),
         # #182：删除（卸载）Link API —— 清配置 + 清 tab 内派生节点 + 取消登记。
         # 必须排在 install-tab 之后：`{name}` 会字面匹配 "install-tab"，

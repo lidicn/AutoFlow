@@ -1695,12 +1695,15 @@ async function installBarkSubflow(key) {
 async function loadLinkApis() {
   _sfView = "link_api";
   const v = $("#view-link_apis");
-  v.innerHTML = `<div class="view-head"><h2>Link API（网关 HTTP 桥接）</h2><button class="btn" id="la-install-tab" title="把已配置好的 Link API 增量合并到 NR 的 AutoFlow API tab">📦 安装到 Node-RED</button></div>
+  v.innerHTML = `<div class="view-head"><h2>Link API（网关 HTTP 桥接）</h2>
+    <button class="btn" id="la-install-tab" title="把已配置好的 Link API 增量合并到 NR 的 AutoFlow API tab">📦 安装到 Node-RED</button>
+    <button class="btn" id="la-import-tab" title="从 Node-RED tab 链接只读自省，注册成可调用 Link API">🔗 从 tab 链接导入</button></div>
     <div class="row" style="gap:8px;margin:8px 0">
       <span class="meta" id="la-count"></span>
     </div>
     <div id="la-list"><div class="empty">加载中…</div></div>`;
   $("#la-install-tab").onclick = installLinkApiTab;
+  $("#la-import-tab").onclick = showImportLinkApiFromTab;
   await refreshLinkApis();
 }
 
@@ -1984,6 +1987,93 @@ async function doImportSubflow() {
   } catch (e) {
     toast("导入失败：" + e.message);
   } finally { btn.disabled = false; btn.textContent = "自省并导入"; }
+}
+
+// ── #C-tab：从 NR tab 链接逆生成 Link API ──
+// 只读自省用户 tab，注册薄桥接（link_out），不改动用户 NR 流。多参数 TTS 队列支持逐行增删编辑。
+function showImportLinkApiFromTab() {
+  modal("从 tab 链接导入 Link API", `
+    <p class="desc">把 Node-RED 编辑器里的 tab 链接（如 <code>http://192.168.2.200:1990/#flow/e70a201b5f004927</code>）粘贴进来。
+    网关会<b>只读</b>自省该 tab，判断能否注册成可调用 API——之后 agent 写 flow 时说「使用 TTS」或「智能语音播报队列」即可调用。不会改动你的 NR 流。</p>
+    <div class="field"><label>tab 链接</label><input id="lt-url" placeholder="http://host:1990/#flow/<tabid>"></div>
+    <button class="btn primary" id="lt-detect">检测能否注册</button>
+    <div id="lt-result" style="margin-top:10px"></div>`);
+  $("#lt-detect").onclick = detectLinkApiFromTab;
+}
+async function detectLinkApiFromTab() {
+  const url = $("#lt-url").value.trim();
+  if (!url) return toast("请粘贴 tab 链接");
+  const box = $("#lt-result");
+  box.innerHTML = `<div class="empty">检测中…</div>`;
+  let d;
+  try {
+    const r = await api("POST", "/link-apis/import-from-url", { url });
+    if (!r.ok) { box.innerHTML = errBox(r.data?.error || r.status); return; }
+    d = r.data;
+  } catch (e) { box.innerHTML = errBox(e.message); return; }
+  if (!d.registerable) {
+    box.innerHTML = `<div class="card warn">⚠️ 该 tab 暂不能注册为 Link API<br><span class="desc">${esc(d.reason || "")}</span></div>`;
+    return;
+  }
+  const rows = (d.params || []).map(paramRowHtml).join("");
+  box.innerHTML = `
+    <div class="card ok">✅ 可注册：tab「${esc(d.title)}」入口为 link in（entry <code>${esc(d.entry_id)}</code>）</div>
+    <div class="field"><label>DSL 调用名 key（唯一，agent 写 flow 时说「使用 ${esc(d.suggested_key || "此 API")}」即可调用）</label>
+      <input id="lt-key" value="${esc(d.suggested_key || "")}" placeholder="如 TTS"></div>
+    <div class="field"><label>标题（可选）</label><input id="lt-title" value="${esc(d.title)}"></div>
+    <h3>调用参数</h3>
+    <p class="desc">自省推断自 tab 内部 <code>msg.&lt;x&gt;</code> 读取；复杂队列可逐行增删 / 改类型 / 设必填。</p>
+    <table class="tbl" id="lt-params"><thead><tr><th>参数名</th><th>类型</th><th>必填</th><th>说明</th><th></th></tr></thead>
+      <tbody>${rows || `<tr id="lt-empty"><td colspan="5" class="meta">无推断参数（也可手动添加）</td></tr>`}</tbody></table>
+    <button class="btn sm" id="lt-add">＋ 添加参数</button>
+    <div class="row" style="margin-top:12px"><button class="btn primary" id="lt-register">注册为 Link API</button></div>`;
+  const tb = $("#lt-params").querySelector("tbody");
+  tb.addEventListener("click", (e) => {
+    if (e.target.classList && e.target.classList.contains("lt-del"))
+      e.target.closest("tr").remove();
+  });
+  $("#lt-add").onclick = () => {
+    const empty = document.getElementById("lt-empty"); if (empty) empty.remove();
+    tb.insertAdjacentHTML("beforeend", paramRowHtml({ name: "", required: false, type: "str", desc: "" }));
+  };
+  $("#lt-register").onclick = () => registerLinkApiFromTab(url);
+}
+function paramRowHtml(p) {
+  const types = ["str", "int", "float", "bool"];
+  const opts = types.map((t) =>
+    `<option value="${t}"${t === (p.type || "str") ? " selected" : ""}>${t}</option>`).join("");
+  return `<tr>
+    <td><input class="lt-pname" value="${esc(p.name || "")}" placeholder="param_name"></td>
+    <td><select class="lt-ptype">${opts}</select></td>
+    <td style="text-align:center"><input class="lt-preq" type="checkbox"${p.required ? " checked" : ""}></td>
+    <td><input class="lt-pdesc" value="${esc(p.desc || "")}" placeholder="说明"></td>
+    <td><button class="btn sm danger lt-del" title="删除此参数">✕</button></td>
+  </tr>`;
+}
+async function registerLinkApiFromTab(url) {
+  const key = $("#lt-key").value.trim();
+  if (!key) return toast("请填 DSL 调用名 key");
+  const title = $("#lt-title").value.trim();
+  const params = [];
+  $("#lt-params").querySelectorAll("tbody tr").forEach((tr) => {
+    const name = tr.querySelector(".lt-pname").value.trim();
+    if (!name) return;          // 跳过空行
+    params.push({
+      name,
+      type: tr.querySelector(".lt-ptype").value,
+      required: tr.querySelector(".lt-preq").checked,
+      desc: tr.querySelector(".lt-pdesc").value.trim(),
+    });
+  });
+  const btn = $("#lt-register"); btn.disabled = true; btn.textContent = "注册中…";
+  try {
+    const r = await api("POST", "/link-apis/register-from-tab", { url, key, title, params });
+    if (!r.ok) return toast("注册失败：" + (r.data?.error || r.status));
+    toast("注册成功：" + key + "（已加入 Link API 列表）");
+    closeModal();
+    await refreshLinkApis();
+  } catch (e) { toast("注册失败：" + e.message); }
+  finally { btn.disabled = false; btn.textContent = "注册为 Link API"; }
 }
 
 // ── 设置管理界面（C3/C21/C25）──

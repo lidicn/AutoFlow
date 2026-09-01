@@ -850,11 +850,12 @@ _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 def validate_subflow_registration(key, nr_subflow_id, source_type="imported",
                                   title="", input_schema=None,
-                                  env_requirements=None) -> dict:
+                                  env_requirements=None, kind=None,
+                                  entry_link_id=None) -> dict:
     """注册校验门：返回 {ok, error, cleaned}。
 
     - key 必须是 DSL 安全标识符（[A-Za-z_][A-Za-z0-9_]*），且不得与网关预置子流程撞名
-    - imported 必须带 nr_subflow_id
+    - imported 子流程（kind=subflow）必须带 nr_subflow_id；link_out 型必须带 entry_link_id
     - input_schema 必须是 [{name,required?,type?,default?,enum?,desc?}] 列表，每项 name 为字符串
     - env_requirements 必须是字符串列表（或 {name} 字典列表）
     """
@@ -868,8 +869,16 @@ def validate_subflow_registration(key, nr_subflow_id, source_type="imported",
     st = (source_type or "imported").lower()
     if st not in ("managed", "imported"):
         return {"ok": False, "error": f"source_type 须为 managed/imported，当前：{st}"}
-    if st == "imported" and not nr_subflow_id:
-        return {"ok": False, "error": "imported 子流程必须提供 nr_subflow_id"}
+    kd = (kind or "subflow").lower()
+    if kd not in ("subflow", "link_out"):
+        return {"ok": False, "error": f"kind 须为 subflow/link_out，当前：{kd}"}
+    if st == "imported":
+        if kd == "link_out":
+            if not entry_link_id:
+                return {"ok": False,
+                        "error": "link_out 型导入必须提供 entry_link_id（tab 入口 link in 节点 id）"}
+        elif not nr_subflow_id:
+            return {"ok": False, "error": "imported 子流程必须提供 nr_subflow_id"}
     # input_schema 规范化
     cleaned_schema = []
     if input_schema:
@@ -903,6 +912,8 @@ def validate_subflow_registration(key, nr_subflow_id, source_type="imported",
         "title": (title or key).strip(),
         "nr_subflow_id": (nr_subflow_id or None),
         "source_type": st,
+        "kind": kd,
+        "entry_link_id": (entry_link_id or None),
         "input_schema": cleaned_schema,
         "env_requirements": cleaned_env,
     }}
@@ -1058,3 +1069,136 @@ def introspect_nr_subflow(nr, nr_subflow_id: str) -> dict:
     except Exception as e:
         return {"ok": False, "error": f"读取 NR flows 失败: {type(e).__name__}: {e}"}
     return _introspect_nr_subflow_from_flows(flows, nr_subflow_id)
+
+
+# ── NR tab 链接逆生成 Link API（#C-tab）：把用户在 NR 编辑器里复制的
+#    `http://host:port/#flow/<tabid>` 只读自省，判断能否注册成 link_out 型 Link API ──
+# 设计要点（安全 + 零漂移）：
+#  - 网关**只读**自省用户 tab，绝不写/重建用户流；
+#  - 用户 tab 入口通常为 `link in`，网关注册一条薄桥接（kind=link_out，entry_link_id=
+#    该 link in 节点 id），agent DSL 调用时经 link out 命中同一入口，零额外接线；
+#  - 入口类型决定可行性：link in=完美可注册；http in=暂不支持（提示走 HTTP 桥接）；
+#    inject=不可编程（无外部入参契约，驳回）。
+def _parse_tab_url(url: str):
+    """从用户粘贴的 tab 链接解析 tab id。
+
+    支持形态：
+      - 完整编辑器链接  http://host:port/#flow/<id>
+      - 裸 hash         #flow/<id>
+      - 裸 id           <id>
+    返回 tab_id（str）或 None。
+    """
+    if not url:
+        return None
+    s = str(url).strip()
+    if "#flow/" in s:
+        s = s.split("#flow/", 1)[1]
+    # 去掉尾随 / 参数 / 路径段，保留首个 token
+    s = s.strip("/").split("?")[0].split("/")[0]
+    s = s.strip()
+    return s or None
+
+
+def _introspect_nr_tab_from_flows(flows, tab_id: str) -> dict:
+    """从 NR flows（list_flows 返回）自省某 tab，判断能否注册成 Link API（link_out）。
+
+    纯函数、无副作用，便于离线 mock 测试。
+    返回 {ok, registerable, reason, title, entry_kind, entry_id, params}：
+      - entry_kind: "link_in" | "http_in" | "inject" | None
+      - entry_id:   入口节点 id（link_in 时即 DSL 编译 link out 要指向的 entry_link_id）
+      - params:     推断出的调用方入参 [{name,required,type,default,enum,desc}]
+    """
+    tab = None
+    for f in flows or []:
+        if f.get("type") == "tab" and f.get("id") == tab_id:
+            tab = f
+            break
+    if tab is None:
+        return {"ok": False, "error": f"NR 中未找到 type=tab 且 id={tab_id}"}
+
+    z = tab_id
+    internal = [n for n in flows if n.get("z") == z]
+    # 入口识别：link in / http in / inject（优先 link in，最贴合 API 语义）
+    entry = None
+    entry_kind = None
+    for n in internal:
+        t = n.get("type")
+        if t == "link in":
+            entry, entry_kind = n, "link_in"
+            break
+        if t == "http in":
+            entry, entry_kind = n, "http_in"
+            break
+        if t == "inject":
+            entry, entry_kind = n, "inject"
+            break
+    if entry is None:
+        return {
+            "ok": True, "registerable": False,
+            "reason": "该 tab 没有 link in / http in / inject 入口节点，"
+                      "无法作为可编程 API 注册（可能是纯 UI 流或定时流）",
+            "title": tab.get("label", "") or "",
+            "entry_kind": None, "entry_id": None, "params": [],
+        }
+    if entry_kind == "http_in":
+        return {
+            "ok": True, "registerable": False,
+            "reason": "入口为 http in（HTTP 端点），本版仅支持 link in 入口的 tab；"
+                      "这类能力请改用网关 Link API 的 HTTP 桥接方式注册",
+            "title": tab.get("label", "") or "",
+            "entry_kind": "http_in", "entry_id": entry.get("id"), "params": [],
+        }
+    if entry_kind == "inject":
+        return {
+            "ok": True, "registerable": False,
+            "reason": "入口为 inject（手动/定时触发，无外部入参契约），"
+                      "无法作为可带参调用的 API 注册",
+            "title": tab.get("label", "") or "",
+            "entry_kind": "inject", "entry_id": entry.get("id"), "params": [],
+        }
+    # ── link_in 入口：可注册成 link_out ──
+    # 扫描除入口外的内部节点文本，抽 msg.<x> 推断调用方入参（best-effort）
+    text = []
+    for n in internal:
+        if n.get("id") == entry.get("id"):
+            continue
+        t = n.get("type")
+        if t == "function":
+            text.append(n.get("func", "") or "")
+        elif t == "change":
+            for r in n.get("rules", []) or []:
+                text.append(f"{r.get('to', '')} {r.get('p', '')}")
+        elif t == "template":
+            text.append(n.get("format", "") or n.get("field", ""))
+    reads = set()
+    for t in text:
+        for m in _MSG_READ_RE.finditer(t or ""):
+            reads.add(m.group(1))
+    input_names = sorted(reads - _RESERVED_MSG)
+    params = [{
+        "name": nm, "required": False, "type": "str",
+        "default": None, "enum": None,
+        "desc": f"（自省推断）来自 tab 内部 msg.{nm} 读取，调用时经 link out 注入",
+    } for nm in input_names]
+    return {
+        "ok": True, "registerable": True,
+        "reason": "link in 入口，可注册为 link_out 型 Link API（agent DSL 调用时"
+                  "经 link out 命中该入口，无需重建用户流）",
+        "title": tab.get("label", "") or "",
+        "entry_kind": "link_in", "entry_id": entry.get("id"),
+        "params": params,
+    }
+
+
+def introspect_nr_tab(nr, tab_id: str) -> dict:
+    """生产路径：经 nr 客户端读 /flows 后自省（见 _introspect_nr_tab_from_flows）。
+
+    list_flows 在不同 NR 版本返回扁平数组或 {flows:[...]}（admin v2），这里归一化。
+    """
+    try:
+        flows = nr.list_flows()
+    except Exception as e:
+        return {"ok": False, "error": f"读取 NR flows 失败: {type(e).__name__}: {e}"}
+    if isinstance(flows, dict):
+        flows = flows.get("flows", [])
+    return _introspect_nr_tab_from_flows(flows or [], tab_id)
