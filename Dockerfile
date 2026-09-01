@@ -11,6 +11,7 @@ COPY pyproject.toml /app/pyproject.toml
 COPY src /app/src
 COPY skills /app/skills
 COPY run.py /app/run.py
+COPY README.md /app/README.md
 WORKDIR /app
 
 # 受控自更新（方案 C）：容器内需要 git + openssh-client 以执行 fetch/checkout 自更新。
