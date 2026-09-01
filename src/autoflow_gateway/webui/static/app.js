@@ -1696,41 +1696,15 @@ async function loadLinkApis() {
   _sfView = "link_api";
   const v = $("#view-link_apis");
   v.innerHTML = `<div class="view-head"><h2>Link API（网关 HTTP 桥接）</h2>
-    <button class="btn" id="la-install-tab" title="把已配置好的 Link API 增量合并到 NR 的 AutoFlow API tab">📦 安装到 Node-RED</button>
     <button class="btn" id="la-import-tab" title="从 Node-RED tab 链接只读自省，注册成可调用 Link API">🔗 从 tab 链接导入</button></div>
     <div class="row" style="gap:8px;margin:8px 0">
       <span class="meta" id="la-count"></span>
     </div>
     <div id="la-list"><div class="empty">加载中…</div></div>`;
-  $("#la-install-tab").onclick = installLinkApiTab;
   $("#la-import-tab").onclick = showImportLinkApiFromTab;
   await refreshLinkApis();
 }
 
-async function installLinkApiTab() {
-  try {
-    const r = await api("POST", "/link-apis/install-tab", {});
-    if (!r.ok) {
-      const d = r.data || {};
-      if (Array.isArray(d.missing) && d.missing.length) {
-        const info = d.missing.map((m) => `${esc(m.title || m.name)}：缺少 ${m.missing.join("、")}`).join("；");
-        return toast("安装失败：" + (d.error || "配置不完整") + " — " + info);
-      }
-      return toast("安装失败：" + (d.error || r.status));
-    }
-    const d = r.data || {};
-    // #177：tab_id 是 NR 实际分配的真实 id（不是种子 af_api_tab），据此判断有无重名 tab
-    let msg = d.skipped
-      ? `AutoFlow API tab 已是最新，无需改动（tab ${d.tab_id || "?"}）。`
-      : `已${d.tab_created ? "创建" : "更新"} AutoFlow API tab（${d.tab_id || "?"}）：`
-        + `新增 ${d.nodes_added || 0} 个、刷新 ${d.nodes_updated || 0} 个，总计 ${d.nodes_total || 0} 个节点。`
-        + `包含 ${(d.specs || []).join(", ")}`;
-    if (Array.isArray(d.duplicate_tabs) && d.duplicate_tabs.length > 1) {
-      msg += ` ⚠️ NR 上有 ${d.duplicate_tabs.length} 个同名 tab，请手动清理多余的：${d.duplicate_tabs.join(", ")}`;
-    }
-    toast(msg);
-  } catch (e) { toast("安装失败：" + e.message); }
-}
 async function refreshLinkApis() {
   try {
     const r = await api("GET", "/subflows");
@@ -1752,6 +1726,11 @@ function renderLinkApis() {
     const idLine = s.kind === "link_out"
       ? `link out 入口：${esc(s.entry_link_id || "—")}`
       : "网关内联（不生成 NR 节点）";
+    // #C：仅「真的会在 NR 派生节点」的 Link API 才给安装按钮；其余（http_api 内联 /
+    // 用户导入的 tab-link link_out 零写入）不给，避免点了却无事发生。
+    const installBtn = s.needs_nr_flow
+      ? `<button class="btn sm" data-la-install="${esc(s.key)}" title="把该 Link API 增量合并到 NR 的 AutoFlow API tab">📦 安装到 Node-RED</button>`
+      : "";
     return `<div class="item" data-key="${esc(s.key)}">
       <div class="row">
         <div><span class="title">${esc(s.title || s.key)}</span> <span class="meta">${esc(s.key)}</span></div>
@@ -1761,12 +1740,38 @@ function renderLinkApis() {
       <div class="desc">前置参数 ${ins} 项 ｜ ${idLine}</div>
       <div class="actions">
         <button class="btn sm" data-la-cfg="${esc(s.key)}" title="填写 token / 坐标等运行时参数">⚙️ 配置</button>
-        <button class="btn sm danger" data-la-del="${esc(s.key)}" title="清空本机配置并移除 AutoFlow API tab 里由它派生的节点">🗑️ 删除</button>
+        ${installBtn}
+        <button class="btn sm danger" data-la-del="${esc(s.key)}" title="清空本机配置并移除 AutoFlow API tab 里由它派生的节点">🗑️ 卸载</button>
       </div>
     </div>`;
   }).join("");
   $$("[data-la-cfg]").forEach((b) => (b.onclick = () => showLinkApiConfig(b.dataset.laCfg)));
+  $$("[data-la-install]").forEach((b) => (b.onclick = () => installSingleLinkApi(b.dataset.laInstall)));
   $$("[data-la-del]").forEach((b) => (b.onclick = () => deleteLinkApi(b.dataset.laDel)));
+}
+
+// #C：单个 Link API 的「安装到 Node-RED」按钮。
+async function installSingleLinkApi(key) {
+  try {
+    const r = await api("POST", "/link-apis/" + encodeURIComponent(key) + "/install", {});
+    if (!r.ok) {
+      const d = r.data || {};
+      if (Array.isArray(d.missing) && d.missing.length) {
+        const info = d.missing.map((m) => `${esc(m.title || m.name)}：缺少 ${m.missing.join("、")}`).join("；");
+        return toast("安装失败：" + (d.error || "配置不完整") + " — " + info);
+      }
+      return toast("安装失败：" + (d.error || r.status));
+    }
+    const d = r.data || {};
+    let msg = d.skipped
+      ? `「${key}」已是最新，未改动 NR（tab ${d.tab_id || "?"}）。`
+      : `已${d.tab_created ? "创建" : "更新"}「${key}」对应的 AutoFlow API tab 节点`
+        + `（tab ${d.tab_id || "?"}）：新增 ${d.nodes_added || 0}、刷新 ${d.nodes_updated || 0}，共 ${d.nodes_total || 0} 个。`;
+    if (Array.isArray(d.duplicate_tabs) && d.duplicate_tabs.length > 1) {
+      msg += ` ⚠️ NR 上有 ${d.duplicate_tabs.length} 个同名 tab，请手动清理多余的：${d.duplicate_tabs.join(", ")}`;
+    }
+    toast(msg);
+  } catch (e) { toast("安装失败：" + e.message); }
 }
 
 // ── #182：删除（卸载）Link API ──

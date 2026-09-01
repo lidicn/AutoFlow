@@ -41,6 +41,7 @@ from api_spec_fixture import make_spec, temp_api_spec
 @unittest.skipUnless(_HAVE_WEB_DEPS, "A2 测试需要 starlette（缺失则 pip install starlette）。")
 class TestLinkApiConfig(unittest.TestCase):
     def setUp(self):
+        os.environ["AF_WEBUI_TOKEN_MODE"] = "token_only"
         self.tmp = tempfile.mkdtemp(prefix="af_lacfg_")
         self.cfg = GatewayConfig(data_dir=self.tmp, env="staging")
         self.gw = Gateway(self.cfg)
@@ -50,6 +51,7 @@ class TestLinkApiConfig(unittest.TestCase):
 
     def tearDown(self):
         self.client.__exit__(None, None, None)
+        os.environ.pop("AF_WEBUI_TOKEN_MODE", None)
         # 直接读 temp data_dir 的 autoflow.db，与 webui 内 api_configs 同库。
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -173,6 +175,7 @@ class TestExprFieldPlaceholders(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="af_expr_")
         self.cfg = GatewayConfig(data_dir=self.tmp, env="staging")
         self.gw = Gateway(self.cfg)
+        os.environ["AF_WEBUI_TOKEN_MODE"] = "token_only"
         self.app = build_webui_asgi(self.cfg, gateway=self.gw)
         self.client = TestClient(self.app)
         self.client.__enter__()
@@ -183,6 +186,7 @@ class TestExprFieldPlaceholders(unittest.TestCase):
             self._as.API_SPECS.remove(self.spec)
         except ValueError:
             pass
+        os.environ.pop("AF_WEBUI_TOKEN_MODE", None)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_extract_and_assemble_placeholders_become_config_fields(self):

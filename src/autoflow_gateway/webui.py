@@ -1162,6 +1162,18 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         for r in visible:
             if r.get("key") == "bark_push":
                 r["bark_ready"] = connections.bark_ready(cfg)
+        # #C：给「安装到 Node-RED」的判断依据——只有真正会在 NR 里派生节点的
+        # Link API（neids_nr_flow() 为 True，如带 nr_downstream_link_id 的 link_out）
+        # 才需要独立安装按钮；http_api（网关内联）与用户从 tab 链接导入的 link_out
+        # （指向既有 tab，零 NR 写入）不需要，前端据此隐藏安装按钮。
+        for r in visible:
+            kind = r.get("kind") or "subflow"
+            if kind in ("link_out", "http_api"):
+                spec = get_api_spec(r.get("spec_ref") or r.get("key") or "")
+                r["needs_nr_flow"] = bool(
+                    spec is not None and spec.needs_nr_flow())
+            else:
+                r["needs_nr_flow"] = False
         return _js({"subflows": visible, "count": len(visible)})
 
     # ── A2：Link API 配置表单持久化（方案 B：api_configs 表）──
@@ -1645,27 +1657,19 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                                for k, v in (spec.nr_headers or {}).items()}
         return _dc.replace(spec, **patch)
 
-    async def install_link_api_tab_endpoint(request: Request):
-        """A3(#170)：安装「AutoFlow API」tab（id=af_api_tab）到 NR。
+    async def _install_specs_to_nr(specs) -> dict:
+        """把给定 ApiSpec 列表增量安装到 NR 的「AutoFlow API」tab，返回 {ok, ...}。
 
-        行为（硬约束）：
-        1. 取所有 needs_nr_flow() 且非 self_use 的 spec（豆包系列被排除，不会重新生成）；
-        2. 用 api_configs 表值替换 url/headers/body_template 的 <ENV> 占位符；
-           任一 spec 缺配置 → 400 并指明先去填参数；
-        3. 解析「AutoFlow API」tab 的真实 id（台账 + list_flows 兜底，#177）；
-        4. build_nr_tab_flows(真实 tab id) 生成节点，z 字段对齐真实 tab；
-        5. 增量合并：追加尚不存在的 entry 链，并就地刷新我们自己生成的节点
-           （配置改了要能生效），绝不删除既有节点——保护 1990 里用户自用链路的硬约束；
-        6. 幂等：无新增且无内容变化 → 直接跳过 NR 写入；allow_prod=True；
-           首次创建后把 NR 返回的真实 id 写进台账，下次直接命中。
+        与 install_link_api_tab_endpoint 共享实现：校验配置→解析真实 tab id→
+        增量合并→写 NR→登记台账。_status 键用于通知调用方返回码。
         """
-        from .api_specs import API_SPECS, build_nr_tab_flows
-        # 1) 选 spec：needs_nr_flow 且非 self_use（排除豆包系列）
-        candidates = [s for s in API_SPECS
-                      if s.needs_nr_flow() and not getattr(s, "self_use", False)]
-        # 2) 校验配置并派生有效 spec（占位符替换）
+        from .api_specs import build_nr_tab_flows
+        if not specs:
+            return {"ok": True, "skipped": True, "specs": [],
+                    "detail": {"reason": "无待安装 spec"}}
+        # 1) 校验配置并派生有效 spec（占位符替换）
         effective, missing = [], []
-        for s in candidates:
+        for s in specs:
             cfg = api_configs.get_api_config(s.name)
             lack = [f for f in _config_fields_for_spec(s) if not cfg.get(f)]
             if lack:
@@ -1673,15 +1677,16 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                 continue
             effective.append(_effective_spec(s, cfg))
         if missing:
-            return _js({
+            return {
                 "ok": False,
                 "error": "以下 Link API 缺少必填配置，请先到「Link API」Tab 填写参数",
                 "missing": missing,
-            }, 400)
-        # 3) 解析真实 tab id（#177：绝不再用字面量 af_api_tab 探测）
+                "_status": 400,
+            }
+        # 2) 解析真实 tab id（#177：绝不再用字面量 af_api_tab 探测）
         entry_ids = {(s.entry_link_id or f"{s.name}_in") for s in effective}
         tab_id, matched = await asyncio.to_thread(_resolve_af_api_tab_id, entry_ids)
-        # 4) 读既有节点（tab_id 为 None = 尚未安装，无既有节点）
+        # 3) 读既有节点（tab_id 为 None = 尚未安装，无既有节点）
         existing = None
         if tab_id:
             try:
@@ -1689,7 +1694,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             except Exception:
                 existing = None
         exist_nodes = (existing or {}).get("nodes", []) if isinstance(existing, dict) else []
-        # 5) 生成节点：z 必须对齐真实 tab id；首次创建先用种子 id，
+        # 4) 生成节点：z 必须对齐真实 tab id；首次创建先用种子 id，
         #    create_or_update_flow 在 POST 拿到真实 id 后会统一改写 z。
         target_id = tab_id or AF_API_TAB_SEED_ID
         nodes = build_nr_tab_flows(target_id, specs=effective)
@@ -1711,16 +1716,16 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             merged.append(n)
             exist_ids.add(n.get("id"))
             added += 1
-        # 6) 无新增也无变化 → 完全跳过 NR 写入（最强幂等，也最不打扰 prod）
+        # 5) 无新增也无变化 → 完全跳过 NR 写入（最强幂等，也最不打扰 prod）
         if tab_id and added == 0 and updated == 0:
-            return _js({
+            return {
                 "ok": True, "tab_id": tab_id, "skipped": True,
                 "specs": [s.name for s in effective],
                 "nodes_before": len(exist_nodes), "nodes_added": 0,
                 "nodes_updated": 0, "nodes_total": len(merged),
                 "duplicate_tabs": matched if len(matched) > 1 else [],
                 "detail": {"reason": "tab 已是最新，未写入 NR"},
-            })
+            }
         flow_data = {
             "id": target_id,
             "label": (existing or {}).get("label") or AF_API_TAB_LABEL,
@@ -1732,13 +1737,13 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             res = await asyncio.to_thread(
                 gw.nr.create_or_update_flow, target_id, flow_data, True, True)
         except Exception as e:
-            return _js({"ok": False, "error": f"安装 tab 失败：{e}"}, 502)
+            return {"ok": False, "error": f"安装 tab 失败：{e}", "_status": 502}
         # 关键：以 NR 返回的真实 id 登记台账（nr_layer docstring 早有此要求）
         real_id = (res or {}).get("id") if isinstance(res, dict) else None
         real_id = real_id or tab_id or target_id
         if real_id and real_id != AF_API_TAB_SEED_ID:
             _af_tab_ledger_write(real_id)
-        return _js({
+        return {
             "ok": True, "tab_id": real_id,
             "tab_created": bool(isinstance(res, dict) and res.get("created")),
             "specs": [s.name for s in effective],
@@ -1746,7 +1751,60 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             "nodes_updated": updated, "nodes_total": len(merged),
             "duplicate_tabs": matched if len(matched) > 1 else [],
             "detail": res,
-        })
+        }
+
+    async def install_link_api_tab_endpoint(request: Request):
+        """A3(#170)：安装「AutoFlow API」tab（id=af_api_tab）到 NR。
+
+        行为（硬约束）：
+        1. 取所有 needs_nr_flow() 且非 self_use 的 spec（豆包系列被排除，不会重新生成）；
+        2. 用 api_configs 表值替换 url/headers/body_template 的 <ENV> 占位符；
+           任一 spec 缺配置 → 400 并指明先去填参数；
+        3. 解析「AutoFlow API」tab 的真实 id（台账 + list_flows 兜底，#177）；
+        4. build_nr_tab_flows(真实 tab id) 生成节点，z 字段对齐真实 tab；
+        5. 增量合并：追加尚不存在的 entry 链，并就地刷新我们自己生成的节点
+           （配置改了要能生效），绝不删除既有节点——保护 1990 里用户自用链路的硬约束；
+        6. 幂等：无新增且无内容变化 → 直接跳过 NR 写入；allow_prod=True；
+           首次创建后把 NR 返回的真实 id 写进台账，下次直接命中。
+        """
+        from .api_specs import API_SPECS
+        candidates = [s for s in API_SPECS
+                      if s.needs_nr_flow() and not getattr(s, "self_use", False)]
+        result = await _install_specs_to_nr(candidates)
+        if not result["ok"]:
+            status = result.pop("_status", 400)
+            return _js(result, status)
+        return _js(result)
+
+    async def install_single_link_api_endpoint(request: Request):
+        """#C：给单个 Link API 单独的「安装到 Node-RED」按钮。
+
+        复用 _install_specs_to_nr（与批量安装同一套增量合并/账本/幂等逻辑），
+        只装传入的这一个 spec。比批量安装多了三道闸：
+        - 未知 name → 404（与删除端点同口径；导入的 tab-link link_out 无 ApiSpec，
+          也走 404，前端会隐藏其安装按钮）；
+        - self_use 能力 → 403（与配置/删除端点一致）；
+        - spec.needs_nr_flow() 为 False（http_api 内联 / 用户导入的 tab-link link_out）
+          → 400 并说明「无需安装」（这些本来就不往 NR 写节点）。
+        配置缺失同样委托给 _install_specs_to_nr → 400 + missing 清单。
+        """
+        name = request.path_params.get("name") or ""
+        spec = get_api_spec(name)
+        if spec is None:
+            return _js({"ok": False, "error": f"未知 Link API: {name}"}, 404)
+        if getattr(spec, "self_use", False):
+            return _js({"ok": False, "error": "self_use 能力（网关自用）不可安装"}, 403)
+        if not spec.needs_nr_flow():
+            return _js({
+                "ok": False,
+                "error": "该 Link API 无需安装到 Node-RED（网关内联或指向既有 tab，"
+                         "零 NR 写入）",
+            }, 400)
+        result = await _install_specs_to_nr([spec])
+        if not result["ok"]:
+            status = result.pop("_status", 400)
+            return _js(result, status)
+        return _js(result)
 
     def _derived_node_ids(spec, tab_id: str) -> set:
         """该 spec 在「AutoFlow API」tab 里派生出的节点 id 集合（#182）。
@@ -2174,6 +2232,10 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
               methods=["GET", "PUT"]),
         # A3：安装「AutoFlow API」tab 到 NR（增量合并，绝不整体覆盖）
         Route("/api/link-apis/install-tab", install_link_api_tab_endpoint,
+              methods=["POST"]),
+        # #C：单个 Link API 的「安装到 Node-RED」按钮（复用 _install_specs_to_nr）。
+        # 路径比 {name} 多一段 /install，Starlette 不会与下面 {name} DELETE 撞匹配。
+        Route("/api/link-apis/{name}/install", install_single_link_api_endpoint,
               methods=["POST"]),
         # #C-tab：tab 链接逆生成 Link API（只读自省 → 注册薄桥接 link_out）
         Route("/api/link-apis/import-from-url", import_link_api_from_tab_endpoint,

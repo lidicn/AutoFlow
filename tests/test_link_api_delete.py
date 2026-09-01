@@ -54,6 +54,7 @@ KEEP = "anysearch_batch"        # 必须完好无损的邻居
 @unittest.skipUnless(_HAVE_WEB_DEPS, "需要 starlette（缺失则 pip install starlette）。")
 class TestLinkApiDelete(unittest.TestCase):
     def setUp(self):
+        os.environ["AF_WEBUI_TOKEN_MODE"] = "token_only"
         self.tmp = tempfile.mkdtemp(prefix="af_la_del_")
         self.cfg = GatewayConfig(data_dir=self.tmp, env="staging")
         self.gw = Gateway(self.cfg)
@@ -63,6 +64,7 @@ class TestLinkApiDelete(unittest.TestCase):
 
     def tearDown(self):
         self.client.__exit__(None, None, None)
+        os.environ.pop("AF_WEBUI_TOKEN_MODE", None)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     # ── 夹具 ──

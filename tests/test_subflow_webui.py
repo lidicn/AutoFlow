@@ -58,6 +58,7 @@ def _fake_introspect(nr, nr_subflow_id):
 @unittest.skipUnless(_HAVE_WEB_DEPS, "需要 starlette（缺失则用系统 Python 3.13.2 或 pip install starlette）")
 class TestSubflowWebUI(unittest.TestCase):
     def setUp(self):
+        os.environ["AF_WEBUI_TOKEN_MODE"] = "token_only"
         self.tmp = tempfile.mkdtemp(prefix="af_sfweb_")
         self.cfg = GatewayConfig(data_dir=self.tmp, env="staging")
         self.gw = Gateway(self.cfg)
@@ -69,6 +70,7 @@ class TestSubflowWebUI(unittest.TestCase):
 
     def tearDown(self):
         webui_mod.introspect_nr_subflow = self._orig
+        os.environ.pop("AF_WEBUI_TOKEN_MODE", None)
         self.client.__exit__(None, None, None)
         shutil.rmtree(self.tmp, ignore_errors=True)
 

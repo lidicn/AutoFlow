@@ -123,6 +123,8 @@ USER_TAB = {
 @unittest.skipUnless(_HAVE_WEB_DEPS, "A3 测试需要 starlette（缺失则 pip install starlette）。")
 class TestInstallTab(unittest.TestCase):
     def setUp(self):
+        # token_only 让 TestClient（loopback）绕过鉴权（与 test_import_link_api_from_tab 同口径）
+        os.environ["AF_WEBUI_TOKEN_MODE"] = "token_only"
         self.tmp = tempfile.mkdtemp(prefix="af_install_tab_")
         self.cfg = GatewayConfig(data_dir=self.tmp, env="staging")
         self.gw = Gateway(self.cfg)
@@ -132,6 +134,7 @@ class TestInstallTab(unittest.TestCase):
 
     def tearDown(self):
         self.client.__exit__(None, None, None)
+        os.environ.pop("AF_WEBUI_TOKEN_MODE", None)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     # ── 夹具 ──
@@ -410,6 +413,7 @@ class TestExprFieldSubstitution(unittest.TestCase):
         )
         _as.API_SPECS.append(self.spec)
 
+        os.environ["AF_WEBUI_TOKEN_MODE"] = "token_only"
         self.tmp = tempfile.mkdtemp(prefix="af_expr_sub_")
         self.cfg = GatewayConfig(data_dir=self.tmp, env="staging")
         self.gw = Gateway(self.cfg)
@@ -423,6 +427,7 @@ class TestExprFieldSubstitution(unittest.TestCase):
             self._as.API_SPECS.remove(self.spec)
         except ValueError:
             pass
+        os.environ.pop("AF_WEBUI_TOKEN_MODE", None)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _set_cfg(self, name, d):
