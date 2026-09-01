@@ -123,23 +123,60 @@ def current_commit(repo: str) -> str:
         return ""
 
 
+def _version_file() -> str:
+    repo = _repo_dir()
+    return os.path.join(repo, "VERSION") if repo else ""
+
+
+def read_version() -> str:
+    """读取仓库根 VERSION 文件的版本号（网关发布版本，如 1.0.0）。
+
+    该文件随自更新 checkout 一并更新，故反映「实际运行版本」；缺失时回退到提交比对。
+    """
+    p = _version_file()
+    if p and os.path.isfile(p):
+        try:
+            with open(p, encoding="utf-8") as f:
+                return f.read().strip()
+        except Exception:
+            return ""
+    return ""
+
+
 def update_check(ref: Optional[str] = None) -> Dict:
-    """只读检查：当前提交 / 可用目标 / 是否可更新。失败不抛异常，返回 ok=True 且 available=False。"""
+    """只读检查：当前提交 / 可用目标 / 是否可更新。失败不抛异常，返回 ok=True 且 available=False。
+
+    可用判定优先级：
+      · 显式 ref → 以「目标提交 != 当前提交」为准（用户明确指定来源）。
+      · 未传 ref 且能读到运行版本号 → 以「最新远程 tag 版本 > 运行版本」为准（语义化）。
+      · 否则 → 以「最新 tag 提交 != 当前提交」为准（兜底）。
+    """
     repo = _repo_dir()
     if not repo or not _git_present():
         return {"ok": True, "git_present": False, "repo_dir": repo,
                 "available": False, "reason": "git 不可用或仓库未初始化（需重建含 git 的镜像）",
                 "current": current_commit(repo) if repo else "",
-                "target_ref": None, "target_commit": None, "tags": []}
+                "current_version": "", "latest_tag": None, "target_ref": None,
+                "target_commit": None, "tags": []}
     cur = current_commit(repo)
+    cur_ver = read_version()
     tags = list_remote_tags(repo)
     target_ref, target_commit, err = _resolve_target(ref, tags)
     if err:
         return {"ok": True, "git_present": True, "repo_dir": repo, "available": False,
-                "reason": err, "current": cur,
+                "reason": err, "current": cur, "current_version": cur_ver,
+                "latest_tag": (tags[0]["tag"] if tags else None),
                 "target_ref": target_ref, "target_commit": target_commit, "tags": tags}
-    available = bool(target_commit) and target_commit != cur
+    latest_tag = tags[0]["tag"] if tags else None
+    if ref:
+        available = bool(target_commit) and target_commit != cur
+    elif cur_ver and latest_tag:
+        # 语义化比对：v1.1.0 > 1.0.0
+        available = _ver_key(latest_tag) > _ver_key(cur_ver)
+    else:
+        available = bool(target_commit) and target_commit != cur
     return {"ok": True, "git_present": True, "repo_dir": repo, "current": cur,
+            "current_version": cur_ver, "latest_tag": latest_tag,
             "target_ref": target_ref, "target_commit": target_commit,
             "available": available,
             "reason": ("已是最新" if not available else f"可更新到 {target_ref}"),

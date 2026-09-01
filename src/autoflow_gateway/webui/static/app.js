@@ -2726,15 +2726,18 @@ async function loadUpdate() {
     }
     const cur = d.current ? d.current.slice(0, 12) : "—";
     const tgt = d.target_commit ? d.target_commit.slice(0, 12) : "—";
+    const curVer = d.current_version ? esc(d.current_version) : `<span style="color:var(--muted,#888)">未知（无 VERSION 文件）</span>`;
+    const latestTag = d.latest_tag ? esc(d.latest_tag) : "—";
     const tags = (d.tags || []).map((t) => `<li><code>${esc(t.tag)}</code> · ${esc((t.commit || "").slice(0, 12))}</li>`).join("");
     v.innerHTML = `
       <div class="view-head"><h2>在线更新</h2><span class="sub">从 GitHub 拉取更新（方案 C · 受控自更新）</span></div>
       <div class="card">
         <h3>当前状态</h3>
         <div class="desc">
-          当前提交：<code>${esc(cur)}</code><br>
-          目标提交：<code>${esc(tgt)}</code> ${d.available ? "" : "（已是最新）"}<br>
+          当前版本：<code>${curVer}</code> · 提交 <code>${esc(cur)}</code><br>
+          最新版本 tag：<code>${latestTag}</code> · 提交 <code>${esc(tgt)}</code><br>
           ${d.available ? `<b>可更新到 <code>${esc(d.target_ref || "")}</code></b>` : "<b>已是最新版本</b>"}
+          ${!d.available && d.current_version ? "" : ""}
         </div>
         ${d.available ? `<button class="btn primary" id="doUpdate" style="margin-top:10px">更新到 ${esc(d.target_ref || "最新版")}</button>` : ""}
         <div id="updateMsg" class="desc" style="margin-top:10px"></div>

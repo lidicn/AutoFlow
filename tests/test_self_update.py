@@ -110,6 +110,27 @@ class SelfUpdateTest(unittest.TestCase):
         chk2 = self_update.update_check(ref=self.tag_commit)
         self.assertEqual(chk2["target_commit"], self.tag_commit)
 
+    def _write_version(self, ver: str):
+        with open(os.path.join(self.repo, "VERSION"), "w", encoding="utf-8") as f:
+            f.write(ver + "\n")
+
+    def test_version_based_available(self):
+        # 活树 VERSION=1.0.0，最新远程 tag=v1.0.1 → 应判定「可更新」（语义化比对）
+        self._write_version("1.0.0")
+        chk = self_update.update_check()
+        self.assertTrue(chk["available"], chk)
+        self.assertEqual(chk["current_version"], "1.0.0")
+        self.assertEqual(chk["latest_tag"], "v1.0.1")
+        self.assertEqual(chk["target_ref"], "v1.0.1")
+
+    def test_version_equal_already_latest(self):
+        # 活树 VERSION=1.0.1，与最新 tag 同版本 → 已是最新，不触发更新
+        self._write_version("1.0.1")
+        chk = self_update.update_check()
+        self.assertFalse(chk["available"], chk)
+        self.assertEqual(chk["reason"], "已是最新")
+        self.assertEqual(chk["current_version"], "1.0.1")
+
     def test_already_latest_noop(self):
         # 先把工作树切到 tag 提交，再更新到同一 tag → 应判已最新，不触发 restart
         _git(self.repo, "checkout", "-f", self.tag_commit)
