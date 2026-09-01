@@ -1,3 +1,6 @@
+## 1.2.1 (2026-09-01)
+- 每个 Link API 单独的「安装到 Node-RED」安装按钮 + 卸载按钮（#C）：新增 POST /api/link-apis/{name}/install 单装端点，list_subflows 增加 needs_nr_flow 标志供前端显隐安装按钮。
+
 ## 1.2.0 (2026-09-01)
 - tab 链接逆生成 Link API（#C-tab）：WebUI 粘贴 NR tab 链接只读自省，注册 link_out 薄桥接，agent DSL 调用即命中用户 tab 入口
 
