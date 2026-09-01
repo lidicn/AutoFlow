@@ -121,6 +121,9 @@ PERM_RULES: Tuple[Tuple[Optional[Tuple[str, ...]], str, str], ...] = (
     (None, "/api/catalog/import", "admin"),
     (None, "/api/device-guard", "admin"),
     (None, "/api/first-run", "admin"),
+    # 受控自更新（方案 C）：仅 owner（开发者/网关自身运维身份）可触发
+    (None, "/api/admin/self-update", "owner"),
+    (None, "/api/admin/update-check", "owner"),
 )
 
 _DEFAULT_ROLE_BY_METHOD = {"GET": "viewer", "HEAD": "viewer", "OPTIONS": "viewer"}

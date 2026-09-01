@@ -10,6 +10,10 @@ COPY skills /app/skills
 COPY run.py /app/run.py
 WORKDIR /app
 
+# 受控自更新（方案 C）：容器内需要 git 以执行 fetch/checkout 自更新
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 # 用 uv 在虚拟环境安装（镜像内 /app/.venv）
 # 关键：editable(-e) 安装 —— 源码经 compose 的 ./src:/app/src 绑定挂载后，
 # 容器外改 NAS 共享盘源码、docker compose restart 即生效，无需重建镜像。

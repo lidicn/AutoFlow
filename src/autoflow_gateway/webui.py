@@ -412,6 +412,26 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     async def health(request: Request):
         return _js({"ok": True, "env": cfg.env, "service": "autoflow-webui"})
 
+    # ── 受控自更新（方案 C）：只读检查 + 触发更新 ──
+    async def update_check_endpoint(request: Request):
+        """只读：当前提交 / 可用目标 / 是否可更新。仅 owner。"""
+        try:
+            from . import self_update as _su
+            return _js(_su.update_check())
+        except Exception as e:
+            return _js({"ok": False, "error": f"更新检查失败: {e}"}, 500)
+
+    async def self_update_endpoint(request: Request):
+        """触发受控自更新（备份→fetch→checkout→py_compile→重启）。仅 owner。"""
+        b = await _body(request)
+        ref = (b.get("ref") or "").strip() or None
+        try:
+            from . import self_update as _su
+            res = _su.perform_update(ref=ref)
+        except Exception as e:
+            return _js({"ok": False, "error": f"更新失败: {e}"}, 500)
+        return _js(res, status=200 if res.get("ok") else 500)
+
     async def config_view(request: Request):
         return _js({
             "env": cfg.env,
@@ -1954,6 +1974,9 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/first-run", first_run_state, methods=["GET"]),
         Route("/api/first-run", first_run_accept, methods=["POST"]),
         Route("/api/diagnostics", diagnostics_view, methods=["GET"]),
+        # 受控自更新（方案 C）：仅 owner（开发者）可触发；WebUI RBAC 层把关
+        Route("/api/admin/update-check", update_check_endpoint, methods=["GET"]),
+        Route("/api/admin/self-update", self_update_endpoint, methods=["POST"]),
         # ── 账号登录 / 会话 / 用户管理（WebUI 专用）──
         # 注意顺序：/api/auth/sessions/{id} 必须排在 /api/auth/sessions 之后
         Route("/api/auth/state", auth_state, methods=["GET"]),

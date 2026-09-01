@@ -116,7 +116,7 @@ function fmtTime(s) {
 }
 
 // ── 导航（C1/C3：工作区 + 版本同步已移除，新增设置管理界面）──
-const TABS = ["dashboard", "safe", "proposals", "deployed", "subflows", "link_apis", "agents", "diagnostics", "notes", "settings", "help", "acp_tokens", "llm_settings", "llm_agent"];
+const TABS = ["dashboard", "safe", "proposals", "deployed", "subflows", "link_apis", "agents", "diagnostics", "notes", "settings", "help", "acp_tokens", "llm_settings", "llm_agent", "update"];
 function setTab(tab) {
   if (!TABS.includes(tab)) tab = "dashboard";
   $$(".navitem[data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
@@ -136,6 +136,7 @@ function setTab(tab) {
   else if (tab === "acp_tokens") loadAcpTokens();
   else if (tab === "llm_settings") loadLlmSettings();
   else if (tab === "llm_agent") loadLlmAgent();
+  else if (tab === "update") loadUpdate();
 }
 // ── 帮助（使用手册，内容静态写在 index.html 的 #view-help，仅做进入时滚顶）──
 function loadHelp() {
@@ -2708,6 +2709,60 @@ function _loadLlmChat() {
 }
 function _saveLlmChat() {
   try { localStorage.setItem(LLM_CHAT_KEY, JSON.stringify((_llmHistory || []).slice(-50))); } catch {}
+}
+
+// ── 在线更新（方案 C · 受控自更新）──
+async function loadUpdate() {
+  const v = $("#view-update");
+  v.innerHTML = `<div class="empty">加载中…</div>`;
+  try {
+    const r = await api("GET", "/admin/update-check");
+    const d = (r.data || {});
+    if (!r.ok) throw new Error(d.error || "加载失败");
+    if (!d.git_present) {
+      v.innerHTML = `<div class="view-head"><h2>在线更新</h2></div>
+        <div class="card"><div class="desc">当前环境未启用 git 自更新（容器内未安装 git 或仓库未初始化）。请改用镜像升级，或重建含 git 的镜像后在「设置 → 连接」中配置 <code>AF_REPO_DIR</code>。</div></div>`;
+      return;
+    }
+    const cur = d.current ? d.current.slice(0, 12) : "—";
+    const tgt = d.target_commit ? d.target_commit.slice(0, 12) : "—";
+    const tags = (d.tags || []).map((t) => `<li><code>${esc(t.tag)}</code> · ${esc((t.commit || "").slice(0, 12))}</li>`).join("");
+    v.innerHTML = `
+      <div class="view-head"><h2>在线更新</h2><span class="sub">从 GitHub 拉取更新（方案 C · 受控自更新）</span></div>
+      <div class="card">
+        <h3>当前状态</h3>
+        <div class="desc">
+          当前提交：<code>${esc(cur)}</code><br>
+          目标提交：<code>${esc(tgt)}</code> ${d.available ? "" : "（已是最新）"}<br>
+          ${d.available ? `<b>可更新到 <code>${esc(d.target_ref || "")}</code></b>` : "<b>已是最新版本</b>"}
+        </div>
+        ${d.available ? `<button class="btn primary" id="doUpdate" style="margin-top:10px">更新到 ${esc(d.target_ref || "最新版")}</button>` : ""}
+        <div id="updateMsg" class="desc" style="margin-top:10px"></div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <h3>可用版本 tag</h3>
+        <ul class="desc">${tags || "<li>无</li>"}</ul>
+      </div>`;
+    const btn = $("#doUpdate");
+    if (btn) btn.onclick = doUpdate;
+  } catch (e) {
+    v.innerHTML = errBox(e.message || "加载失败", loadUpdate);
+  }
+}
+async function doUpdate() {
+  const msg = $("#updateMsg");
+  if (msg) msg.textContent = "正在备份并拉取更新，完成后网关会自动重启（约数秒）…";
+  try {
+    const r = await api("POST", "/admin/self-update", {});
+    const d = (r.data || {});
+    if (!r.ok || !d.ok) {
+      if (msg) msg.innerHTML = `<span style="color:var(--danger,#c0392b)">更新失败：${esc(d.error || "未知错误")}</span>（已自动回滚，未重启）`;
+      return;
+    }
+    if (msg) msg.innerHTML = `已应用更新（<code>${esc((d.target_commit || "").slice(0, 12))}</code>），网关即将重启，请稍候刷新页面。<br>备份：${esc(d.backup || "")}`;
+  } catch (e) {
+    if (msg) msg.textContent = "更新请求出错：" + (e.message || "");
+  }
 }
 
 async function loadLlmAgent() {
