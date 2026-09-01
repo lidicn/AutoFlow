@@ -27,9 +27,12 @@ services:
       AF_MCP_PATH: "/mcp"
       # ── 受控自更新（方案 C）──
       # 仓库根挂进容器，端点用 git 原地拉取更新；AF_REPO_DIR 指向挂载点。
-      # 中国大陆网络可达性：如直连 GitHub 失败，设 AF_GIT_PROXY=http://<代理> 让其生效。
+      # 中国大陆网络：GitHub HTTPS 被 TLS 截断，故自更新走 SSH remote（需挂载宿主机
+      # github 私钥到 /root/.ssh，见下方 volumes）。如改用代理，可改 AF_GIT_REMOTE 为
+      # https 并设 AF_GIT_PROXY=http://<代理>。
       AF_REPO_DIR: "/repo"
-      # AF_GIT_PROXY: "http://127.0.0.1:7890"
+      AF_GIT_REMOTE: "git@github.com:lidicn/AutoFlow.git"
+      GIT_SSH_COMMAND: "ssh -o StrictHostKeyChecking=accept-new"
     volumes:
       # 源码热编辑：NAS 共享盘改 src，docker compose restart 即生效（配合 Dockerfile 的 -e 安装）
       - ./src:/app/src
@@ -39,3 +42,6 @@ services:
       - ./data:/data
       # 仓库根（含 .git）：自更新端点在此执行 git fetch/checkout，直接改写 NAS 活树
       - .:/repo
+      # 宿主机 github 私钥（只读）：供容器内 git 经 SSH 拉取更新。如改用专用只读部署密钥，
+      # 把这一行指向该密钥文件即可（最小权限原则）。
+      - /home/lidicn/.ssh:/root/.ssh:ro
