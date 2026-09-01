@@ -1,3 +1,6 @@
+## 1.2.0 (2026-09-01)
+- tab 链接逆生成 Link API（#C-tab）：WebUI 粘贴 NR tab 链接只读自省，注册 link_out 薄桥接，agent DSL 调用即命中用户 tab 入口
+
 ## 1.1.0 (2026-08-31)
 - 版本管理落地后首个递增版：self_update 语义化「已是最新」判定 + WebUI 显示运行版本号
 
