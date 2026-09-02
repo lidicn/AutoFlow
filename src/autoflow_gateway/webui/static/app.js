@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 
 // ── 基础工具 ──
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -35,7 +35,7 @@ async function api(method, path, body, opts = {}) {
     return { ok: res.ok, status: res.status, data };
   } catch (e) {
     if (e && e.name === "AbortError") {
-      throw new Error(`请求超时（${timeoutMs / 1000}s）：网关可能正忙或网络不通，请重试`);
+      throw new Error(`请求超时（${timeoutMs / 1000}秒）：网关可能正忙或网络不通，请重试`);
     }
     throw e;
   } finally {
@@ -58,12 +58,14 @@ function errBox(msg, retryFn) {
   return html;
 }
 
-function toast(msg) {
+function toast(msg, type) {
   const t = $("#toast");
   t.textContent = msg;
+  t.className = "toast" + (type ? " " + type : "");
   t.hidden = false;
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => (t.hidden = true), 2600);
+  const dur = type === "error" ? 4000 : type === "warn" ? 3200 : 2600;
+  toast._t = setTimeout(() => (t.hidden = true), dur);
 }
 function modal(title, html) {
   $("#modalTitle").textContent = title;
@@ -80,9 +82,9 @@ function badge(cls, text) { return `<span class="badge ${cls}">${esc(text)}</spa
 const MODES = ["normal", "expert", "developer"];
 function modeLabel(m) {
   return ({
-    normal: "普通模式（仅DSL提案，连 /mcp）",
-    expert: "专家模式（可自由部署，连 /mcp-white）",
-    developer: "开发者模式（运维/调试，连 /mcp-admin）"
+    normal: "标准模式（仅 DSL 提案）",
+    expert: "高级模式（可直接部署）",
+    developer: "管理员模式（运维/调试）"
   })[m] || m;
 }
 // 身份模式 → MCP 端点 path（用于新建后展示正确连接地址）
@@ -96,15 +98,15 @@ function renderAgentModeGuide() {
       <h3>身份模式说明</h3>
       <p class="desc">模式决定该 agent 能领什么任务、看到哪些 MCP 工具、能否直接部署。创建后由你在 WebUI 设定，agent 自身不可更改。</p>
       <div class="mode-item">
-        <h4>普通模式 normal — 仅 DSL 提案</h4>
+        <h4>标准模式（normal）：仅提交 DSL，最安全</h4>
         <p>连 <code>/mcp</code>。只能写 DSL 提案，<b>看不到部署刀</b>。所有上线必须经 WebUI 人工批准。默认、最安全，适合公开/不可信的 LLM agent。</p>
       </div>
       <div class="mode-item">
-        <h4>专家模式 expert — 可自由部署</h4>
+        <h4>高级模式（expert）：可提交 raw flow 并直接部署</h4>
         <p>连 <code>/mcp-white</code>。可手写原生节点、自由部署、使用测试杠杆；双任务池都能领（auto_wb + auto）。适合你信任的内部 agent。</p>
       </div>
       <div class="mode-item">
-        <h4>开发者模式 developer — 运维/调试专用</h4>
+        <h4>管理员模式（admin）：运维/调试专用</h4>
         <p>连 <code>/mcp-admin</code>。可调用全部工具（含运维刀、测试杠杆、任务池）。仅限网关自身运维身份，普通 agent 不应持有。</p>
       </div>
       <div class="hint">安全模型：模式是部署时由你设定的<b>信任等级</b>，不是 agent 运行时自选——普通模式永远无法绕过 verify+人工批准闸。底层端点隔离（/mcp、/mcp-white、/mcp-admin）保持不变。</div>
@@ -116,13 +118,14 @@ function fmtTime(s) {
 }
 
 // ── 导航（C1/C3：工作区 + 版本同步已移除，新增设置管理界面）──
-const TABS = ["dashboard", "safe", "proposals", "deployed", "subflows", "link_apis", "agents", "diagnostics", "notes", "settings", "help", "acp_tokens", "llm_settings", "llm_agent", "update"];
+const TABS = ["dashboard", "tutorials", "safe", "proposals", "deployed", "subflows", "link_apis", "agents", "diagnostics", "notes", "settings", "help", "acp_tokens", "llm_settings", "llm_agent", "update"];
 function setTab(tab) {
   if (!TABS.includes(tab)) tab = "dashboard";
   $$(".navitem[data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   closeMobileSheet();
   TABS.forEach((t) => ($("#view-" + t).hidden = t !== tab));
   if (tab === "dashboard") loadDashboard();
+  else if (tab === "tutorials") { if (typeof renderTutorialList === "function") renderTutorialList(); }
   else if (tab === "agents") loadAgents();
   else if (tab === "safe") loadSafeGate();
   else if (tab === "proposals") loadProposals();
@@ -137,6 +140,8 @@ function setTab(tab) {
   else if (tab === "llm_settings") loadLlmSettings();
   else if (tab === "llm_agent") loadLlmAgent();
   else if (tab === "update") loadUpdate();
+  // 首次访问引导
+  if (typeof checkFirstVisit === "function") checkFirstVisit(tab);
 }
 // ── 帮助（使用手册，内容静态写在 index.html 的 #view-help，仅做进入时滚顶）──
 function loadHelp() {
@@ -168,18 +173,18 @@ async function loadDashboard() {
     v.innerHTML = `
       <div class="view-head"><h2>概览</h2><span class="sub">环境 ${esc(c.env || "")} ｜ 普通 ${esc(c.mcp || "")} ｜ 专家 ${esc(c.mcp_white || "")} ｜ 开发者 ${esc(c.mcp_admin || "")}</span></div>
       <div class="grid cols-4">
-        <div class="card"><div class="meta">已注册 Agent</div><div class="stat">${counts.agents}</div></div>
+        <div class="card"><div class="meta">已接入 Agent</div><div class="stat">${counts.agents}</div></div>
         <div class="card"><div class="meta">待确认操作</div><div class="stat">${counts.pending}</div></div>
-        <div class="card"><div class="meta">待审提案(raw)</div><div class="stat">${counts.raw}</div></div>
+        <div class="card"><div class="meta">待审 raw flow</div><div class="stat">${counts.raw}</div></div>
         <div class="card"><div class="meta">已部署 flow</div><div class="stat">${counts.deployed}</div></div>
       </div>
       <div class="card" style="margin-top:14px">
         <h3>快速上手</h3>
         <div class="desc">
-          1. 到 <b>Agents</b> 面板创建 agent（如 deepseek++），复制生成的身份识别码。<br>
-          2. 在 agent 的 MCP 配置里填 <code>Authorization: Bearer &lt;身份码&gt;</code>，指向 <code>${esc(c.mcp || "")}</code>。<br>
-          3. agent 提交场景 DSL 后，到 <b>提案</b> 面板查看闸门结果，点「部署到 NR」直接部署。<br>
-          4. 部署后在 <b>已部署</b> 面板可随时安全撤回（只删网关自己部署的 flow）。<br>
+          1. 到 <b>Agent 管理</b> 创建 Agent（如 deepseek++），复制生成的接入令牌。<br>
+          2. 在 agent 的 MCP 配置里填 <code>Authorization: Bearer &lt;接入令牌&gt;</code>，指向 <code>${esc(c.mcp || "")}</code>。<br>
+          3. agent 提交场景 DSL 后，到 <b>提案</b> 面板查看闸门结果，点「部署到 NR」部署。<br>
+          4. 部署后在 <b>已部署</b> 面板可随时安全撤回（仅移除本网关部署的 flow）。<br>
           5. <b>笔记</b> 记录你那些暂时落不了地的智能家居想法。
         </div>
       </div>`;
@@ -208,18 +213,18 @@ async function loadWorkspace() {
     const ws = $("#ws-body");
     ws.innerHTML = `
       <div class="card ws-cmd" style="margin-top:14px">
-        <h3>💬 直达 DeepSeek 指令</h3>
+        <h3>💬 给 Agent 下指令</h3>
         <p class="desc">用大白话给常驻的 DeepSeek 下达任务（点火/查询/编排等）。它用 autoflow 工具执行，完成后经 Bark 回报。给我（WorkBuddy）的指令请仍走远程会话。</p>
         <textarea id="ws-cmd-text" style="width:100%;min-height:72px;border:1px solid var(--border);border-radius:6px;padding:10px;font-size:14px;background:var(--bg);color:var(--text)" placeholder="例如：把书房 H5 场景重新点火一遍；或：查询书房所有灯的当前状态"></textarea>
         <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
-          <button class="btn primary" id="ws-cmd-send" style="flex:0 0 auto">发送给 DeepSeek</button>
+          <button class="btn primary" id="ws-cmd-send" style="flex:0 0 auto">发送</button>
           <span class="meta" id="ws-cmd-hint">Ctrl/⌘ + Enter 发送</span>
         </div>
         <div id="ws-cmd-hist" style="margin-top:12px">${cmds.length ? "" : `<div class="empty">还没有下达过指令。</div>`}</div>
       </div>
       <div class="card ws-decide" style="margin-top:14px">
         <h3>🗳️ 待你决策${decs.length ? `（${decs.length}）` : ""}</h3>
-        <p class="desc">DeepSeek 抛出的选择题，点选即可；选择会自动回灌给它继续。</p>
+        <p class="desc">Agent 遇到选择题时在此等你决策，选择后自动回灌继续。</p>
         <div id="ws-decisions">${decs.length ? "" : `<div class="empty">暂无待决策项 🎉</div>`}</div>
       </div>
       <div class="grid cols-2" style="margin-top:14px">
@@ -253,13 +258,13 @@ async function loadWorkspace() {
       const text = (ta.value || "").trim();
       if (!text) { toast("请输入指令内容"); return; }
       const btn = $("#ws-cmd-send");
-      btn.disabled = true; btn.textContent = "投递中…";
+      btn.disabled = true; btn.textContent = "发送中…";
       try {
         const r = await api("POST", "/commands", { text });
-        if (r.ok) { ta.value = ""; toast("已投递给 DeepSeek，完成后 Bark 回报"); }
+        if (r.ok) { ta.value = ""; toast("已发送，完成后 Bark 通知"); }
         else toast("失败：" + (r.data?.error || r.status));
-      } catch (e) { toast(e.message || "投递失败"); }
-      btn.disabled = false; btn.textContent = "发送给 DeepSeek";
+      } catch (e) { toast(e.message || "发送失败"); }
+      btn.disabled = false; btn.textContent = "发送";
       await refreshCmdHist();
     };
     $("#ws-cmd-send").onclick = cmdSend;
@@ -278,9 +283,9 @@ async function loadWorkspace() {
 function cmdStatusBadge(s) {
   const map = {
     queued: ["排队中", "risk-low"],
-    dispatching: ["投递中", "risk-medium"],
+    dispatching: ["发送中", "risk-medium"],
     dispatched: ["已送达", "risk-low"],
-    failed: ["投递失败", "risk-high"],
+    failed: ["发送失败", "risk-high"],
   };
   const [label, cls] = map[s] || [s || "?", "risk-low"];
   return badge(cls, label);
@@ -359,7 +364,7 @@ async function loadAgents() {
           <div class="field"><label>身份模式</label>
             <select id="a-mode">${MODES.map((m) => `<option value="${m}">${modeLabel(m)}</option>`).join("")}</select></div>
           <div class="field"><label>备注</label><textarea id="a-notes" placeholder="可选"></textarea></div>
-          <button class="btn primary" id="a-create">生成身份识别码</button>
+          <button class="btn primary" id="a-create">生成接入令牌</button>
         </div>
       </div>
       ${renderAgentModeGuide()}
@@ -371,7 +376,7 @@ async function loadAgents() {
     const list = $("#a-list");
     const agents = (r.data?.agents || []).slice()
       .sort((a, b) => (a.name || "").localeCompare(b.name || "", "zh-Hans-CN"));
-    if (!agents.length) { list.innerHTML = `<div class="empty">还没有 agent，先在上方创建。</div>`; return; }
+    if (!agents.length) { list.innerHTML = `<div class="empty">还没有 Agent，先在上方创建。</div>`; return; }
     list.innerHTML = agents.map((a) => `
       <div class="item">
         <div class="row">
@@ -383,8 +388,8 @@ async function loadAgents() {
         ${a.notes ? `<div class="desc">备注：${esc(a.notes)}</div>` : ""}
         <div class="actions">
           <button class="btn sm" data-edit="${esc(a.agent_id)}">编辑</button>
-          <button class="btn sm" data-regen="${esc(a.agent_id)}">重置身份码</button>
-          <button class="btn sm danger" data-revoke="${esc(a.agent_id)}">吊销</button>
+          <button class="btn sm" data-regen="${esc(a.agent_id)}">重置接入令牌</button>
+          <button class="btn sm danger" data-revoke="${esc(a.agent_id)}">停用</button>
           <button class="btn sm danger" data-del="${esc(a.agent_id)}">删除</button>
         </div>
       </div>`).join("");
@@ -396,43 +401,43 @@ async function loadAgents() {
 }
 async function createAgent() {
   const name = $("#a-name").value.trim();
-  if (!name) return toast("请填名称");
+  if (!name) return toast("请填写名称");
   const r = await api("POST", "/agents", { name, mode: $("#a-mode").value, notes: $("#a-notes").value });
   if (!r.ok) return toast("创建失败：" + (r.data?.error || r.status));
   const a = r.data.agent;
   const ep = endpointForMode(a.mode);
   const fullUrl = `${location.protocol}//${location.host}${ep}`;
-  modal("身份识别码已生成（仅此一次）",
-    `<p>请复制下方身份码，填入 <b>${esc(a.name)}</b> 的 MCP 配置：</p>
+  modal("接入令牌已生成（仅此一次）",
+    `<p>请复制下方接入令牌，填入 <b>${esc(a.name)}</b> 的 MCP 配置：</p>
      <div class="code-box">${esc(a.identity_code)}</div>
      <p class="desc">MCP 服务器地址：<code>${esc(fullUrl)}</code><br>请求头：<code>Authorization: Bearer ${esc(a.identity_code)}</code></p>`);
   loadAgents();
 }
 async function regenAgent(id) {
-  if (!confirm("重置后旧身份码立即失效，确定？")) return;
+  if (!confirm("重置后旧接入令牌立即失效，确定？")) return;
   const r = await api("POST", `/agents/${id}/regen`);
   if (!r.ok) return toast("失败：" + (r.data?.error || r.status));
-  modal("新身份识别码（仅此一次）", `<div class="code-box">${esc(r.data.identity_code)}</div>`);
+  modal("新接入令牌（仅此一次）", `<div class="code-box">${esc(r.data.identity_code)}</div>`);
   loadAgents();
 }
 async function revokeAgent(id) {
-  if (!confirm("吊销后该 agent 无法再连接网关（行仍保留，可恢复），确定？")) return;
+  if (!confirm("停用后该 Agent 无法连接网关（行仍保留，可恢复），确定？")) return;
   const r = await api("POST", `/agents/${id}/revoke`);
-  toast(r.ok ? "已吊销" : "失败：" + (r.data?.error || r.status));
+  toast(r.ok ? "已停用" : "失败：" + (r.data?.error || r.status));
   if (r.ok) loadAgents();
 }
 async function deleteAgent(id) {
-  if (!confirm("⚠️ 真删除：该 agent 将从身份库彻底移除（含身份码哈希），不可恢复。确定？")) return;
+  if (!confirm("⚠️ 彻底删除：该 Agent 将从身份库彻底移除（含接入令牌哈希），不可恢复。确定？")) return;
   const r = await api("DELETE", `/agents/${id}`);
-  toast(r.ok ? "已彻底删除" : "失败：" + (r.data?.error || r.status));
+  toast(r.ok ? "已删除" : "失败：" + (r.data?.error || r.status));
   if (r.ok) loadAgents();
 }
 async function editAgent(id) {
   const r = await api("GET", "/agents");
   const a = (r.data?.agents || []).find((x) => x.agent_id === id);
-  if (!a) return toast("找不到该 agent");
+  if (!a) return toast("找不到该 Agent");
   modal("编辑 Agent", `
-    <p class="desc">身份码不可改（需重置请点卡片上「重置身份码」）。身份模式（普通/专家/开发者）用下方下拉框设置，无需再写 notes 魔法串。</p>
+    <p class="desc">接入令牌不可改（需重置请点卡片上「重置接入令牌」）。身份模式（普通/专家/开发者）用下方下拉框设置，无需再写 notes 魔法串。</p>
     <div class="field"><label>名称</label><input id="e-name" value="${esc(a.name)}"></div>
     <div class="field"><label>身份模式</label>
       <select id="e-mode">${MODES.map((m) => `<option value="${m}" ${m === (a.mode || "normal") ? "selected" : ""}>${modeLabel(m)}</option>`).join("")}</select></div>
@@ -461,7 +466,7 @@ async function saveAgent(id) {
 
 
 
-// ── 场景提案（部署候选） ──
+// ── 待审核流程（部署候选） ──
 // 注：经验沉淀(P5)已推迟——DSL 是自顶向下编码经验，与自底向上提取 skill 方向相反。
 //       本页面只处理 agent 提交的 DSL 部署候选：raw → 确认闸 → NR。
 
@@ -469,7 +474,7 @@ let _allProposals = [];  // 全量数据，供搜索过滤
 
 function _renderProposals(items) {
   const list = $("#p-list");
-  if (!items.length) { list.innerHTML = `<div class="empty">没有匹配的提案。</div>`; return; }
+  if (!items.length) { list.innerHTML = `<div class="empty">没有匹配的流程。</div>`; return; }
   list.innerHTML = items.map((p) => {
       // DSL 提案：content 里存的是 {dsl, gate, node_count} JSON
       // raw_flow 提案：content 里存的是 {type:"raw_flow", flow, node_count, blocking_rules, lint_*, logic}
@@ -499,10 +504,10 @@ function _renderProposals(items) {
         const br = (dslMeta.blocking_rules || []).join(",");
         const logicBad = (dslMeta.logic?.unreachable_actions || []).length > 0;
         rawMeta = `
-          <div class="desc">原生 flow：${nodeCount ?? "?"} 节点 ｜ 静态检查 ${le} error / ${lw} warning
+          <div class="desc">原生 flow：${nodeCount ?? "?"} 节点 ｜ 静态检查 ${le} 错误 / ${lw} 警告
             ${br ? ` ｜ <span style="color:#c0392b">硬伤(${esc(br)})</span>` : ""}
             ${logicBad ? ` ｜ <span style="color:#c0392b">逻辑不可达</span>` : ""}</div>
-          <div class="desc">部署前需人工审核此 flow（不自动落 NR）。</div>`;
+          <div class="desc">部署前需人工审核（不会自动部署到 NR）。</div>`;
       }
       let subflowMeta = "";
       if (isSubflow) {
@@ -511,14 +516,15 @@ function _renderProposals(items) {
         const sfNc = dslMeta?.node_count ?? "?";
         subflowMeta = `
           <div class="desc">子流程提案：DSL 调用名 <b>${esc(sn)}</b> ｜ NR 子流程 id <code>${esc(sfId || "?")}</code> ｜ ${esc(String(sfNc))} 节点</div>
-          <div class="desc">人类点「注册子流程」后：写 NR 子流程实例 + 登记子流程注册表，agent 即可经 MCP 调用。</div>`;
+          <div class="desc">点「注册子流程」后：在 NR 创建子流程实例并登记注册表，Agent 可经 MCP 调用。</div>`;
       }
+      const _pStatusCls = gatePassed ? " status-pass" : (gate.passed === false ? " status-fail" : (p.requires_review ? " status-review" : ""));
       return `
-      <div class="item">
+      <div class="item proposal-item${_pStatusCls}">
         <div class="row">
           <div><span class="title">${esc(p.title)}</span> ${p.id ? `<span class="meta" title="${esc(p.id)}">(${esc(p.id)})</span>` : ""}</div>
           <div>${badge("kind-" + kindBadge, kindBadge)} ${badge("st-" + p.status, p.status)}
-            ${gatePassed ? badge("ok", "闸门 PASS") : (gate.passed === false ? badge("danger", "闸门 FAIL") : "")}
+            ${gatePassed ? badge("ok", "安全闸 PASS") : (gate.passed === false ? badge("danger", "安全闸 FAIL") : "")}
             ${badge(srcBadgeCls, srcBadgeTxt)} ${badge(reviewBadgeCls, reviewBadgeTxt)}
             ${p.archived_at ? badge("kind-idea", "已归档") : ""}
           </div>
@@ -532,7 +538,7 @@ function _renderProposals(items) {
           <b>闸门断言</b>：
           ${gate.assertions.map((a) => `<span style="margin-right:8px">${a.ok ? "✅" : "❌"} ${esc(a.entity_id || a.check)}=${esc(a.expected)}</span>`).join("")}
         </div>` : ""}
-        ${nodeCount && isDsl ? `<div class="desc">编译产物：${nodeCount} 节点 ｜ 无 Function：✅</div>` : ""}
+        ${nodeCount && isDsl ? `<div class="desc">编译产物：${nodeCount} 节点 ｜ 无 Function 节点：✅</div>` : ""}
         <div class="actions">
           ${canDeploy ? `<button class="btn sm primary" data-dep="${esc(p.id)}">${isSubflow ? "注册子流程" : (p.deployed_flow_id ? "重新部署到 NR" : "部署到 NR")}</button>` : ""}
           ${p.status !== "rejected" ? `<button class="btn sm danger" data-prej="${esc(p.id)}">拒绝</button>` : ""}
@@ -577,7 +583,7 @@ let _propTotal = 0;
 
 async function loadProposals() {
   const v = $("#view-proposals");
-  v.innerHTML = `<div class="view-head"><h2>场景提案</h2><span class="sub">agent 提交的 DSL 场景，经闸门验证后可部署到 Node-RED</span></div>
+  v.innerHTML = `<div class="view-head"><h2>待审核流程</h2><span class="sub">Agent 提交的 DSL/flow，经安全闸验证后可部署到 Node-RED</span></div>
     <div class="search-bar" style="margin:10px 0;display:flex;gap:8px;align-items:center">
       <input id="p-search" type="text" placeholder="🔍 搜索当前页提案（标题 / ID / DSL 内容）…" style="flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--bg);color:var(--text)">
       <span id="p-filter-count" style="font-size:12px;color:var(--text-dim);white-space:nowrap"></span>
@@ -642,13 +648,13 @@ async function rejectProposal(id) {
   if (r.ok) loadProposals();
 }
 async function deleteProposal(id) {
-  if (!confirm("删除该提案？（不可恢复；若已部署到 NR，对应 flow 不会被自动撤回，需到「已部署」面板手动撤回）")) return;
+  if (!confirm("删除该流程？（不可恢复；若已部署，对应 flow 不会被自动移除，需到「已部署」手动移除）")) return;
   const r = await api("DELETE", `/proposals/${id}/delete`);
   toast(r.ok ? "已删除" : "失败：" + (r.data?.error || r.status));
   if (r.ok) loadProposals();
 }
 async function archiveProposal(id) {
-  if (!confirm("归档该提案？（退休语义：默认从活跃列表隐藏，仍可经「显示已归档」查看与恢复）")) return;
+  if (!confirm("归档该提案？（退休语义：默认从有效列表隐藏，仍可经「显示已归档」查看与恢复）")) return;
   const r = await api("POST", `/proposals/${id}/archive`);
   toast(r.ok ? "已归档" : "失败：" + (r.data?.error || r.status));
   if (r.ok) _loadProposalPage();
@@ -664,12 +670,12 @@ async function deployProposal(id) {
   try { isSub = !!(p && (p.kind === "subflow" || JSON.parse(p.content || "{}").type === "subflow")); } catch (e) {}
   const msg = isSub
     ? "确定注册该子流程到网关？\n（写 NR 子流程实例 + 登记子流程注册表，注册后 agent 可经 MCP 调用。冲突或失败不会动 NR。）"
-    : "确定部署该场景到 Node-RED？部署后可在「已部署」面板随时安全撤回。";
+    : "确定部署到 Node-RED？部署后可在「已部署」安全撤回。";
   if (!confirm(msg)) return;
   const r = await api("POST", `/proposals/${id}/deploy`, { target: "prod" });
   if (!r.ok) {
     if (r.data?.conflict) return toast("冲突：" + (r.data.error || "同名子流程已存在，可改名或 force 重建"));
-    // 安全闸 / staging 闸门拦截：常驻对话框，必须点「确定」才关闭（不自动消失）
+    // 安全闸 / 测试环境拦截：常驻对话框，必须点「确定」才关闭（不自动消失）
     const errText = String(r.data?.error || r.status || "未知错误");
     const isGate = r.data?.stage === "gate" || /闸门|受保护对象|安全闸/.test(errText);
     if (isGate) {
@@ -678,10 +684,10 @@ async function deployProposal(id) {
       const detail = r.data?.gate
         ? `<pre style="white-space:pre-wrap;max-height:240px;overflow:auto;background:#f6f6f6;padding:8px;border-radius:6px">${esc(JSON.stringify(r.data.gate, null, 2))}</pre>`
         : "";
-      modal("安全闸 / staging 闸门拦截",
+      modal("安全闸 / 测试环境拦截",
         `<p style="line-height:1.7">${esc(errText)}</p>` +
         detail + ent +
-        `<p style="color:#888">未部署。请检查 DSL 与预期后置条件是否一致，或调整安全闸规则后重试。</p>` +
+        `<p style="color:#888">未部署。请检查 DSL 与预期状态是否一致，或调整安全闸规则后重试。</p>` +
         `<div style="margin-top:14px;text-align:right"><button class="btn" onclick="closeModal()">确定</button></div>`);
       return;
     }
@@ -695,15 +701,15 @@ async function deployProposal(id) {
 // ── 已部署 ──
 async function loadDeployed() {
   const v = $("#view-deployed");
-  v.innerHTML = `<div class="view-head"><h2>已部署</h2><span class="sub">本网关部署到 Node-RED 的 flow，可随时安全撤回</span></div>
+  v.innerHTML = `<div class="view-head"><h2>已部署</h2><span class="sub">本网关部署到 Node-RED 的 flow，可安全撤回（仅移除网关节点）</span></div>
     <div id="d-list"><div class="empty">加载中…</div></div>`;
   try {
     const r = await api("GET", "/deployed");
     const list = $("#d-list");
     const items = r.data?.deployed || [];
-    if (!items.length) { list.innerHTML = `<div class="empty">还没有通过网关部署的 flow。</div>`; return; }
+    if (!items.length) { list.innerHTML = `<div class="empty">还没有通过本网关部署的 flow。</div>`; return; }
     list.innerHTML = items.map((d) => `
-      <div class="item${d.stale ? " stale" : ""}">
+      <div class="item deployed-item${d.stale ? " status-stale stale" : " status-ok"}">
         <div class="row">
           <div><span class="title">${esc(d.label)}</span> <span class="meta" title="${esc(d.flow_id||'')}">(${esc(d.flow_id||'')})</span></div>
           <div>${d.stale ? badge("stale", "注册表漂移") : badge("ok", "已部署")}</div>
@@ -721,19 +727,19 @@ async function loadDeployed() {
   } catch (e) { $("#d-list").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
 async function undeployProposal(id) {
-  if (!confirm("确定撤回该网关部署？\n若你在此 tab 中另有自己的节点，将被保留，仅移除网关写入的节点。")) return;
+  if (!confirm("确定撤回？\n该 tab 中你自己的节点将被保留，仅移除本网关写入的节点。")) return;
   let r = await api("POST", `/deployed/${id}/undeploy`, {});
   if (!r.ok && r.data?.code === "nr_unreachable") {
-    if (confirm("NR 当前不可达，无法确认 flow 状态。\n若你确认已在 NR 手动删除该 flow，是否只清理网关注册表？")) {
+    if (confirm("Node-RED 当前不可达，无法确认 flow 状态。\n若你确认已在 NR 手动删除该 flow，是否仅清理本网关注册表？")) {
       r = await api("POST", `/deployed/${id}/undeploy`, { force: true });
     }
   }
   if (r.ok) {
     const d = r.data || {};
     if (d.action === "trimmed_tab") {
-      toast(`已移除网关节点 ${d.gateway_nodes_removed} 个，保留你的 ${d.user_nodes_preserved} 个节点`);
+      toast(`已移除网关节点 ${d.gateway_nodes_removed} 个，保留你的节点 ${d.user_nodes_preserved} 个`);
     } else if (d.action === "deleted_tab") {
-      toast(`已撤回并删除 tab「${d.label || id}」`);
+      toast(`已撤回并删除流程页「${d.label || id}」`);
     } else {
       toast("已撤回：" + (d.label || id));
     }
@@ -751,7 +757,7 @@ async function triggerFlow(id) {
   const n = (d.triggered || []).length;
   const errs = (d.errors || []).length;
   if (d.warning) { toast("已触发，但 " + d.warning); return; }
-  toast(`已触发 ${n} 个 inject${errs ? `，失败 ${errs}` : ""}。可到「诊断」页做 debug 回看`);
+  toast(`已触发 ${n} 个 inject 节点${errs ? `，失败 ${errs}` : ""}。可到「诊断」查看 debug 输出`);
 }
 
 // ── 笔记 ──
@@ -970,23 +976,23 @@ function renderLab() {
 
   v.innerHTML = `
     <div class="lab-header">
-      <h2>🧪 白盒部署</h2>
-      <p class="desc">投喂提示词给各 Agent → 粘贴产出 flow JSON → 校验/部署到 NR。收集失败模式反哺编译器。</p>
+      <h2>🧪 直接部署模式</h2>
+      <p class="desc">输入提示词给 Agent → 粘贴产出的 flow JSON → 校验/部署到 NR。</p>
     </div>
     <div class="lab-tabs">${tabs}</div>
     <div class="lab-workspace">
       <div class="lab-panel lab-prompt">
         <h3>📋 提示词</h3>
-        <p class="hint">从 <code>docs/test_prompts.md</code> 复制 L1-L7 提示词，粘贴到下方后发给 ${agent.id}。</p>
+        <p class="hint">从 docs/test_prompts.md 复制提示词，粘贴到下方后发给 ${agent.id}。</p>
         <textarea id="labPrompt" placeholder="在此粘贴提示词（供参考，不影响部署）..."></textarea>
         <div class="lab-actions">
-          <button class="btn primary" id="labValidate">仅校验（dry-run）</button>
+          <button class="btn primary" id="labValidate">仅校验（预览）</button>
           <button class="btn" id="labDeploy">部署到 NR</button>
         </div>
       </div>
       <div class="lab-panel lab-flow">
         <h3>📦 Flow JSON <span class="badge">${agent.id}</span></h3>
-        <p class="hint">粘贴 Agent 产出的 nodes 数组或完整 flow JSON。支持纯 nodes 数组或含 id/label 的完整 flow。</p>
+        <p class="hint">粘贴 Agent 产出的 nodes 数组或完整 flow JSON。</p>
         <textarea id="labFlowJson" placeholder='["id":"n1","type":"inject",...] 或 {"id":"flow1","label":"...","nodes":[...]}'></textarea>
       </div>
     </div>
@@ -1037,7 +1043,7 @@ function renderLab() {
 
 async function handleLabAction(mode) {
   const raw = $("#labFlowJson").value.trim();
-  if (!raw) { toast("请先粘贴 Flow JSON"); return; }
+  if (!raw) { toast("请先粘贴 flow JSON"); return; }
 
   let flowData;
   try {
@@ -1129,12 +1135,12 @@ async function loadSpotcheck() {
         <span class="meta" id="sc-task-meta"></span>
       </div>
       <div class="field">
-        <label>Tab 标签（部署到 NR 的名称）</label>
+        <label>tab 名称（部署到 NR 的名称）</label>
         <input id="sc-label" placeholder="抽查·wb_xxx">
       </div>
       <div class="actions">
-        <button class="btn" id="sc-dry">预览合并（dry-run）</button>
-        <button class="btn primary" id="sc-deploy">提交为提案（待审核）</button>
+        <button class="btn" id="sc-dry">预览合并</button>
+        <button class="btn primary" id="sc-deploy">提交为待审核</button>
       </div>
     </div>
     <div class="sc-result lab-result" id="scResult" hidden></div>`;
@@ -1171,7 +1177,7 @@ async function loadSpotcheck() {
 async function scRun(dry) {
   const taskId = $("#sc-task").value;
   if (!taskId || taskId === "加载中…") return toast("请先选择任务");
-  if (!dry && !confirm("确定把 3 家提交合并为一份「白盒提案」？\n（待你在「场景提案」面板审核后一键部署到 NR；触发器已禁用，不会自动触发）")) return;
+  if (!dry && !confirm("确定把 3 家提交合并为一份「白盒提案」？\n（待你在「待审核流程」面板审核后一键部署到 NR；触发器已禁用，不会自动触发）")) return;
   const r = await api("POST", "/spotcheck", {
     task_id: taskId,
     label: $("#sc-label").value.trim(),
@@ -1192,18 +1198,18 @@ async function scRun(dry) {
   const lintE = d.lint_error_count || 0, lintW = d.lint_warning_count || 0;
   const isProposal = !!d.proposal_id;
   el.innerHTML = `
-    <strong>✅ ${esc(isProposal ? (dry ? "预览就绪" : "已提交为提案") : (dry ? "预览就绪" : "已部署"))}</strong>
-    ${dry ? `<span class="badge">dry-run 不落 NR</span>` : (isProposal ? `<span class="badge">待人工审核后部署</span>` : ``)}
+    <strong>✅ ${esc(isProposal ? (dry ? "预览就绪" : "已提交为待审核") : (dry ? "预览就绪" : "已部署"))}</strong>
+    ${dry ? `<span class="badge">预览（不部署到 NR）</span>` : (isProposal ? `<span class="badge">待人工审核后部署</span>` : ``)}
     <table class="info-table">
-      <tr><td>tab 标签</td><td>${esc(d.label || "")}</td></tr>
+      <tr><td>tab 名称</td><td>${esc(d.label || "")}</td></tr>
       <tr><td>${isProposal ? "proposal_id" : "flow_id"}</td><td><code>${esc(d.proposal_id || d.flow_id || "")}</code></td></tr>
       <tr><td>合并节点数</td><td>${esc(d.node_count || 0)}</td></tr>
       <tr><td>静态检查</td><td>${lintE} error / ${lintW} warning${d.would_block_on_lint ? ` ｜ <span style="color:#c0392b">真部署将被硬伤规则拦截(${(d.would_block_rules || []).join(",")})</span>` : ""}</td></tr>
     </table>
-    <details><summary class="meta">各家合并情况</summary>
+    <details><summary class="meta">各 Agent 合并情况</summary>
       <table class="info-table"><tr><th>Agent</th><th>结果</th></tr>${rosterRows}</table>
     </details>
-    ${dry ? `<div class="desc">确认无误后点「提交为提案（待审核）」。</div>` : (isProposal ? `<div class="desc">已生成提案，请在「场景提案」面板审核后一键部署到 NR。</div>` : ``)}`;
+    ${dry ? `<div class="desc">确认无误后点「提交为待审核」。</div>` : (isProposal ? `<div class="desc">已生成提案，请在「待审核流程」面板审核后一键部署到 NR。</div>` : ``)}`;
   if (isProposal) toast("已提交提案：" + (d.proposal_id || ""));
   else if (!dry) toast("已部署到 NR：" + (d.flow_id || ""));
 }
@@ -1211,7 +1217,7 @@ async function scRun(dry) {
 // ── 诊断查看器（P4-C，只读）──
 async function loadDiagnostics() {
   const v = $("#view-diagnostics");
-  v.innerHTML = `<div class="view-head"><h2>🩺 诊断</h2><span class="sub">网关瞬时健康与最近活动（trace 重启即丢，属正常）</span>
+  v.innerHTML = `<div class="view-head"><h2>🩺 诊断</h2><span class="sub">网关健康状态、运行轨迹与评测任务（trace 重启后清空）</span>
       <button class="btn sm" id="dx-refresh" style="margin-left:auto">刷新</button></div>
     <div id="dx-body"><div class="empty">加载中…</div></div>
     <style>
@@ -1241,7 +1247,7 @@ async function loadDiagnostics() {
         <td><span class="badge">${esc(t.stage || "")}</span></td>
         <td class="dx-ctx"><code>${esc(ctxStr)}</code></td>
       </tr>`;
-    }).join("") : `<tr><td colspan="4" class="empty">暂无 trace（网关重启后缓冲清空，活跃后自会累积）</td></tr>`;
+    }).join("") : `<tr><td colspan="4" class="empty">暂无运行轨迹（网关重启后清空，有活动后自动累积）</td></tr>`;
     const jobs = d.golden_jobs || [];
     const jobRows = jobs.length ? jobs.map((j) => {
       const stCls = j.status === "done" ? "ok" : (j.status === "error" ? "danger" : "st-candidate");
@@ -1257,11 +1263,11 @@ async function loadDiagnostics() {
         <td>${j.n_events != null ? esc(j.n_events) : "—"}</td>
         <td class="dx-ctx"><code>${esc(j.summary || "")}</code></td>
       </tr>`;
-    }).join("") : `<tr><td colspan="7" class="empty">暂无评测任务（golden / 验收）</td></tr>`;
+    }).join("") : `<tr><td colspan="7" class="empty">暂无评测任务</td></tr>`;
     const body = $("#dx-body");
     body.innerHTML = `
       <div class="grid cols-4">
-        <div class="card"><div class="meta">已注册 Agent</div><div class="stat">${c.agents ?? 0}</div></div>
+        <div class="card"><div class="meta">已接入 Agent</div><div class="stat">${c.agents ?? 0}</div></div>
         <div class="card"><div class="meta">待确认操作</div><div class="stat">${c.pending_ops ?? 0}</div></div>
         <div class="card"><div class="meta">已部署 flow</div><div class="stat">${c.deployed_flows ?? 0}</div></div>
         <div class="card"><div class="meta">提案总数</div><div class="stat">${c.proposals_total ?? 0}</div></div>
@@ -1274,7 +1280,7 @@ async function loadDiagnostics() {
         <div class="desc" style="margin-top:6px">提案状态分布：${statusHtml} ｜ 已落地部署 ${c.proposals_deployed ?? 0}</div>
       </div>
       <div class="card" style="margin-top:14px">
-        <h3>最近结构化 trace（${traces.length} 条）</h3>
+        <h3>最近运行轨迹（${traces.length} 条）</h3>
         <div class="dx-scroll">
           <table class="info-table dx-trace">
             <thead><tr><th>时间</th><th>trace</th><th>stage</th><th>上下文</th></tr></thead>
@@ -1299,11 +1305,11 @@ async function loadDiagnostics() {
 // ── 账号区（登录/注册/改密/会话/用户管理）统一由文件末尾的 afAuth 模块渲染到 #authZone ──
 // 旧「🔑 粘贴访问令牌」交互已废弃：账号密码登录见 webui_auth.py + afAuth。
 
-// ── DSL 验证任务池开关 ──
+// ── DSL 验证池开关 ──
 $("#tpBtn").onclick = async () => {
   let enabled = true;
   try { const c = await api("GET", "/config"); enabled = !!(c.data && c.data.task_pool_enabled); } catch {}
-  modal("DSL 验证任务池开关",
+  modal("DSL 验证池开关",
     `<p class="desc">关闭后，agent 调用任务池相关工具（autoflow_list_tasks / claim_task / submit_result / publish_tasks / reset_pool / pool_stats）会立即被拒绝，避免误用。开启则恢复正常。（保存即时生效，无需重启网关）</p>
      <div class="field"><label>任务池</label>
        <div class="seg" id="tpSeg">
@@ -1323,16 +1329,16 @@ $("#tpBtn").onclick = async () => {
   $("#tp-save").onclick = async () => {
     const on = seg.querySelector(".seg-btn.active")?.dataset.v === "on";
     const r = await api("PUT", "/settings", { task_pool_enabled: on });
-    if (r.data?.ok) { closeModal(); toast(on ? "任务池已开启" : "任务池已关闭（agent 调用将被拒绝）"); }
+    if (r.data?.ok) { closeModal(); toast(on ? "验证池已开启" : "验证池已关闭（Agent 调用将被拒绝）"); }
     else toast("保存失败: " + (r.data?.error || r.status));
   };
 };
 
-// ── 原生节点逃逸开关（Phase 4，中风险逃生舱）──
+// ── 原生节点开关（Phase 4，中风险逃生舱）──
 $("#rnBtn").onclick = async () => {
   let enabled = false;
   try { const c = await api("GET", "/config"); enabled = !!(c.data && c.data.raw_node_escape_enabled); } catch {}
-  modal("原生节点逃逸开关",
+  modal("原生节点开关",
     `<p class="desc">开启后，黑箱 DSL 可用 <code>原生节点: {"type":"..."}</code> 直接嵌手写 Node-RED 节点，兜 DSL 表达不了的 20%（如复合 AND/OR 条件、特殊 contrib 节点）。<b>中风险</b>：绕过编译器，故默认关闭，可随时关闭使其立即失效（再提交含原生节点的 DSL 会被拒绝）。允许节点类型白名单已永久禁止 function / exec。</p>
      <div class="field"><label>原生节点逃逸</label>
        <div class="seg" id="rnSeg">
@@ -1360,15 +1366,15 @@ $("#rnBtn").onclick = async () => {
 $("#dpBtn").onclick = async () => {
   let cur = "review_all";
   try { const c = await api("GET", "/config"); cur = c.data?.deploy_policy || "review_all"; } catch {}
-  modal("部署策略（按来源分流）",
-    `<p class="desc">决定编译器产物是否需要人类审核后再部署：<br>
+  modal("部署策略",
+    `<p class="desc">决定自动生成的 flow 是否需要人工审核后再部署：<br>
      • <b>review_all</b>：所有提案（含编译器产物）都需人类在 WebUI 点 Deploy 后部署（默认，最稳）。<br>
      • <b>compiler_auto</b>：编译器产物标「可信」徽章、可自动部署；原生手写(raw)永远需人审。<br>
      无论哪种策略，实际部署都仍过 staging 闸门(validate/lint/E2E)，且始终由人类在 WebUI 触发——绝不无人值守部署。</p>
      <div class="field"><label>部署策略</label>
        <div class="seg" id="dpSeg">
-         <button class="seg-btn" data-v="review_all">全审核 (review_all)</button>
-         <button class="seg-btn" data-v="compiler_auto">编译自动 (compiler_auto)</button>
+         <button class="seg-btn" data-v="review_all">全部审核 (review_all)</button>
+         <button class="seg-btn" data-v="compiler_auto">自动生成可直装 (compiler_auto)</button>
        </div>
      </div>
      <button class="btn primary" id="dp-save">保存</button>`);
@@ -1561,11 +1567,11 @@ async function refreshEvalMonitor() {
   else stopEvalPoll();
 }
 
-// ── 自愈闭环：重试次数（WebUI 可配，0=禁用自主重试，1~20=单 (agent, flow) 滑动窗口内最多自主重试）──
+// ── 自动修复：重试次数（WebUI 可配，0=禁用自主重试，1~20=单 (agent, flow) 滑动窗口内最多自主重试）──
 $("#shBtn").onclick = async () => {
   let cur = 3;
   try { const c = await api("GET", "/config"); cur = (c.data && c.data.selfheal_budget) || 3; } catch {}
-  modal("自愈重试次数（自愈闭环）",
+  modal("自动修复重试次数",
     `<p class="desc">agent 自主触发 → 回读 → 修正已部署 flow 时，同一 (agent, flow) 在 10 分钟窗口内最多重试 N 次；耗尽即停止并转报告，防止自动修复死循环。<br>
      • <b>0</b>：不自主重试（一次失败即停，等同纯人审时代行为但无闸）。<br>
      • <b>1~20</b>：单 (agent, flow) 滑动窗口内最多自主重试次数（默认 3）。<br>
@@ -1577,10 +1583,10 @@ $("#shBtn").onclick = async () => {
   $("#sh-save").onclick = async () => {
     const n = parseInt($("#shInput").value, 10);
     if (Number.isNaN(n) || n < 0 || n > 20) {
-      return toast("自愈重试次数必须是 0~20 之间的整数");
+      return toast("自动修复重试次数必须是 0~20 之间的整数");
     }
     const r = await api("PUT", "/settings", { selfheal_budget: n });
-    if (r.data?.ok) { closeModal(); toast(`自愈重试次数已设为 ${n}（即时生效，无需重启）`); }
+    if (r.data?.ok) { closeModal(); toast(`自动修复重试次数已设为 ${n}（即时生效，无需重启）`); }
     else toast("保存失败: " + (r.data?.error || r.status));
   };
 };
@@ -1608,9 +1614,9 @@ async function loadSubflows() {
   _sfView = "subflow";
   const v = $("#view-subflows");
   v.innerHTML = `<div class="view-head"><h2>子流程</h2>
-    <button class="btn primary" id="sf-import-btn">＋ 导入 NR 子流程</button></div>
+    <button class="btn primary" id="sf-import-btn">＋ 从 NR 导入</button></div>
     <div class="row" style="gap:8px;margin:8px 0">
-      <select id="sf-filter"><option value="">全部</option><option value="managed">网关预置</option><option value="imported">用户导入</option></select>
+      <select id="sf-filter"><option value="">全部</option><option value="managed">内置</option><option value="imported">已导入</option></select>
       <span class="meta" id="sf-count"></span>
     </div>
     <div id="sf-list"><div class="empty">加载中…</div></div>`;
@@ -1635,7 +1641,7 @@ function renderSfList(filter) {
   else if (_sfView === "link_api") rows = rows.filter((s) => ["link_out", "http_api"].includes(s.kind || ""));
   if (filter) rows = rows.filter((s) => s.source_type === filter);
   const cnt = $("#sf-count"); if (cnt) cnt.textContent = `共 ${rows.length} 条`;
-  if (!rows.length) { el.innerHTML = `<div class="empty">暂无子流程（点右上「＋ 导入」从 NR 自省导入）。</div>`; return; }
+  if (!rows.length) { el.innerHTML = `<div class="empty">暂无子流程（点右上「＋ 导入」从 NR 自动检测导入）。</div>`; return; }
   el.innerHTML = rows.map((s) => {
     const ins = Array.isArray(s.input_schema) ? s.input_schema.length : 0;
     const envs = Array.isArray(s.env_requirements) ? s.env_requirements.length : 0;
@@ -1650,7 +1656,7 @@ function renderSfList(filter) {
     return `<div class="item" data-key="${esc(s.key)}">
       <div class="row">
         <div><span class="title">${esc(s.title || s.key)}</span> <span class="meta">${esc(s.key)}</span></div>
-        <div>${badge("tier-" + (isManaged ? "managed" : "imported"), isManaged ? "网关预置" : "用户导入")} ${kindBadge} ${badge("status-" + s.status, s.status)}</div>
+        <div>${badge("tier-" + (isManaged ? "managed" : "imported"), isManaged ? "内置" : "已导入")} ${kindBadge} ${badge("status-" + s.status, s.status)}</div>
       </div>
       <div class="desc">DSL 调用：<code>调用子流程: ${esc(s.key)}(...)</code></div>
       <div class="desc">前置参数 ${ins} 项 ｜ 需配置 env ${envs} 项 ｜ ${idLine}</div>
@@ -1670,8 +1676,8 @@ function sfBarkAction(s) {
   if (s.key !== "bark_push") return "";
   const ready = !!s.bark_ready;
   const title = ready
-    ? "幂等安装 Bark 子流程到 Node-RED（已存在则跳过）"
-    : "请先在「设置 → 连接配置 → Bark」填写 BARK_SERVER 与 BARK_KEY";
+    ? "安装 Bark 子流程到 Node-RED（已存在则跳过，安全重复安装）"
+    : "请先在「设置 → 连接配置 → Bark」填写服务器地址与密钥";
   const status = ready
     ? '<span class="meta" style="color:#28a745;margin-right:6px">✅ Bark 已配置</span>'
     : '<span class="meta" style="color:#dc3545;margin-right:6px">⚠️ Bark 未配置</span>';
@@ -1686,7 +1692,7 @@ async function installBarkSubflow(key) {
     if (!r.ok) return toast("安装失败：" + (r.data?.error || r.status));
     const d = r.data || {};
     toast(d.exists ? "Bark 子流程已存在，无需安装：" + key
-      : d.created ? "已安装 Bark 子流程到 NR：" + key : "安装完成：" + key);
+      : d.created ? "已安装 Bark 子流程到 Node-RED：" + key : "安装完成：" + key);
     await refreshSfList();
   } catch (e) { toast("安装失败：" + e.message); }
 }
@@ -1719,7 +1725,7 @@ function renderLinkApis() {
   const el = $("#la-list"); if (!el) return;
   let rows = _sfList.filter((s) => ["link_out", "http_api"].includes(s.kind || ""));
   const cnt = $("#la-count"); if (cnt) cnt.textContent = `共 ${rows.length} 条`;
-  if (!rows.length) { el.innerHTML = `<div class="empty">暂无 Link API（网关桥接类能力）。</div>`; return; }
+  if (!rows.length) { el.innerHTML = `<div class="empty">暂无 Link API。</div>`; return; }
   el.innerHTML = rows.map((s) => {
     const ins = Array.isArray(s.input_schema) ? s.input_schema.length : 0;
     const kindBadge = badge("kind-link_out", "link API");
@@ -1727,14 +1733,14 @@ function renderLinkApis() {
       ? `link out 入口：${esc(s.entry_link_id || "—")}`
       : "网关内联（不生成 NR 节点）";
     // #C：仅「真的会在 NR 派生节点」的 Link API 才给安装按钮；其余（http_api 内联 /
-    // 用户导入的 tab-link link_out 零写入）不给，避免点了却无事发生。
+    // 已导入的 tab-link link_out 零写入）不给，避免点了却无事发生。
     const installBtn = s.needs_nr_flow
-      ? `<button class="btn sm" data-la-install="${esc(s.key)}" title="把该 Link API 增量合并到 NR 的 AutoFlow API tab">📦 安装到 Node-RED</button>`
+      ? `<button class="btn sm" data-la-install="${esc(s.key)}" title="把该 Link API 合并到 NR 的 AutoFlow API tab（增量更新）">📦 安装到 Node-RED</button>`
       : "";
     return `<div class="item" data-key="${esc(s.key)}">
       <div class="row">
         <div><span class="title">${esc(s.title || s.key)}</span> <span class="meta">${esc(s.key)}</span></div>
-        <div>${badge("tier-" + (s.source_type === "managed" ? "managed" : "imported"), s.source_type === "managed" ? "网关预置" : "用户导入")} ${kindBadge} ${badge("status-" + s.status, s.status)}</div>
+        <div>${badge("tier-" + (s.source_type === "managed" ? "managed" : "imported"), s.source_type === "managed" ? "内置" : "已导入")} ${kindBadge} ${badge("status-" + s.status, s.status)}</div>
       </div>
       <div class="desc">DSL 调用：<code>调用子流程: ${esc(s.key)}(...)</code></div>
       <div class="desc">前置参数 ${ins} 项 ｜ ${idLine}</div>
@@ -1890,14 +1896,14 @@ async function deleteSubflow(key) {
   const tail = kind !== "subflow"
     ? "（该能力无 NR 子流程实例）"
     : s.source_type === "managed"
-      ? "\n⚠️ 这是网关自建的子流程，NR 上的子流程实例会被一并删除。"
-      : "\n（只从网关注册表取消登记，Node-RED 上的子流程保持原样，不会被删除。）";
+      ? "\n⚠️ 这是本网关内置的子流程，Node-RED 上的子流程实例将被一并删除。"
+      : "\n（仅从本网关注册表移除，Node-RED 上的子流程保持原样。）";
   if (!confirm(`确定删除子流程「${key}」？${tail}\n此操作不可撤销，已引用它的 flow 将失效。`)) return;
   try {
     const r = await api("DELETE", "/subflows/" + encodeURIComponent(key));
     if (!r.ok) return toast("删除失败：" + (r.data?.error || r.status));
-    toast("已删除：" + key + (r.data?.nr_removed ? "（NR 实例已删除）"
-      : r.data?.nr_kept ? "（NR 子流程已保留）" : ""));
+    toast("已删除：" + key + (r.data?.nr_removed ? "（Node-RED 实例已删除）"
+      : r.data?.nr_kept ? "（Node-RED 子流程已保留）" : ""));
     await refreshSfList();
   } catch (e) { toast("删除失败：" + e.message); }
 }
@@ -1953,7 +1959,7 @@ function showSfDetail(key) {
     : `<li class="desc">（无）</li>`;
   modal("子流程前置参数 · " + esc(s.title || s.key), `
     <div class="desc">DSL 调用：<code>调用子流程: ${esc(s.key)}(...)</code></div>
-    <div class="desc">类型：${esc(s.source_type === "managed" ? "网关预置" : "用户导入")} ｜ 形态：${esc(kindLabel)} ｜ 状态：${esc(s.status)} ｜ ${idLabel}</div>
+    <div class="desc">类型：${esc(s.source_type === "managed" ? "内置" : "已导入")} ｜ 形态：${esc(kindLabel)} ｜ 状态：${esc(s.status)} ｜ ${idLabel}</div>
     <h3>前置参数（调用方需传入）</h3>
     <table class="tbl"><thead><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></thead><tbody>${inRows}</tbody></table>
     <h3>需配置的 env 变量（owner 侧）</h3>
@@ -1961,21 +1967,21 @@ function showSfDetail(key) {
     <details><summary class="meta">完整 JSON</summary><div class="code-box">${esc(JSON.stringify(s, null, 2))}</div></details>`);
 }
 function showImportSubflow() {
-  modal("导入 NR 子流程（自省前置参数）", `
+  modal("从 NR 导入子流程（自动检测输入参数）", `
     <div class="field"><label>NR 子流程 id（在 NR 子流程属性里复制）</label><input id="sf-nr" placeholder="如 b0bbc86abb2172a5"></div>
     <div class="field"><label>DSL 调用名 key（唯一，勿与内置撞名）</label><input id="sf-key" placeholder="如 my_custom_push"></div>
     <div class="field"><label>标题（可选）</label><input id="sf-title" placeholder="我的子流程"></div>
     <div class="field"><label>owner（可选）</label><input id="sf-owner" placeholder="webui"></div>
     <div class="field"><label>状态</label><select id="sf-status"><option value="active">active（立即可用）</option><option value="pending_review">pending_review（待审核）</option><option value="disabled">disabled（禁用）</option></select></div>
-    <p class="desc">提交后网关会读取该 NR 子流程的 in 端口与 env，自动抽取「前置参数」填入注册表，无需手填。</p>
-    <button class="btn primary" id="sf-do-import">自省并导入</button>`);
+    <p class="desc">提交后本网关会读取该 NR 子流程的 in 端口和环境变量，自动提取输入参数，无需手动填写。</p>
+    <button class="btn primary" id="sf-do-import">检测并导入</button>`);
   $("#sf-do-import").onclick = doImportSubflow;
 }
 async function doImportSubflow() {
   const nr_subflow_id = $("#sf-nr").value.trim();
   const key = $("#sf-key").value.trim();
-  if (!nr_subflow_id) return toast("请填 NR 子流程 id");
-  if (!key) return toast("请填 DSL 调用名 key");
+  if (!nr_subflow_id) return toast("请填写 NR 子流程 id");
+  if (!key) return toast("请填写 DSL 调用名");
   const body = {
     nr_subflow_id, key,
     title: $("#sf-title").value.trim(),
@@ -1991,7 +1997,7 @@ async function doImportSubflow() {
     await refreshSfList();
   } catch (e) {
     toast("导入失败：" + e.message);
-  } finally { btn.disabled = false; btn.textContent = "自省并导入"; }
+  } finally { btn.disabled = false; btn.textContent = "检测并导入"; }
 }
 
 // ── #C-tab：从 NR tab 链接逆生成 Link API ──
@@ -2057,7 +2063,7 @@ function paramRowHtml(p) {
 }
 async function registerLinkApiFromTab(url) {
   const key = $("#lt-key").value.trim();
-  if (!key) return toast("请填 DSL 调用名 key");
+  if (!key) return toast("请填写 DSL 调用名");
   const title = $("#lt-title").value.trim();
   const params = [];
   $("#lt-params").querySelectorAll("tbody tr").forEach((tr) => {
@@ -2085,10 +2091,10 @@ async function registerLinkApiFromTab(url) {
 async function loadSettings() {
   const v = $("#view-settings");
   v.innerHTML = `
-    <div class="view-head"><h2>⚙️ 设置</h2><span class="sub">连接配置 · 审计日志</span></div>
+    <div class="view-head"><h2>⚙️ 设置</h2><span class="sub">连接配置 · 操作日志</span></div>
     <div class="tabs sub" id="settings-tabs">
       <button class="stab active" data-s="conn">连接配置</button>
-      <button class="stab" data-s="audit">审计日志</button>
+      <button class="stab" data-s="audit">操作日志</button>
     </div>
     <div id="settings-body"><div class="empty">加载中…</div></div>`;
   $$("#settings-tabs .stab").forEach((b) => (b.onclick = () => {
@@ -2131,7 +2137,7 @@ async function loadConnection() {
     </div>`).join("") + `
     <div class="card conn-card">
       <p class="conn-desc">🔒 凭据保存在本机 <span class="conn-path">${esc(data.path || "")}</span>（该目录已在 .gitignore 中，不会随仓库泄漏），
-      保存后立即生效、无需重启网关。界面设置的优先级高于环境变量与 .env。</p>
+      保存后立即生效，无需重启。界面设置优先级高于环境变量。</p>
     </div>`;
 
   groups.forEach((g) => {
@@ -2321,11 +2327,11 @@ async function loadSafeGate() {
 }
 async function loadAudit() {
   const body = $("#settings-body");
-  body.innerHTML = `<div class="card"><h3>审计日志</h3><p class="desc">去人审后唯一可追溯性来源（部署 / 应用修正均留痕）。</p><div id="audit-list"><div class="empty">加载中…</div></div></div>`;
+  body.innerHTML = `<div class="card"><h3>操作日志</h3><p class="desc">去人审后唯一可追溯性来源（部署 / 应用修正均留痕）。</p><div id="audit-list"><div class="empty">加载中…</div></div></div>`;
   try {
     const r = await api("GET", "/audit?limit=100");
     const items = r.data?.audit || [];
-    if (!items.length) { $("#audit-list").innerHTML = `<div class="empty">暂无审计记录。</div>`; return; }
+    if (!items.length) { $("#audit-list").innerHTML = `<div class="empty">暂无操作记录。</div>`; return; }
     $("#audit-list").innerHTML = `<table class="tbl"><thead><tr><th>时间</th><th>类型</th><th>详情</th></tr></thead><tbody>` +
       items.map((a) => `<tr><td class="mono">${esc((a.ts || a.time || "").toString().slice(0, 19))}</td><td>${esc(a.type || "")}</td><td class="desc">${esc(JSON.stringify(a.data !== undefined ? a.data : a))}</td></tr>`).join("") +
       `</tbody></table>`;
@@ -2353,12 +2359,12 @@ function showFirstRun() {
 async function loadAcpTokens() {
   const v = $("#view-acp_tokens");
   v.innerHTML = `<div class="view-head"><h2>ACP 对等令牌</h2>
-    <span class="sub">拓扑 X 对等（autoflow ↔ memory-worker）· 明文仅签发时显示一次</span>
+    <span class="sub">AutoFlow 与对端服务的对等连接令牌（明文仅显示一次）</span>
     <button class="btn primary" id="acpCreateBtn">＋ 新建令牌</button></div>
     <div class="card" style="display:flex;align-items:center;gap:10px;justify-content:space-between;margin-bottom:12px">
       <div style="flex:1;min-width:0">
         <div class="meta">ACP 功能开关</div>
-        <div class="sub">关闭后 /acp 停止服务、delegate / ask_llm 工具返回禁用提示（免重启生效）。</div>
+        <div class="sub">关闭后 /acp 停止服务，delegate/ask_llm 工具返回禁用。</div>
       </div>
       <label style="display:flex;gap:8px;align-items:center;cursor:pointer;white-space:nowrap">
         <input type="checkbox" id="acpEnabled" style="width:18px;height:18px" />
@@ -2381,7 +2387,7 @@ async function loadAcpTokens() {
       try {
         const r = await api("PUT", "/acp/enabled", { enabled: sw.checked });
         if (!r.ok) throw new Error(r.data?.error || "切换失败");
-        toast(sw.checked ? "ACP 已启用" : "ACP 已关闭");
+        toast(sw.checked ? "跨服务连接已启用" : "跨服务连接已关闭");
         if (st) st.textContent = sw.checked ? "已启用" : "已关闭";
       } catch (e) {
         toast(e.message || "切换失败");
@@ -2416,7 +2422,7 @@ async function renderAcpOutbound() {
     const tokF = g.fields.find((f) => f.key === "MEMORY_WORKER_ACP_TOKEN");
     box.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
       <div>
-        <div class="meta">出向委派配置（autoflow → memory-agent）</div>
+        <div class="meta">出站连接配置（autoflow → 对端）</div>
         <div class="sub">网关调用对端 /acp 所需的地址与令牌，保存后立即热生效。</div>
       </div>
     </div>
@@ -2483,10 +2489,10 @@ function renderAcpTokens(tokens) {
   const rows = tokens.map((t) => {
     const last4 = t.token_id ? t.token_id.slice(-4) : "";
     const masked = "acp_****" + last4;
-    const st = t.status === "active" ? badge("ok", "活跃") : badge("warn", "已吊销");
+    const st = t.status === "active" ? badge("ok", "有效") : badge("warn", "已停用");
     const last = t.last_seen ? fmtTime(t.last_seen) : "从未使用";
     const revBtn = t.status === "active"
-      ? `<button class="btn sm" data-rev="${esc(t.token_id)}">吊销</button>` : `<span class="sub">已吊销</span>`;
+      ? `<button class="btn sm" data-rev="${esc(t.token_id)}">停用</button>` : `<span class="sub">已停用</span>`;
     const delBtn = t.status === "active"
       ? `<button class="btn sm danger" data-del="${esc(t.token_id)}">删除</button>`
       : `<button class="btn sm" disabled>已删除</button>`;
@@ -2520,7 +2526,7 @@ function showCreateAcpToken() {
   $("#acpCancel").onclick = closeModal;
   $("#acpSubmit").onclick = async () => {
     const name = $("#acpName").value.trim();
-    if (!name) { toast("名称必填"); return; }
+    if (!name) { toast("请填写名称"); return; }
     const notes = $("#acpNotes").value.trim();
     try {
       const r = await api("POST", "/acp/tokens", { name, notes });
@@ -2532,7 +2538,7 @@ function showCreateAcpToken() {
 
 function showAcpTokenOnce(tok) {
   const plain = tok && tok.acp_token ? tok.acp_token : "";
-  modal("ACP 令牌已生成（仅此一次）", `
+  modal("ACP 令牌已生成（仅此一次，请立即保存）", `
     <div class="desc">请立即复制并写入对端（memory-worker）的 <code>AUTOFLOW_ACP_TOKEN</code> 环境变量。关闭后不可再查看。</div>
     <div class="card" style="word-break:break-all;font-family:monospace;padding:10px;margin-top:8px">${esc(plain)}</div>
     <div class="modal-foot">
@@ -2548,17 +2554,17 @@ function showAcpTokenOnce(tok) {
 }
 
 async function revokeAcpToken(id) {
-  if (!confirm("吊销该 ACP 令牌？吊销后该对端无法再调 /acp（哈希保留用于审计）。")) return;
+  if (!confirm("停用该 ACP 令牌？停用后该对端无法再调 /acp（哈希保留用于审计）。")) return;
   try {
     const r = await api("POST", `/acp/tokens/${id}/revoke`);
-    if (!r.ok) throw new Error(r.data?.error || "吊销失败");
-    toast("已吊销");
+    if (!r.ok) throw new Error(r.data?.error || "停用失败");
+    toast("已停用");
     loadAcpTokens();
-  } catch (e) { toast(e.message || "吊销失败"); }
+  } catch (e) { toast(e.message || "停用失败"); }
 }
 
 async function deleteAcpToken(id) {
-  if (!confirm("⚠️ 物理删除该 ACP 令牌？含哈希一并抹除，不可恢复。确定？")) return;
+  if (!confirm("⚠️ 彻底删除该令牌？含记录一并删除，不可恢复。确定？")) return;
   try {
     const r = await api("DELETE", `/acp/tokens/${id}`);
     if (!r.ok) throw new Error(r.data?.error || "删除失败");
@@ -2571,11 +2577,11 @@ async function deleteAcpToken(id) {
 async function loadLlmSettings() {
   const v = $("#view-llm_settings");
   v.innerHTML = `<div class="view-head"><h2>LLM 设置</h2>
-    <span class="sub">OpenAI 兼容 /chat/completions · 配置落本地文件，密钥不回显</span></div>
+    <span class="sub">OpenAI 兼容接口 · 配置存本地，密钥不回显</span></div>
     <div class="card" style="display:flex;align-items:center;gap:10px;justify-content:space-between;margin-bottom:12px">
       <div style="flex:1;min-width:0">
         <div class="meta">启用 LLM 助手</div>
-        <div class="sub">关闭后「LLM 助手」页不可用（免重启生效）。</div>
+        <div class="sub">关闭后「AI 对话」页不可用（免重启生效）。</div>
       </div>
       <label style="display:flex;gap:8px;align-items:center;cursor:pointer;white-space:nowrap">
         <input type="checkbox" id="llmEnabled" style="width:18px;height:18px" />
@@ -2583,16 +2589,16 @@ async function loadLlmSettings() {
       </label>
     </div>
     <div class="card account-pool" style="margin-bottom:12px">
-      <div class="meta" style="font-size:15px;font-weight:600">内置大模型代理池</div>
+      <div class="meta" style="font-size:15px;font-weight:600">模型服务列表</div>
       <div class="sub" style="margin:2px 0 10px">按列表顺序依次尝试，遇限流 / 超时 / 鉴权失败自动切换下一个。优先级 = 列表顺序（可上移 / 下移）。</div>
       <div class="conn-actions" style="margin-bottom:10px">
-        <button class="btn sm primary" id="llmAddBackend">+ 新增后端</button>
+        <button class="btn sm primary" id="llmAddBackend">+ 新增模型服务</button>
         <button class="btn sm" id="llmTestAll">测试全部</button>
         <span class="sub" id="llmTestAllState"></span>
       </div>
       <div id="llmPool"></div>
       <details style="margin-top:8px">
-        <summary class="sub" style="cursor:pointer">向后兼容：单后端（回落单，可选）</summary>
+        <summary class="sub" style="cursor:pointer">兼容模式：单服务（可选）</summary>
         <div class="form" style="margin-top:8px">
           <label class="lbl">Base URL</label>
           <input id="llmUrl" class="inp" placeholder="https://api.openai.com/v1" />
@@ -2619,7 +2625,7 @@ async function loadLlmSettings() {
 
   function renderPool() {
     if (!backends.length) {
-      pool.innerHTML = `<div class="sub" style="padding:6px 0">尚未添加后端。点「+ 新增后端」开始；或填写下方单后端。</div>`;
+      pool.innerHTML = `<div class="sub" style="padding:6px 0">尚未添加后端。点「+ 新增模型服务」开始；或填写下方单后端。</div>`;
       return;
     }
     pool.innerHTML = backends.map((b, i) => `
@@ -2646,7 +2652,7 @@ async function loadLlmSettings() {
           </div>
           <div class="bc-params">
             <div><label class="lbl">温度</label><input class="inp bc-temp" type="number" step="0.1" value="${b.temperature ?? 0.7}" /></div>
-            <div><label class="lbl">最大 tokens</label><input class="inp bc-maxtok" type="number" value="${b.max_tokens ?? 4096}" /></div>
+            <div><label class="lbl">最大输出长度（tokens）</label><input class="inp bc-maxtok" type="number" value="${b.max_tokens ?? 4096}" /></div>
             <div><label class="lbl">超时(秒)</label><input class="inp bc-timeout" type="number" value="${b.timeout ?? 120}" /></div>
           </div>
           <div class="conn-actions"><button class="btn sm bc-test" type="button">测试这条</button><span class="bc-test-res sub"></span></div>
@@ -2700,7 +2706,7 @@ async function loadLlmSettings() {
       // 未改动密钥 → 回传掩码让服务端找回真实 key；改动过 → 用新值
       api_key: b._keyTouched ? (b.api_key || "") : (b.api_key && b.api_key.indexOf("****") >= 0 ? b.api_key : ""),
     };
-    if (!payload.url || !payload.model) { resEl.textContent = "⚠ 需填 URL 与 Model"; return; }
+    if (!payload.url || !payload.model) { resEl.textContent = "⚠ 需填地址与模型"; return; }
     try {
       const r = await api("POST", "/llm/test", { scope: "backend", backend: payload });
       const res = (r.data && r.data.backends && r.data.backends[0]) || {};
@@ -2745,8 +2751,8 @@ async function loadLlmSettings() {
     modelI.value = c.model || "";
     renderPool();
     $("#llmCfgState").innerHTML = c.configured
-      ? `<div class="desc">✅ 后端已配置（${esc(c.model || (backends[0] && backends[0].model) || "")}）。保存后免重启生效。</div>`
-      : `<div class="desc">⚠️ 尚未配置后端。填好地址 / API Key / Model 后点保存。</div>`;
+      ? `<div class="desc">✅ 模型服务已配置（${esc(c.model || (backends[0] && backends[0].model) || "")}）。保存后免重启生效。</div>`
+      : `<div class="desc">⚠️ 尚未配置模型服务。填好地址 / API Key / Model 后点保存。</div>`;
   } catch (e) {
     $("#llmCfgState").innerHTML = errBox(e.message || "加载失败", loadLlmSettings);
     sw.checked = false; st.textContent = "读取失败";
@@ -2757,7 +2763,7 @@ async function loadLlmSettings() {
       const r = await api("PUT", "/llm/config", { enabled: sw.checked });
       if (!r.ok) throw new Error(r.data?.error || "切换失败");
       st.textContent = sw.checked ? "已启用" : "已关闭";
-      toast(sw.checked ? "LLM 已启用" : "LLM 已关闭");
+      toast(sw.checked ? "大模型已启用" : "大模型已关闭");
     } catch (e) {
       toast(e.message || "切换失败");
       sw.checked = !sw.checked;
@@ -2783,11 +2789,11 @@ async function loadLlmSettings() {
       const r = await api("PUT", "/llm/config", body);
       if (!r.ok) throw new Error(r.data?.error || "保存失败");
       saveState.textContent = "✅ 已保存";
-      toast("LLM 配置已保存");
+      toast("大模型配置已保存");
       keyI.value = ""; singleKeyTouched = false;
       backends.forEach((b) => { b._keyTouched = false; });
       const cs = $("#llmCfgState");
-      if (cs) cs.innerHTML = `<div class="desc">✅ 后端已配置。保存后免重启生效。</div>`;
+      if (cs) cs.innerHTML = `<div class="desc">✅ 模型服务已配置。保存后免重启生效。</div>`;
     } catch (e) {
       saveState.textContent = "❌ " + (e.message || "保存失败");
       toast(e.message || "保存失败");
@@ -2821,11 +2827,11 @@ async function loadUpdate() {
     }
     const cur = d.current ? d.current.slice(0, 12) : "—";
     const tgt = d.target_commit ? d.target_commit.slice(0, 12) : "—";
-    const curVer = d.current_version ? esc(d.current_version) : `<span style="color:var(--muted,#888)">未知（无 VERSION 文件）</span>`;
+    const curVer = d.current_version ? esc(d.current_version) : `<span style="color:var(--muted,#888)">未知</span>`;
     const latestTag = d.latest_tag ? esc(d.latest_tag) : "—";
     const tags = (d.tags || []).map((t) => `<li><code>${esc(t.tag)}</code> · ${esc((t.commit || "").slice(0, 12))}</li>`).join("");
     v.innerHTML = `
-      <div class="view-head"><h2>在线更新</h2><span class="sub">从 GitHub 拉取更新（方案 C · 受控自更新）</span></div>
+      <div class="view-head"><h2>在线更新</h2><span class="sub">从 GitHub 拉取更新并自动部署（受控自更新）</span></div>
       <div class="card">
         <h3>当前状态</h3>
         <div class="desc">
@@ -2890,7 +2896,7 @@ async function loadLlmAgent() {
     : `<option value="-1">默认模型</option>`;
   v.innerHTML = `<div class="view-head"><h2>LLM 助手</h2>
     <div style="display:flex;gap:8px;align-items:center">
-      <span class="badge env">内置大模型代理池</span>
+      <span class="badge env">模型服务列表</span>
       <button class="btn sm ghost" id="llmClear">清空对话</button>
     </div></div>
     <div id="llmChat" class="chat"></div>
@@ -2903,7 +2909,7 @@ async function loadLlmAgent() {
         <select class="tool-select" id="llmModel" title="选择模型">${modelOptions}</select>
       </div>
       <div class="input-row">
-        <textarea id="llmInput" rows="2" placeholder="随便问点什么，/ 可查看命令，@ 可添加上下文..." inputmode="text" autocapitalize="none" autocomplete="off" autocorrect="off"></textarea>
+        <textarea id="llmInput" rows="2" placeholder="输入消息，/ 查看命令，@ 添加上下文" inputmode="text" autocapitalize="none" autocomplete="off" autocorrect="off"></textarea>
         <button class="btn primary send-btn" id="llmSend" type="button" aria-label="发送">
           <img src="/static/icons/ic-send.svg" alt="" loading="lazy" />
         </button>
@@ -2917,8 +2923,8 @@ async function loadLlmAgent() {
     const isAcp = buildSel && buildSel.value === "acp";
     if (modelSel) modelSel.disabled = isAcp;
     input.placeholder = isAcp
-      ? "已选择 memory-agent ACP，消息将直接委派给 memory-agent..."
-      : "随便问点什么，/ 可查看命令，@ 可添加上下文...";
+      ? "已选择 ACP 模式，消息将直接委派给对端服务"
+      : "输入消息，/ 查看命令，@ 添加上下文";
   }
   if (buildSel) buildSel.addEventListener("change", refreshLlmInputState);
   refreshLlmInputState();
