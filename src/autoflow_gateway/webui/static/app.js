@@ -175,19 +175,31 @@ async function loadDashboard() {
       <div class="grid cols-4">
         <div class="card"><div class="meta">已接入 Agent</div><div class="stat">${counts.agents}</div></div>
         <div class="card"><div class="meta">待确认操作</div><div class="stat">${counts.pending}</div></div>
-        <div class="card"><div class="meta">待审 raw flow</div><div class="stat">${counts.raw}</div></div>
+        <div class="card"><div class="meta">待审原生 flow</div><div class="stat">${counts.raw}</div></div>
         <div class="card"><div class="meta">已部署 flow</div><div class="stat">${counts.deployed}</div></div>
       </div>
       <div class="card" style="margin-top:14px">
         <h3>快速上手</h3>
-        <div class="desc">
-          1. 到 <b>Agent 管理</b> 创建 Agent（如 deepseek++），复制生成的接入令牌。<br>
-          2. 在 agent 的 MCP 配置里填 <code>Authorization: Bearer &lt;接入令牌&gt;</code>，指向 <code>${esc(c.mcp || "")}</code>。<br>
-          3. agent 提交场景 DSL 后，到 <b>提案</b> 面板查看闸门结果，点「部署到 NR」部署。<br>
-          4. 部署后在 <b>已部署</b> 面板可随时安全撤回（仅移除本网关部署的 flow）。<br>
-          5. <b>笔记</b> 记录你那些暂时落不了地的智能家居想法。
+        <div class="desc" style="line-height:2">
+          AutoFlow 有两种使用方式：<b>Agent 调用 MCP</b>（推荐）或 <b>WebUI 内置 AI 对话</b>。<br>
+          1. 到 <b>Agent 管理</b> 创建 Agent，复制接入令牌，配置到 AI 客户端的 MCP 中。<br>
+          2. 跟 Agent 说需求（如"晚上 10 点关灯"），它会生成 flow 提案。<br>
+          3. 到 <b>提案</b> 查看安全闸结果，确认后点「部署到 NR」。<br>
+          4. 部署后在 <b>已部署</b> 可查看状态、安全撤回。flow 不工作时用<b>自动修复</b>。<br>
+          5. 不确定怎么操作？打开左侧 <b>教程</b>，有分步图文引导。
+        </div>
+        <div style="margin-top:10px">
+          <button class="btn sm" id="dash-go-tutorial">📚 打开教程</button>
+          <button class="btn sm" id="dash-go-agent" style="margin-left:8px">创建 Agent</button>
+          <button class="btn sm" id="dash-go-llm" style="margin-left:8px">AI 对话</button>
         </div>
       </div>`;
+    const gt = $("#dash-go-tutorial");
+    if (gt) gt.onclick = () => setTab("tutorials");
+    const ga = $("#dash-go-agent");
+    if (ga) ga.onclick = () => setTab("agents");
+    const gl = $("#dash-go-llm");
+    if (gl) gl.onclick = () => setTab("llm_agent");
   } catch (e) {
     v.innerHTML = errBox(e.message || "加载失败", loadDashboard);
   }
@@ -355,13 +367,13 @@ function stopWsAutoRefresh() {
 // ── Agents ──
 async function loadAgents() {
   const v = $("#view-agents");
-  v.innerHTML = `<div class="view-head"><h2>Agents</h2></div>
+  v.innerHTML = `<div class="view-head"><h2>Agent 管理</h2><span class="sub">创建和管理接入 AutoFlow 的 AI 客户端</span></div>
     <div class="agent-layout">
       <div class="agent-form">
         <div class="card form-card">
           <h3>新建 Agent</h3>
           <div class="field"><label>名称（如 deepseek++）</label><input id="a-name" placeholder="deepseek++"></div>
-          <div class="field"><label>身份模式</label>
+          <div class="field"><label>权限模式</label>
             <select id="a-mode">${MODES.map((m) => `<option value="${m}">${modeLabel(m)}</option>`).join("")}</select></div>
           <div class="field"><label>备注</label><textarea id="a-notes" placeholder="可选"></textarea></div>
           <button class="btn primary" id="a-create">生成接入令牌</button>
@@ -583,7 +595,7 @@ let _propTotal = 0;
 
 async function loadProposals() {
   const v = $("#view-proposals");
-  v.innerHTML = `<div class="view-head"><h2>待审核流程</h2><span class="sub">Agent 提交的 DSL/flow，经安全闸验证后可部署到 Node-RED</span></div>
+  v.innerHTML = `<div class="view-head"><h2>提案</h2><span class="sub">Agent 提交的 flow，经安全闸验证后可部署到 Node-RED</span></div>
     <div class="search-bar" style="margin:10px 0;display:flex;gap:8px;align-items:center">
       <input id="p-search" type="text" placeholder="🔍 搜索当前页提案（标题 / ID / DSL 内容）…" style="flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--bg);color:var(--text)">
       <span id="p-filter-count" style="font-size:12px;color:var(--text-dim);white-space:nowrap"></span>
@@ -2091,7 +2103,7 @@ async function registerLinkApiFromTab(url) {
 async function loadSettings() {
   const v = $("#view-settings");
   v.innerHTML = `
-    <div class="view-head"><h2>⚙️ 设置</h2><span class="sub">连接配置 · 操作日志</span></div>
+    <div class="view-head"><h2>设置</h2><span class="sub">连接配置 · 操作日志</span></div>
     <div class="tabs sub" id="settings-tabs">
       <button class="stab active" data-s="conn">连接配置</button>
       <button class="stab" data-s="audit">操作日志</button>
@@ -2240,7 +2252,7 @@ async function importCatalog(btn, gid) {
 }
 async function loadSafeGate() {
   const v = $("#view-safe");
-  v.innerHTML = `<div class="view-head"><h2>🛡️ 安全闸</h2><span class="sub">设备保护：先导入全屋设备目录，再勾选需保护的实体</span></div>
+  v.innerHTML = `<div class="view-head"><h2>安全闸</h2><span class="sub">设备保护：先导入全屋设备目录，再勾选需保护的实体</span></div>
     <div class="card" style="margin-top:14px">
       <h3>设备目录</h3>
       <div id="sg-catalog"><div class="empty">加载中…</div></div>
@@ -2251,7 +2263,7 @@ async function loadSafeGate() {
     </div>
     <div class="card" style="margin-top:14px">
       <h3>添加保护</h3>
-      <p class="desc">用中文/英文搜索设备（按 friendly_name / area / entity_id），点选即加入保护。Tier-0 触及需人工确认；Tier-1 放行但记审计。</p>
+      <p class="desc">用中文/英文搜索设备（按 friendly_name / area / entity_id），点选即加入保护。Tier-0 触及需人工确认；Tier-1 放行但记录操作日志。</p>
       <div class="row" style="gap:8px;flex-wrap:wrap">
         <input id="sg-search" placeholder="如「书房灯」「客厅」「office」" style="flex:1;min-width:200px">
         <select id="sg-tier"><option value="0">Tier-0（需确认）</option><option value="1">Tier-1（放行+审计）</option></select>
@@ -2857,7 +2869,11 @@ async function loadUpdate() {
         <div id="updateMsg" class="desc" style="margin-top:10px"></div>
       </div>
       <div class="card" style="margin-top:14px">
-        <h3>可用版本 tag</h3>
+        <h3>版本更新日志</h3>
+        <div id="changelog-list">${renderChangelog()}</div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <h3>历史版本</h3>
         <ul class="desc">${tags || "<li>无</li>"}</ul>
       </div>`;
     const btn = $("#doUpdate");
@@ -3276,3 +3292,94 @@ window.__afAuth = afAuth;
     if (!fr.data?.accepted) showFirstRun();
   } catch {}
 })();
+
+// ═══════════════════════════════════════════════════════════
+// 版本更新日志
+// ═══════════════════════════════════════════════════════════
+const CHANGELOG = [
+  {
+    version: "v1.2.4",
+    date: "2026-09-02",
+    items: [
+      "在线更新页面新增版本更新日志，每个版本更新内容一目了然",
+      "全面统一页面标题和术语（Agent 管理/提案/原生 flow/权限模式）",
+      "概览页快速上手增加教程入口和快捷按钮",
+      "安全闸页面文案优化",
+    ],
+  },
+  {
+    version: "v1.2.3",
+    date: "2026-09-02",
+    items: [
+      "在线更新新增国内镜像选择（ghproxy/gitclone），更新失败率大幅降低",
+      "更新过程增加进度条和阶段提示，失败时红色提示框建议切换镜像",
+      "ACP 令牌页面标题明示与 memory-agent 对接，移除内部名称",
+      "教程系统重构：新增「两种使用途径」排第一，8教程37步精简为6教程25步",
+      "教程新增黑白箱模式概念解释，Link API 教程增加示范链接",
+    ],
+  },
+  {
+    version: "v1.2.2",
+    date: "2026-09-02",
+    items: [
+      "WebUI 文案 v2：面向 hassbian 极客用户，保留技术术语不做过度白话化",
+      "新增交互式教程系统：8个教程37步，含进度持久化和步骤跳转",
+      "核心页面首次访问自动弹出功能引导",
+      "侧边导航16项分4组，提案/已部署列表增加状态色条",
+      "Toast 通知支持 success/error/warn/info 四种类型",
+      "帮助系统新增核心概念详解（DSL/安全闸/vhass/自动修复/Link API等7个概念）",
+      "顶栏4个开关按钮增加文字标签",
+    ],
+  },
+  {
+    version: "v1.2.1",
+    date: "2026-08-28",
+    items: [
+      "受控自更新机制稳定化：备份→fetch→checkout→py_compile→重启全链路",
+      "更新失败自动回滚，不重启不破坏现有环境",
+    ],
+  },
+  {
+    version: "v1.2.0",
+    date: "2026-08-20",
+    items: [
+      "ACP 对等连接协议支持，可与 memory-agent 等外部服务对接",
+      "子流程注册表：内置 managed + 已导入 imported 两类管理",
+      "Link API：HTTP 桥接，支持 link out 推送和 http_api 内联两种模式",
+    ],
+  },
+  {
+    version: "v1.1.0",
+    date: "2026-08-10",
+    items: [
+      "自动修复（自愈闭环）：inject点火→debug回读→分析→apply修正循环",
+      "安全闸 Tier-0/Tier-1 两级设备保护",
+      "vhass 虚拟孪生重放：staging 环境虚拟验证",
+    ],
+  },
+  {
+    version: "v1.0.0",
+    date: "2026-07-28",
+    items: [
+      "AutoFlow 网关首个正式版本",
+      "DSL 编译器：结构化描述转标准 NR 节点，不含 Function 节点故可信",
+      "MCP 服务器：标准/专家/管理员三种权限模式",
+      "提案→审核→部署→已部署全流程管理",
+      "WebUI 管理界面",
+    ],
+  },
+];
+
+function renderChangelog() {
+  return CHANGELOG.map((rel) => `
+    <div class="changelog-item" style="margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <span style="font-weight:700;font-size:15px">${esc(rel.version)}</span>
+        <span style="font-size:12px;color:var(--text-muted)">${esc(rel.date)}</span>
+      </div>
+      <ul style="margin:0;padding-left:20px;font-size:13px;line-height:1.8;color:var(--text)">
+        ${rel.items.map((item) => `<li>${esc(item)}</li>`).join("")}
+      </ul>
+    </div>
+  `).join("");
+}
