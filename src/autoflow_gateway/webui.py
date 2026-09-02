@@ -428,9 +428,10 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         """触发受控自更新（备份→fetch→checkout→py_compile→重启）。仅 owner。"""
         b = await _body(request)
         ref = (b.get("ref") or "").strip() or None
+        mirror = (b.get("mirror") or "").strip() or None
         try:
             from . import self_update as _su
-            res = _su.perform_update(ref=ref)
+            res = _su.perform_update(ref=ref, mirror=mirror)
         except Exception as e:
             return _js({"ok": False, "error": f"更新失败: {e}"}, 500)
         return _js(res, status=200 if res.get("ok") else 500)

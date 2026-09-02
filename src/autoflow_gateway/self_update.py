@@ -210,8 +210,11 @@ def _resolve_target(ref: Optional[str], tags: List[Dict[str, str]]):
 
 def perform_update(ref: Optional[str] = None, *,
                    repo_dir: Optional[str] = None,
-                   data_dir: Optional[str] = None) -> Dict:
-    """执行受控自更新。仅在全部前置校验 + 备份 + 语法校验通过后才切代码并触发重启。"""
+                   data_dir: Optional[str] = None,
+                   mirror: Optional[str] = None) -> Dict:
+    """执行受控自更新。仅在全部前置校验 + 备份 + 语法校验通过后才切代码并触发重启。
+    mirror: 国内镜像 URL（如 https://ghproxy.com/https://github.com/lidicn/AutoFlow.git），
+            传入后 fetch 阶段使用镜像地址，完成后恢复原 remote。"""
     repo = repo_dir or _repo_dir()
     if not repo or not os.path.isdir(os.path.join(repo, ".git")):
         return {"ok": False, "error": "仓库未初始化（AF_REPO_DIR 未指向含 .git 的目录）"}
@@ -238,12 +241,34 @@ def perform_update(ref: Optional[str] = None, *,
     except Exception as e:
         return {"ok": False, "error": f"备份失败：{e}", "current": cur}
 
-    # 2) fetch
+    # 2) fetch（支持国内镜像）
+    fetch_url = mirror or _remote_url()
+    original_remote = None
+    if mirror:
+        # 临时切换 remote 到镜像，fetch 后恢复
+        try:
+            r = _run_git(repo, ["remote", "get-url", "origin"], check=False)
+            original_remote = r.stdout.strip() if r.returncode == 0 else None
+            _run_git(repo, ["remote", "set-url", "origin", mirror], check=True)
+        except Exception:
+            original_remote = None
     try:
-        _run_git(repo, ["fetch", "--tags", _remote_url()], check=True)
+        _run_git(repo, ["fetch", "--tags", "origin"], check=True)
     except Exception as e:
+        # 恢复原 remote
+        if original_remote:
+            try:
+                _run_git(repo, ["remote", "set-url", "origin", original_remote], check=False)
+            except Exception:
+                pass
         return {"ok": False, "error": f"fetch 失败：{e}", "current": cur,
                 "backup": backup_path}
+    # 恢复原 remote
+    if original_remote:
+        try:
+            _run_git(repo, ["remote", "set-url", "origin", original_remote], check=False)
+        except Exception:
+            pass
 
     # 3) checkout -f（丢弃已跟踪改动，但不删未跟踪文件）
     try:
