@@ -437,6 +437,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         return _js(res, status=200 if res.get("ok") else 500)
 
     async def config_view(request: Request):
+        from . import tab_organizer as tab_org
         return _js({
             "env": cfg.env,
             "nr_url": cfg.nr_url,
@@ -451,16 +452,22 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             "raw_node_escape_enabled": is_raw_node_escape_enabled(cfg),
             "deploy_policy": get_deploy_policy(cfg),
             "selfheal_budget": load_feature_flags(cfg).get("selfheal_budget", 3),
+            "tab_org_mode": tab_org.get_tab_org_mode(),
         })
 
     async def settings_update(request: Request):
-        """运行时开关：DSL 验证任务池 / 原生节点逃逸 / 部署策略（免重启落盘）。"""
+        """运行时开关：DSL 验证任务池 / 原生节点逃逸 / 部署策略 / Tab组织模式（免重启落盘）。"""
         b = await _body(request)
         tp = b.get("task_pool_enabled")
         if tp is not None:
             if not isinstance(tp, bool):
                 return _js({"ok": False, "error": "task_pool_enabled 必须是布尔值"}, 400)
             set_feature_flag(cfg, "task_pool_enabled", tp)
+        tom = b.get("tab_org_mode")
+        if tom is not None:
+            if tom not in ("per_flow", "single_tab"):
+                return _js({"ok": False, "error": "tab_org_mode 必须是 per_flow 或 single_tab"}, 400)
+            set_feature_flag(cfg, "tab_org_mode", tom)
         rn = b.get("raw_node_escape_enabled")
         if rn is not None:
             if not isinstance(rn, bool):

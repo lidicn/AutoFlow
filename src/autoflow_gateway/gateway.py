@@ -3788,17 +3788,56 @@ class Gateway:
                     "proposal_id": pid,
                 }
 
-        try:
-            result = self.nr.create_or_update_flow(deploy_id, flow, force=True,
-                                                  allow_prod=allow_prod)
-        except Exception as e:
-            return {"ok": False, "error": f"NR 部署失败: {e}"}
-        fid = result.get("id") or deploy_id
-        created = result.get("created", False)
+        # ── Tab 组织模式：per_flow（默认）或 single_tab ──
+        from . import tab_organizer as tab_org
+        use_single_tab = tab_org.is_single_tab_mode()
+
+        if use_single_tab:
+            # 单 tab 模式：所有 flow 合并到固定的 AutoFlow tab
+            try:
+                af_tab = tab_org.get_or_create_single_tab(self.nr, allow_prod=allow_prod)
+                tab_id = tab_org.SINGLE_TAB_ID
+                existing_flows = tab_org.list_single_tab_flows(self.state.get_flow_catalog())
+                y_offset = tab_org.assign_y_offset(existing_flows)
+                flow_label = flow.get("label", "")
+                start_c, end_c, start_id, end_id = tab_org.make_boundary_comments(
+                    deploy_id, flow_label, y_offset)
+                shifted_nodes = tab_org.shift_flow_nodes(
+                    flow.get("nodes", []), y_offset + 100, tab_id)
+                existing_nodes = af_tab.get("nodes", [])
+                other_nodes = [n for n in existing_nodes if n.get("type") != "tab"]
+                tab_node = next((n for n in existing_nodes if n.get("type") == "tab"), None)
+                if tab_node is None:
+                    tab_node = {"id": tab_id, "type": "tab", "label": tab_org.SINGLE_TAB_LABEL}
+                merged_nodes = [tab_node] + other_nodes + [start_c, end_c] + shifted_nodes
+                merged_flow = dict(af_tab)
+                merged_flow["nodes"] = merged_nodes
+                merged_flow["id"] = tab_id
+                self.nr.update_flow(tab_id, merged_flow, force=True, allow_prod=allow_prod)
+                fid = deploy_id
+                created = True
+                gateway_node_ids = [n.get("id") for n in shifted_nodes if n.get("id")]
+                gateway_node_ids.extend([start_id, end_id])
+                tab_org_mode = "single_tab"
+                boundary_comment_ids = [start_id, end_id]
+                flow_y_offset = y_offset
+            except Exception as e:
+                return {"ok": False, "error": f"单 tab 模式部署失败: {e}"}
+        else:
+            try:
+                result = self.nr.create_or_update_flow(deploy_id, flow, force=True,
+                                                      allow_prod=allow_prod)
+            except Exception as e:
+                return {"ok": False, "error": f"NR 部署失败: {e}"}
+            fid = result.get("id") or deploy_id
+            created = result.get("created", False)
+            gateway_node_ids = [n.get("id") for n in flow.get("nodes", []) if n.get("id")]
+            tab_org_mode = "per_flow"
+            boundary_comment_ids = []
+            flow_y_offset = None
+            tab_id = fid
 
         # 登记 flow_catalog（owner=部署它的 agent）—— 撤回的唯一依据
-        # deployed_node_ids：compile 产出的全部节点 id，撤回时只删这些（手术式移除）
-        gateway_node_ids = [n.get("id") for n in flow.get("nodes", []) if n.get("id")]
         meta = {
             "flow_id": fid,
             "label": flow.get("label", ""),
@@ -3811,6 +3850,10 @@ class Gateway:
             "source": (p.source if p is not None else "compiler"),
             "nr_url": getattr(self.cfg, "nr_url", ""),
             "deployed_at": datetime.now(timezone.utc).isoformat(),
+            "tab_org_mode": tab_org_mode,
+            "tab_id": tab_id,
+            "boundary_comment_ids": boundary_comment_ids,
+            "y_offset": flow_y_offset,
         }
         self.state.upsert_flow(fid, meta)
         ProposalStore(self.cfg).mark_deployed(pid, fid)
@@ -5608,18 +5651,28 @@ class Gateway:
         deployed_ids = set(meta.get("deployed_node_ids") or [])
         label = meta.get("label", "")
 
+        # Tab 组织模式：单 tab 模式下读取 AutoFlow tab，否则读取 flow_id 对应的 tab
+        from . import tab_organizer as tab_org
+        flow_tab_org_mode = meta.get("tab_org_mode", "per_flow")
+        target_tab_id = meta.get("tab_id", flow_id) if flow_tab_org_mode == "single_tab" else flow_id
+
         # 读活 flow（可能用户已手动改/加节点）
         live = None
         nr_unreachable = False
         nr_err = None
         try:
-            live = self.nr.get_flow(flow_id)
+            live = self.nr.get_flow(target_tab_id)
         except Exception as e:
             nr_err = str(e)
             # 404 / not found 表示 flow 已不存在 → 视为 already_gone，不依赖 force
             if "404" in nr_err or "not found" in nr_err.lower():
-                live = None
-                nr_unreachable = False
+                if flow_tab_org_mode == "single_tab":
+                    # 单 tab 模式下 AutoFlow tab 不存在，视为已全部撤回
+                    live = None
+                    nr_unreachable = False
+                else:
+                    live = None
+                    nr_unreachable = False
             else:
                 nr_unreachable = True
                 live = None
@@ -5689,8 +5742,8 @@ class Gateway:
 
         nr_ok = True
         nr_err = None
-        if u_preserved == 0:
-            # tab 已空 → 删除整个 tab（clean）
+        if u_preserved == 0 and flow_tab_org_mode != "single_tab":
+            # tab 已空 → 删除整个 tab（clean），仅 per_flow 模式
             try:
                 self.nr.delete_flow(flow_id, force=True, allow_prod=True)
             except Exception as e:
@@ -5699,14 +5752,15 @@ class Gateway:
             action = "deleted_tab"
         else:
             # 仅移除网关节点，保留 tab + 用户节点（手术式）
-            reduced = dict(live)  # 保留 label/configs 等所有原始字段
+            # 单 tab 模式下更新 AutoFlow tab，per_flow 模式下更新 flow_id tab
+            reduced = dict(live)
             reduced["nodes"] = ([tab_node] if tab_node else []) + user_nodes
             try:
-                self.nr.update_flow_nodes(flow_id, reduced, force=True, allow_prod=True)
+                self.nr.update_flow_nodes(target_tab_id, reduced, force=True, allow_prod=True)
             except Exception as e:
                 nr_ok = False
                 nr_err = f"NR 更新失败: {e}"
-            action = "trimmed_tab"
+            action = "trimmed_tab" if flow_tab_org_mode != "single_tab" else "trimmed_single_tab"
 
         # NR 侧删除/更新失败后，仍清账本：避免 mutation 半残导致网关注册表永远卡死。
         # 原则：get_flow 阶段已确认这是本网关部署的 tab；mutation 失败通常是 NR 侧

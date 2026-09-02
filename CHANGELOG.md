@@ -1,3 +1,33 @@
+## 1.3.0 (2026-09-03)
+- Tab 组织模式分级方案 P0+P1：新增 tab_organizer.py 模块，支持单 tab 集中模式（所有 flow 合并到固定「AutoFlow」tab，用 AF_START/AF_END comment 节点标记边界，每个 flow 独立坐标区域）。
+- 部署逻辑支持单 tab 模式：deploy_proposal 增加 tab_org_mode 分支，单 tab 模式下合并节点到 AutoFlow tab 而非创建新 tab。
+- 撤回逻辑支持单 tab 模式：undeploy 按 flow 的 tab_org_mode 读取对应 tab，单 tab 模式下只移除本 flow 节点不删除整个 tab。
+- flow_catalog 增加 tab_org_mode / tab_id / boundary_comment_ids / y_offset 字段。
+- WebUI 设置页新增「高级设置」tab，可切换 Tab 组织模式（per_flow / single_tab），运行时生效免重启。
+- 配置优先级：运行时 feature_flags > 环境变量 AF_TAB_ORG_MODE > 默认 per_flow。
+
+## 1.2.5 (2026-09-03)
+- 全局文案修正：「待人类在 WebUI 审批」→「待用户在 WebUI 审批」，共修正 43 处（mcp_server.py 27处为根因——工具描述写"人类在 WebUI 审核"，AI 模仿用词）。
+- README 新增核心版章节：完整版 vs 核心版对比表、给 agent 的安装提示词、使用示例。
+- 一键安装命令改为安装到当前目录推荐。
+
+## 1.2.4 (2026-09-03)
+- 在线更新页新增版本简介（CHANGELOG），每个版本更新内容展示给用户。
+- 全面 UI 审查：统一标题（去掉部分 emoji）、统一术语（Agents/Agent管理、raw flow/原生 flow、身份模式/权限模式）、概览快速上手旧文案更新。
+- 新增 CHANGELOG 记录 7 个版本。
+
+## 1.2.3 (2026-09-03)
+- 在线更新页：去掉副标题、增加更新进度条、更新失败提示、国内镜像选择（self_update.py 增加 mirror 参数）。
+- Link API 首次访问引导增加示范链接。
+- ACP 对等令牌标题明示跟 memory-agent 对接，去掉"改名前叫 memory-worker"。
+- 教程系统重构为 6 教程 25 步，新增「两种使用途径」排第一、黑白箱概念解释、精简步骤。
+
+## 1.2.2 (2026-09-02)
+- WebUI 文案 v2：面向 hassbian 极客用户，保留 flow/DSL/子流程/Link API/MCP 等技术术语，仅 AutoFlow 特有概念调整。
+- 配色微调 #2F6BFF→#3B6FE8。
+- 新增教程系统（8教程37步→后续重构为6教程25步）、首次访问引导（7页面）、帮助系统（7概念详解）。
+- 侧边分组、Toast 类型、列表色条等 UX 优化。
+
 ## 1.2.1 (2026-09-01)
 - 每个 Link API 单独的「安装到 Node-RED」安装按钮 + 卸载按钮（#C）：新增 POST /api/link-apis/{name}/install 单装端点，list_subflows 增加 needs_nr_flow 标志供前端显隐安装按钮。
 
