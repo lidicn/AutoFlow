@@ -5,7 +5,7 @@ AutoFlow Gateway — 多选项决策存储（人类请示闸）
 
 区别于确认闸(ConfirmationGate)的 binary approve/reject：这里支持 N 选 1 的
 开放式请示。典型场景：deepseek 执行中遇到歧义/不可逆分叉，抛出一道选择题，
-人类在 WebUI「工作区」点选，结果回灌 deepseek 继续（双向闭环）。
+用户在 WebUI「工作区」点选，结果回灌 deepseek 继续（双向闭环）。
 
 落 SQLite autoflow.db，跨进程/重启持久。pending 优先排序。
 """

@@ -1380,9 +1380,9 @@ $("#dpBtn").onclick = async () => {
   try { const c = await api("GET", "/config"); cur = c.data?.deploy_policy || "review_all"; } catch {}
   modal("部署策略",
     `<p class="desc">决定自动生成的 flow 是否需要人工审核后再部署：<br>
-     • <b>review_all</b>：所有提案（含编译器产物）都需人类在 WebUI 点 Deploy 后部署（默认，最稳）。<br>
+     • <b>review_all</b>：所有提案（含编译器产物）都需用户在 WebUI 点 Deploy 后部署（默认，最稳）。<br>
      • <b>compiler_auto</b>：编译器产物标「可信」徽章、可自动部署；原生手写(raw)永远需人审。<br>
-     无论哪种策略，实际部署都仍过 staging 闸门(validate/lint/E2E)，且始终由人类在 WebUI 触发——绝不无人值守部署。</p>
+     无论哪种策略，实际部署都仍过 staging 闸门(validate/lint/E2E)，且始终由用户在 WebUI 触发——绝不无人值守部署。</p>
      <div class="field"><label>部署策略</label>
        <div class="seg" id="dpSeg">
          <button class="seg-btn" data-v="review_all">全部审核 (review_all)</button>

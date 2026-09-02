@@ -158,7 +158,7 @@ def autoflow_list_automations(keyword: str = "", only: str = "all",
     写新自动化前先查重、或跨会话找回自己/其他 agent 建过的东西。
 
     与 autoflow_list_entities（设备目录）互补：本工具找的是「已建成的自动化（flow）」，不是设备。
-    范围（仅 flow 自动化）：已部署到 NR 的 flow（state=deployed）+ 待人类审核的 flow 提案（state=pending）；
+    范围（仅 flow 自动化）：已部署到 NR 的 flow（state=deployed）+ 待用户审核的 flow 提案（state=pending）；
     网关改进类经验提案不混入。
 
     参数（均可选）：
@@ -237,13 +237,13 @@ async def autoflow_propose_dsl(dsl: Optional[str] = None, expected_postcondition
       '["light.x","switch.y"]'；② 对象数组 '[{"entity_id":"light.x"}, ...]'；③ 不传或 "[]"
       （仅依赖 DSL 内实体引用 + 闸门强制校验）。闸门只放行白名单内实体，引用白名单外实体直接判 FAIL。
     - 注意：实体一律用 autoflow_resolve_entity 返回的真实 entity_id；引用目录外的实体闸门直接判 FAIL。
-    - agent_id 由已认证身份自动注入；提案进入 raw，等待人类在 WebUI 审核升格。
+    - agent_id 由已认证身份自动注入；提案进入 raw，等待用户在 WebUI 审核升格。
     - 返回 {ok, proposal_id, scene_name, gate, flow, ...}；gate 实际含
       {passed, fully_verified, verdict, reasons, warnings, dead_branches,
        entity_count, external_calls, failures, replay_zero, replay_zero_policy,
        replayed_services, assertions}（写码以实际返回为准，勿仅依赖本节列举）。
     - strict：True 时 lint 存在任何 error/warning 即阻断提案（默认 False，仅随回执透出）。
-    - require_e2e：True 时提案带 e2e 意图，人类在 WebUI 点「部署到 NR」时会真正先跑一次
+    - require_e2e：True 时提案带 e2e 意图，用户在 WebUI 点「部署到 NR」时会真正先跑一次
       实机验证闸（verdict≠通过即拦截部署）。默认 False（沿用 env AUTOFLLOW_WHITEBOX_REQUIRE_E2E）。
       修复 iss_8d3cffaa96：此前该意图被静默吞掉、主部署路径从不调 e2e 闸。
     - 返回 {ok, proposal_id, scene_name, gate:{passed,...}, require_e2e, flow}。
@@ -391,12 +391,12 @@ def autoflow_list_pending() -> str:
     """列出当前 agent 的待人工确认操作（按身份隔离）。提交后在此查进度。
 
     返回两类：
-      · source="confirm" —— 经确认闸的写操作（原生手写部署/HA 服务调用等，等人类在 WebUI 批准）；
+      · source="confirm" —— 经确认闸的写操作（原生手写部署/HA 服务调用等，等用户在 WebUI 批准）；
       · source="proposal" —— 本 agent 经 autoflow_propose_dsl 提交、尚处 raw 的场景提案
-        （等人类在 WebUI 升格）。编译器 agent 提交场景后，进度应在这里看到，而非凭空消失。
+        （等用户在 WebUI 升格）。编译器 agent 提交场景后，进度应在这里看到，而非凭空消失。
 
     ★ 已部署的提案不在 pending 里，改列在 settled（WB72 F9 / iss_3fc501da8c）：
-      提案被人类在 WebUI 批准部署后，只写 deployed_flow_id，status 仍是 "raw"。
+      提案被用户在 WebUI 批准部署后，只写 deployed_flow_id，status 仍是 "raw"。
       此前本工具按 status="raw" 一把捞，于是**已经部署、已经真实生效**的提案
       永远滞留在「待办」里 —— 队列谎报待办，agent 也无从确认自己那条批没批。
       WebUI 侧列表（gateway.py:3448）早有「有 deployed_flow_id 就不算待审」这条
@@ -454,7 +454,7 @@ def autoflow_set_plan(current: str = "", overall: str = "",
 
 @mcp.tool()
 def autoflow_request_decision(question: str, options: list) -> str:
-    """【向人类请示 / 请求决策 · WebUI 通道】当你（deepseek）执行任务遇到需人类拍板的分叉点时，
+    """【向人类请示 / 请求决策 · WebUI 通道】当你（deepseek）执行任务遇到需用户拍板的分叉点时，
     用此工具抛出一道选择题：question 是问题，options 是 2~N 个候选（字符串列表）。
     人类会在 WebUI「工作区」看到此题并点选。
 
@@ -465,12 +465,12 @@ def autoflow_request_decision(question: str, options: list) -> str:
 
     闭环协议（必须照此续跑，否则回路在 MCP 通道上断开）：
       1. 调本工具 → 拿到 decision_id；
-      2. 把 decision_id 原样告诉人类，然后停下等人类在 WebUI 工作区拍板——
+      2. 把 decision_id 原样告诉用户，然后停下等用户在 WebUI 工作区拍板——
          不要在同一个回合反复轮询（人类要离开会话去 WebUI 点选，轮询拿不到结果只是空转）；
       3. 人类选完后（新回合触发）调一次 autoflow_get_decision(decision_id)，
          确认 status=="resolved" 后取出 chosen_text（人类的选择文本）继续任务。
     人类的选择也会经 WebUI 自动回灌，但你作为纯 MCP agent 必须靠 autoflow_get_decision 取回结果。
-    返回决策 id 与提示。不要滥用——普通进度同步用 autoflow_set_plan 即可，只有真正需人类拍板才请示。"""
+    返回决策 id 与提示。不要滥用——普通进度同步用 autoflow_set_plan 即可，只有真正需用户拍板才请示。"""
     gw = _gw()
     if not question or not isinstance(options, list) or len(options) < 1:
         return _js({"ok": False, "error": "question 必填且 options 至少 1 项"})
@@ -480,18 +480,18 @@ def autoflow_request_decision(question: str, options: list) -> str:
     d = res["decision"]
     return _js({"ok": True, "decision_id": d["id"],
                 "question": d["question"], "options": d["options"],
-                "note": "已提交人类决策队列；人类在 WebUI 工作区选择后，用 autoflow_get_decision(decision_id) 取回选择续跑。"})
+                "note": "已提交用户决策队列；用户在 WebUI 工作区选择后，用 autoflow_get_decision(decision_id) 取回选择续跑。"})
 
 @mcp.tool()
 def autoflow_get_decision(decision_id: str) -> str:
-    """【取回人类决策结果】对应 autoflow_request_decision 抛出的决策。
-    人类在 WebUI 拍板后，你在「新回合」调一次本工具取回结果即可；
+    """【取回用户决策结果】对应 autoflow_request_decision 抛出的决策。
+    用户在 WebUI 拍板后，你在「新回合」调一次本工具取回结果即可；
     不要在单回合内循环轮询（人类需离开会话操作 WebUI，轮询只会空转）。
     - decision_id：autoflow_request_decision 返回的 decision_id。
     返回完整决策记录：{id, question, options, status, chosen_idx, chosen_text, created_at, resolved_at}。
-      · status=="pending"  → 人类尚未选择，等人类在 WebUI 拍板后再取回；
+      · status=="pending"  → 用户尚未选择，等用户在 WebUI 拍板后再取回；
       · status=="resolved" → 可用 chosen_text 续跑。
-    典型协议：request_decision →（让出回合，人类在 WebUI 拍板）→ 新回合 get_decision 一次 → 读 chosen_text 续跑。"""
+    典型协议：request_decision →（让出回合，用户在 WebUI 拍板）→ 新回合 get_decision 一次 → 读 chosen_text 续跑。"""
     gw = _gw()
     rec = gw.decisions.get(decision_id)
     if rec is None:
@@ -500,11 +500,11 @@ def autoflow_get_decision(decision_id: str) -> str:
 
 @mcp.tool()
 def autoflow_list_decisions(status: str = "", limit: int = 50) -> str:
-    """【查看决策队列】列出人类决策（pending 优先，其次时间倒序）。
-    - status：按状态过滤——"pending"（待人类选择）/ "resolved"（已选）/ 留空=全部。
+    """【查看决策队列】列出用户决策（pending 优先，其次时间倒序）。
+    - status：按状态过滤——"pending"（待用户选择）/ "resolved"（已选）/ 留空=全部。
     - limit：最多返回几条（默认 50）。
     返回列表，每项含 {id, question, options, status, chosen_idx, chosen_text, created_at, resolved_at}。
-    用途：先 list pending 看是否有在等人类的决策；人类在 WebUI 选完后，用 autoflow_get_decision(decision_id) 取回具体选择。"""
+    用途：先 list pending 看是否有在等用户的决策；用户在 WebUI 选完后，用 autoflow_get_decision(decision_id) 取回具体选择。"""
     gw = _gw()
     rows = gw.list_decisions(status=status or None, limit=limit)
     return _js({"ok": True, "count": len(rows), "decisions": rows})
@@ -811,7 +811,7 @@ def autoflow_report_issue(title: str, body: str, task_id: str = "",
     - task_id：可选，关联的验证任务 id（如 hist2_xxx）；非任务类缺陷可空。
     - severity：low|medium|high|critical（默认 medium）。
     - category：defect(缺陷)|doc(文档)|dsl(语法)|entity(实体解析)|feature(新需求)|other（默认 defect）。
-    返回 issue_id；人类在 WebUI/CLI 审阅后处理。不要滥用——普通进度同步请用 autoflow_set_plan。"""
+    返回 issue_id；用户在 WebUI/CLI 审阅后处理。不要滥用——普通进度同步请用 autoflow_set_plan。"""
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
@@ -900,7 +900,7 @@ def autoflow_deploy_raw(flow_json: str, label: str = "", target: str = "staging"
     - label：自定义标签（缺省从 flow_json 提取）。
     - target："staging"(inject 触发，默认) / "prod"(真实 HA 事件)。
     - force：是否强制覆盖同名已存在 flow（默认不覆盖）。
-    - require_e2e：True 时提案带 e2e 意图，人类在 WebUI 点「部署到 NR」时会真正先跑一次
+    - require_e2e：True 时提案带 e2e 意图，用户在 WebUI 点「部署到 NR」时会真正先跑一次
       实机验证闸（verdict≠通过即拦截部署）。默认 False（沿用 env AUTOFLLOW_WHITEBOX_REQUIRE_E2E）。
       修复 iss_8d3cffaa96：此前该意图被静默吞掉、主部署路径从不调 e2e 闸。
 
@@ -910,7 +910,7 @@ def autoflow_deploy_raw(flow_json: str, label: str = "", target: str = "staging"
       3. 静态 Linter 硬伤集（R13/R15/R17/R20/R22）+ L2 逻辑可达性仿真（fail-open）
       4. 把「已校验的 flow + 校验摘要」落为提案（kind=skill, content.type=raw_flow）
 
-    ⚠️ 此工具**不再直接部署**：返回 {ok, proposal_id, ...}。提案需人类在 WebUI「场景提案」
+    ⚠️ 此工具**不再直接部署**：返回 {ok, proposal_id, ...}。提案需用户在 WebUI「场景提案」
        面板审核后，点「部署到 NR」才真正写入 Node-RED。这是与编译器 DSL 路径（autoflow_propose_dsl）
        完全统一的提案闸，避免一轮原生手写任务就刷出几十个未经人审的 tab。
     ⚠️ 仅专家/开发者身份可经 /mcp-white（或 /mcp-admin）调用；普通身份只能用 autoflow_propose_dsl。"""
@@ -932,7 +932,7 @@ def autoflow_deploy_raw(flow_json: str, label: str = "", target: str = "staging"
             return _js({"ok": False, "error": "flow_json 必须是 JSON 对象或节点数组"})
     except (json.JSONDecodeError, TypeError, ValueError) as e:
         return _js({"ok": False, "error": f"flow_json 非法 JSON: {e}"})
-    # 原生手写统一：不再直写 NR，改为落提案（content.type=raw_flow），返回 proposal_id 待人类审核部署。
+    # 原生手写统一：不再直写 NR，改为落提案（content.type=raw_flow），返回 proposal_id 待用户审核部署。
     return _js(_gw().propose_raw(data, agent_id=aid, label=label or None,
                                  target=target, force=force, require_e2e=require_e2e))
 
@@ -965,7 +965,7 @@ def autoflow_create_subflow(dsl_name: str, name: str, definition_json: str,
       2. 校验 definition 含必填字段 id / nodes / in_ports / out_ports
       3. 把「子流程定义」落为提案（kind=subflow, content.type=subflow）
 
-    ⚠️ 此工具**不直接注册**：返回 {ok, proposal_id, ...}。提案需人类在 WebUI「场景提案」
+    ⚠️ 此工具**不直接注册**：返回 {ok, proposal_id, ...}。提案需用户在 WebUI「场景提案」
        面板审核后，点「部署到 NR」才真正写入 Node-RED 子流程实例并登记到网关子流程注册表
        （subflow_registry），此后 DSL / 原生手写即可用 调用子流程 <dsl_name> 引用它。
       这是与 DSL 路径（autoflow_propose_dsl）/ 原生手写路径（autoflow_deploy_raw）完全统一的提案闸。
@@ -1460,7 +1460,7 @@ def autoflow_apply(mode: str, correction_json: str, flow_id: str = "",
       A/C：{"node_patches":[{"match":{"name":"开灯"},"set":{"name":"开主卧灯"}}], "reason":"为什么改"}
            或 {"dsl":"场景: ...", "reason":"..."}
       B  ：{"domain":"light","service":"turn_on","data":{"entity_id":"light.study"},"reason":"..."}
-      reason 强烈建议写（会原样呈现给人类审批，写不清楚容易被拒）。
+      reason 强烈建议写（会原样呈现给用户审批，写不清楚容易被拒）。
 
     ★自愈闭环（Self-Healing Loop）安全模型（改 flow 是高风险的，但有界自动写回）：
       - 默认**自动写回**：autoflow_apply 调一次即落 apply 前快照做回滚点、直接 modify_flow 写回，

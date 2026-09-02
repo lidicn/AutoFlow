@@ -2231,7 +2231,7 @@ class Gateway:
         - expected_postconditions：[{entity_id, state}]，闸门据此断言 vhass 后置状态。
         - vhass_store：测试/外部可注入内存 vhass；缺省从 staging catalog 镜像或 demo。
         - strict：True 时，lint 存在任何 error/warning 即阻断提案（默认 False，仅随回执透出）。
-        - require_e2e：True 时，提案落档带 e2e 意图标记；人类在 WebUI 点「部署到 NR」时，
+        - require_e2e：True 时，提案落档带 e2e 意图标记；用户在 WebUI 点「部署到 NR」时，
           deploy_proposal 会真正先跑一次 run_e2e_trace_raw 实机验证闸（verdict≠通过则拦截部署）。
           默认 False（沿用 env AUTOFLLOW_WHITEBOX_REQUIRE_E2E）。修复 iss_8d3cffaa96：此前该意图
           被 JSON-RPC 静默吞掉、且主部署路径 deploy_proposal 从不调 e2e 闸。
@@ -2678,7 +2678,7 @@ class Gateway:
 
     def set_tab_state_submit(self, flow_id: str, enabled: bool, agent_id: str,
                              reason: str = "") -> Dict[str, Any]:
-        """写：启用/禁用单个 NR tab → 经确认闸提交（人类批准才执行）。
+        """写：启用/禁用单个 NR tab → 经确认闸提交（用户批准才执行）。
 
         - 提交即校验 flow_id 存在性（NR get_flow 404 → unknown=True），避免「先落待确认、
           执行时才发现不存在」的静默错改（AC10）。
@@ -3484,9 +3484,9 @@ class Gateway:
 
     @staticmethod
     def proposal_requires_review(policy: str, source: str) -> bool:
-        """按部署策略决定提案是否需要人类审核（按提案来源 source 分流）。
+        """按部署策略决定提案是否需要用户审核（按提案来源 source 分流）。
 
-        - ``review_all``（默认）：所有提案都需人类在 WebUI 审核后部署，行为不变。
+        - ``review_all``（默认）：所有提案都需用户在 WebUI 审核后部署，行为不变。
         - ``compiler_auto``：来源为 ``compiler``（编译器产物、且闸门已通过）视为可自动部署，
           无需人审；``raw``（原生手写）/``unknown`` 永远需人审。
         - 未知策略值一律回退为需人审（fail-safe）。
@@ -3526,7 +3526,7 @@ class Gateway:
             r["_telemetry"] = _tag_action("deploy_proposal", r, agent_id,
                                           extra={"pid": pid}, log_path=self._telemetry_log)
             return r
-        # 部署策略：按当前策略 + 提案来源决定是否需要人类审核（仅影响徽章/提示，
+        # 部署策略：按当前策略 + 提案来源决定是否需要用户审核（仅影响徽章/提示，
         # 实际部署始终由 WebUI 人工点击触发，且仍过 staging 闸门——绝不无人值守部署）。
         policy = get_deploy_policy(self.cfg)
         requires_review = self.proposal_requires_review(policy, p.source)
@@ -3886,7 +3886,7 @@ class Gateway:
             }
 
         # 第 1 步：写 NR 子流程实例（增量 append，不整实例替换）。
-        # allow_prod 透传人类在 WebUI「部署到 NR」时的授权（与 flow 部署路径一致）；
+        # allow_prod 透传用户在 WebUI「部署到 NR」时的授权（与 flow 部署路径一致）；
         # prod 下需 allow_prod=True 才放行 _guard_prod，否则沿用 deploy_proposal 的默认 True。
         try:
             self.nr.create_subflow(
@@ -5277,7 +5277,7 @@ class Gateway:
         与 deploy_raw 复用同一套校验（schema + lint 硬伤集 R13/R15/R17/R20/R22 +
         L2 逻辑仿真 + HA server 替换），但**不写 NR、不登记 catalog**，而是把「准备就绪的
         flow + 校验摘要」存入 ProposalStore（kind="skill"，content.type="raw_flow"），
-        交由人类在 WebUI 提案面板审核后，由 deploy_proposal 的 raw_flow 分支一步部署。
+        交由用户在 WebUI 提案面板审核后，由 deploy_proposal 的 raw_flow 分支一步部署。
 
         设计取向（fail-closed 分层，方案A）：校验/lint/逻辑问题**只附在提案内容里供人审**，
         不拒绝落提案（保留 agent 探索性 fail-open）——但**无歧义硬错**（lint error 级阻断集 +
@@ -5475,7 +5475,7 @@ class Gateway:
             "ok": True,
             # WB24 NEW-F5（透明性）：回显归一化后的 flow_json（已完成 HA server 注入/占位符回退），
             # 便于 autoflow_deploy_raw 调用方核对归一化结果（如 trigger-state 的 version/entities 改写），
-            # 无需等人类在 WebUI 部署后才知情。
+            # 无需等用户在 WebUI 部署后才知情。
             "flow_json": flow,
             "proposal_id": proposal_id,
             "label": flow.get("label", ""),
@@ -5541,7 +5541,7 @@ class Gateway:
         _label = name or dsl_name
         # WB85 F4：子流程提案也要跑 flow_linter（与顶层 propose_dsl 一致），
         # 让 R41 等反模式警告对子流程可见——旧实现不 lint，子流程可藏『link in→api 终点』
-        # 这类 round21 竞态危险形状。非阻断：仅随回执透出，由人类在 WebUI 审核时看到。
+        # 这类 round21 竞态危险形状。非阻断：仅随回执透出，由用户在 WebUI 审核时看到。
         lint_issues = lint_flow({"nodes": _nodes})
         lint_summary = [{"rule": v.get("rule"), "level": v.get("level"), "message": v.get("message")}
                         for v in lint_issues if v.get("level") in ("error", "warning")]
@@ -8295,14 +8295,14 @@ class Gateway:
     def request_decision(self, question: str, options: List[str],
                          source: str = "deepseek") -> Dict[str, Any]:
         """接收一道选择题（人类请示）→ 落库 → 后台线程 Bark 催办。
-        立即返回决策记录；人类在 WebUI 工作区点选后由 resolve_decision 闭环。非阻塞。"""
+        立即返回决策记录；用户在 WebUI 工作区点选后由 resolve_decision 闭环。非阻塞。"""
         rec = self.decisions.create(question, options, source=source)
         did = rec["id"]
         # R10(#round4) iss_fb16973875：A24 报「apply 回执 decision_id 与库错位一位」→
         # 按回执 id 调 get_decision 必「决策不存在」，apply→get_decision 闭环静默断掉。
         # 真码复盘未能复现（store 层 300 轮 create→get 零错位、id 同源无中间改写），
         # 但**「复现不出」不等于「不会发生」**——这条闭环一旦错位是完全静默的：
-        # agent 会拿着一个永远查不到的 id 空等人类拍板。故加读回自检：回执 id 必须
+        # agent 会拿着一个永远查不到的 id 空等用户拍板。故加读回自检：回执 id 必须
         # 能从库里查回来，查不回就把 ok 打成 False 并如实说明，绝不把死 id 当成功回执发出去。
         # ── A24(#round5) 根因排查结论（iss_fb16973875 续）──
         # 穷举全仓库「dec_」id 去向后确认：唯一生成点是 decision_store.create 的

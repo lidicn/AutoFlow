@@ -150,20 +150,26 @@ AutoFlow 的价值随「你想让家里变聪明的野心」增长。自动化�
 
 ### 第 1 步：一条命令装好
 
+**安装到当前目录（推荐，NAS 用户常用）：**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lidicn/AutoFlow/main/install.sh | bash -s -- -d "$(pwd)"
+```
+
+**安装到默认目录（Linux `/opt/autoflow`，macOS `~/autoflow`）：**
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lidicn/AutoFlow/main/install.sh | bash
 ```
 
 脚本会自动：检查 Docker → 下载代码 → 构建镜像 → 启动 → 等待服务就绪。
 
-> 如果报 `mkdir: cannot create directory '/opt/autoflow': Permission denied`，说明当前用户没权限写
-> `/opt`。两种改法：① 用 `| sudo bash` 安装到 `/opt/autoflow`；② 指定你有权限的目录：
-> `curl -fsSL .../install.sh | bash -s -- -d /volume1/docker/autoflow`。
+> 安装完成后，代码和数据都在你指定的目录里。进入该目录可以看到 `docker-compose.yml`、`data/`、`.env` 等文件。
+> 以后更新：在安装目录下执行 `bash install.sh --update`（**保留**你的数据和配置）。
 
-- 装到哪儿：Linux/NAS 默认 `/opt/autoflow`（无 root 权限时用 `-d` 改路径），macOS 默认 `~/autoflow`
 - 想换目录：`bash install.sh -d /volume1/docker/autoflow`
 - 机器上没 Docker（仅 Linux）：`bash install.sh --install-docker`
-- 以后更新：`bash install.sh --update`（**保留**你的数据和配置）
+- 中国大陆网络慢：`export GITHUB_PROXY=https://ghproxy.com/` 后再执行安装命令
 
 ### 第 2 步：拿到控制台钥匙
 
@@ -401,7 +407,76 @@ HA 跟 AutoFlow 在同一台机器时，地址要写 `http://host.docker.interna
 
 ---
 
-## 九、给开发者
+## 九、核心版（轻量 Node-RED 操作工具）
+
+如果你不需要完整的网关、WebUI 和安全闸，只是想让 AI 能安全地读写 Node-RED，可以用**核心版**。
+
+### 什么是核心版
+
+核心版是一个零依赖的 Python 库（`nr_client.py`）+ Skill 文档，封装了 Node-RED 的认证、flow 读写、节点操作等能力。AI agent 通过 Skill 调用它，可以：
+
+- 查询 Node-RED 中的 flow、tab、节点
+- 创建、更新、删除 flow
+- 触发 inject 节点、读取 debug 输出
+- 批量操作节点
+
+**与完整版的区别：**
+
+| | 完整版（网关） | 核心版（轻量工具） |
+|---|---|---|
+| 部署方式 | Docker 容器 | 单个 Python 文件 |
+| WebUI | ✅ 有 | ❌ 无 |
+| 安全闸 | ✅ 有 | ❌ 无（AI 直接操作 NR） |
+| MCP 服务器 | ✅ 有 | ❌ 无（通过 Skill 调用） |
+| 凭证管理 | 网关独占 | 环境变量配置 |
+| 适合场景 | 日常使用、多 AI 管理 | 高级用户、特定任务自动化 |
+
+### 给 AI Agent 的安装提示词
+
+把下面这段话发给你的 AI agent（Claude、DeepSeek、Cursor 等），它会自动完成核心版的安装和配置：
+
+```
+请安装 AutoFlow 核心版到当前目录，步骤如下：
+
+1. 创建目录并下载核心文件：
+   mkdir -p autoflow_core && cd autoflow_core
+   curl -fsSL https://raw.githubusercontent.com/lidicn/AutoFlow/main/core/skill/scripts/nr_client.py -o nr_client.py
+   curl -fsSL https://raw.githubusercontent.com/lidicn/AutoFlow/main/core/skill/SKILL.md -o SKILL.md
+
+2. 配置环境变量（在 .env 或 shell 中设置）：
+   NR_URL=http://<你的Node-RED地址>:1880
+   NR_USER=<Node-RED用户名>
+   NR_PASS=<Node-RED密码>
+
+3. 阅读 SKILL.md 了解可用的工具和调用方式。
+
+4. 先运行 dry-run 模式验证连接，确认无误后再执行写操作。
+```
+
+### 核心版使用示例
+
+```python
+from nr_client import NodeREDClient
+
+client = NodeREDClient()
+
+# 列出所有 flow
+flows = client.list_flows()
+for f in flows:
+    print(f["id"], f.get("label", ""))
+
+# 获取单个 flow
+flow = client.get_flow("flow_id_here")
+
+# 触发 inject 节点
+client.trigger_inject("node_id_here")
+```
+
+> ⚠️ 核心版没有安全闸，AI 可以直接操作 Node-RED。建议在测试环境使用，或配合 `--dry-run` 模式先预览变更。
+
+---
+
+## 十、给开发者
 
 - **架构与设计**：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - **本地开发 / 容器部署**：[DEPLOY.md](DEPLOY.md)

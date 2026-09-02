@@ -4,7 +4,7 @@
 AutoFlow Gateway — 提案 / 经验沉淀存储（raw → candidate → public）
 
 agent 可通过 MCP 提交提案（认为网关该改的地方 / 产出的经验 skill / 约定修正）。
-人类在 WebUI 审核：升格（raw→candidate→public）或拒绝。
+用户在 WebUI 审核：升格（raw→candidate→public）或拒绝。
 升格到 public 时，把内容落盘为公用 skill 文档 `data/<env>/experience/public/<slug>.md`，
 实现「经验复利 / 集体智能」——agent 留下的经验反哺网关、可被多 agent 复用。
 """
@@ -396,7 +396,7 @@ class ProposalStore:
         if p is None:
             raise KeyError(f"提案不存在: {pid}")
         # 子流程提案不走「升格为经验 skill」路径（raw→candidate→public 落盘文档），
-        # 它只能由人类在 WebUI「部署」注册到网关（写 NR 子流程实例 + 入 subflow_registry）。
+        # 它只能由用户在 WebUI「部署」注册到网关（写 NR 子流程实例 + 入 subflow_registry）。
         if p.kind == "subflow":
             raise ValueError("子流程提案不能升格为经验 skill，请在 WebUI 点「部署」注册到网关")
         if p.status == "rejected":
