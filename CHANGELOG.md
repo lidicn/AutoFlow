@@ -1,3 +1,11 @@
+## 1.3.1 (2026-09-03)
+- P2 模式切换+一键迁移：新增 per_flow ↔ single_tab 双向迁移功能，迁移过程重新分配坐标、更新账本、删除原 tab，WebUI 高级设置页提供迁移按钮和状态统计。
+- P3 自动分流预警：单 tab 模式下监控 AutoFlow tab 节点总数，超过阈值（默认200，可通过 AF_SINGLE_TAB_WARN_THRESHOLD 配置）时在 WebUI 显示黄色预警卡片。
+- P4 混合模式：deploy_proposal 增加 target_tab 参数，单个 flow 可手动指定目标 tab（按 tab id 或 label 匹配，不存在则自动创建），flow_catalog 记录 tab_org_mode=mixed。
+- 撤回逻辑支持 mixed 模式：按 flow 的 tab_org_mode 读取对应 tab，精确删除本 flow 节点。
+- 新增 API：GET /api/tab-org/status（迁移状态+预警）、POST /api/tab-org/migrate（执行迁移）。
+- WebUI 高级设置页重构：增加分流预警显示、迁移状态统计、一键迁移按钮、混合模式说明。
+
 ## 1.3.0 (2026-09-03)
 - Tab 组织模式分级方案 P0+P1：新增 tab_organizer.py 模块，支持单 tab 集中模式（所有 flow 合并到固定「AutoFlow」tab，用 AF_START/AF_END comment 节点标记边界，每个 flow 独立坐标区域）。
 - 部署逻辑支持单 tab 模式：deploy_proposal 增加 tab_org_mode 分支，单 tab 模式下合并节点到 AutoFlow tab 而非创建新 tab。
