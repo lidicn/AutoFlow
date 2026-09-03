@@ -2347,17 +2347,23 @@ async function loadAdvancedSettings() {
     // 同时加载 config 和 tab-org 状态
     const [cfgR, statusR] = await Promise.all([
       api("GET", "/config"),
-      api("GET", "/tab-org/status").catch(() => ({ ok: false, data: {} }))
+      api("GET", "/tab-org/status").catch((e) => ({ ok: false, data: { error: e.message }, statusError: true }))
     ]);
     if (!cfgR.ok) throw new Error(cfgR.data?.error || "加载失败");
     const cfg = cfgR.data || {};
     const status = statusR.data || {};
+    const statusError = statusR.statusError || !statusR.ok;
     const currentMode = cfg.tab_org_mode || "per_flow";
     const perFlowCount = status.per_flow_count || 0;
     const singleTabCount = status.single_tab_count || 0;
     const warning = status.warning;
 
     body.innerHTML = `
+      ${statusError ? `
+      <div class="card" style="border-left:4px solid #ef4444;background:#fef2f2">
+        <h3 style="color:#991b1b">❌ 状态服务不可用</h3>
+        <p class="desc" style="color:#7f1d1d">Tab 组织模式状态获取失败：${status.error || "未知错误"}。迁移功能暂不可用，请检查网关日志或稍后重试。</p>
+      </div>` : ""}
       ${warning ? `
       <div class="card" style="border-left:4px solid #f59e0b;background:#fffbeb">
         <h3 style="color:#92400e">⚠️ 分流预警</h3>
@@ -2436,7 +2442,7 @@ async function loadAdvancedSettings() {
         saveBtn.disabled = true;
         saveBtn.textContent = "保存中…";
         try {
-          const r = await api("POST", "/settings", { tab_org_mode: mode });
+          const r = await api("PUT", "/settings", { tab_org_mode: mode });
           if (r.ok) {
             $("#adv-save-hint").textContent = "✅ 已保存，新部署的 flow 将按新模式组织";
             setTimeout(() => { $("#adv-save-hint").textContent = ""; }, 5000);

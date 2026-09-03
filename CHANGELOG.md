@@ -1,3 +1,11 @@
+## 1.3.2 (2026-09-03)
+- 修复 P0：`/tab-org/status` 和 `/tab-org/migrate` 恒 500 —— 根因是用 `request.app.state.gateway` 而非闭包变量 `gw`，且遗留记录缺 `tab_org_mode` 字段时缺少异常处理。
+- 修复 P1：WebUI「保存设置」用 POST `/settings`（405），改为 PUT（后端仅接受 PUT）。
+- 修复 P1：前端 `/tab-org/status` 失败时静默吞错，改为显式显示红色错误提示卡片，避免用户误以为「没有可迁移的 flow」。
+- 修复 P1：P4 混合模式 `target_tab` 参数在 MCP 工具中未暴露 —— `autoflow_deploy_raw` 增加 `target_tab` 参数，`propose_raw` 增加 `target_tab` 参数并写入提案 content，`deploy_proposal` 从提案读取 `target_tab`。
+- 增强：`get_migration_status` 增加 mixed_count 统计，对非 dict 类型的 flow meta 做健壮性处理。
+- 增强：迁移 API 失败时返回 traceback 最后 500 字符，便于排障。
+
 ## 1.3.1 (2026-09-03)
 - P2 模式切换+一键迁移：新增 per_flow ↔ single_tab 双向迁移功能，迁移过程重新分配坐标、更新账本、删除原 tab，WebUI 高级设置页提供迁移按钮和状态统计。
 - P3 自动分流预警：单 tab 模式下监控 AutoFlow tab 节点总数，超过阈值（默认200，可通过 AF_SINGLE_TAB_WARN_THRESHOLD 配置）时在 WebUI 显示黄色预警卡片。

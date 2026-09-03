@@ -463,16 +463,29 @@ def migrate_single_tab_to_per_flow(nr_client, state, allow_prod: bool = True
 
 def get_migration_status(state) -> Dict[str, Any]:
     """获取当前迁移状态统计。"""
-    catalog = state.get_flow_catalog()
-    flows = catalog.get("flows", {})
-    per_flow_count = sum(1 for m in flows.values()
-                          if m.get("tab_org_mode", "per_flow") == "per_flow")
-    single_tab_count = sum(1 for m in flows.values()
-                           if m.get("tab_org_mode") == "single_tab")
+    try:
+        catalog = state.get_flow_catalog()
+    except Exception:
+        catalog = {"flows": {}}
+    flows = catalog.get("flows", {}) if isinstance(catalog, dict) else {}
+    per_flow_count = 0
+    single_tab_count = 0
+    mixed_count = 0
+    for m in flows.values():
+        if not isinstance(m, dict):
+            continue
+        mode = m.get("tab_org_mode", "per_flow")
+        if mode == "single_tab":
+            single_tab_count += 1
+        elif mode == "mixed":
+            mixed_count += 1
+        else:
+            per_flow_count += 1
     return {
         "current_mode": get_tab_org_mode(),
         "per_flow_count": per_flow_count,
         "single_tab_count": single_tab_count,
+        "mixed_count": mixed_count,
         "total_flows": len(flows),
         "can_migrate_to_single": per_flow_count > 0,
         "can_migrate_to_per_flow": single_tab_count > 0,

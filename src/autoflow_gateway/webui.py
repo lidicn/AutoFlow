@@ -507,8 +507,13 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     async def tab_org_status(request: Request):
         """获取当前 Tab 组织模式状态和迁移统计。"""
         from . import tab_organizer as tab_org
-        gw = request.app.state.gateway
-        status = tab_org.get_migration_status(gw.state)
+        try:
+            status = tab_org.get_migration_status(gw.state)
+        except Exception as e:
+            return _js({"ok": False, "error": f"获取状态失败: {e}",
+                        "current_mode": tab_org.get_tab_org_mode(),
+                        "per_flow_count": 0, "single_tab_count": 0,
+                        "total_flows": 0, "warning": None}, 500)
         # P3: 单 tab 节点数预警
         warning = None
         if tab_org.is_single_tab_mode():
@@ -540,7 +545,6 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         if target_mode not in ("single_tab", "per_flow"):
             return _js({"ok": False, "error": "target_mode 必须是 single_tab 或 per_flow"}, 400)
 
-        gw = request.app.state.gateway
         try:
             if target_mode == "single_tab":
                 result = tab_org.migrate_per_flow_to_single_tab(gw.nr, gw.state, allow_prod=True)
@@ -548,7 +552,9 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                 result = tab_org.migrate_single_tab_to_per_flow(gw.nr, gw.state, allow_prod=True)
             return _js(result)
         except Exception as e:
-            return _js({"ok": False, "error": f"迁移失败: {e}"}, 500)
+            import traceback
+            return _js({"ok": False, "error": f"迁移失败: {e}",
+                        "traceback": traceback.format_exc()[-500:]}, 500)
 
     # ── 诊断查看器（P4-C，只读）──
     async def diagnostics_view(request: Request):

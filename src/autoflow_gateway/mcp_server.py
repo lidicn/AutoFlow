@@ -246,6 +246,9 @@ async def autoflow_propose_dsl(dsl: Optional[str] = None, expected_postcondition
     - require_e2e：True 时提案带 e2e 意图，用户在 WebUI 点「部署到 NR」时会真正先跑一次
       实机验证闸（verdict≠通过即拦截部署）。默认 False（沿用 env AUTOFLLOW_WHITEBOX_REQUIRE_E2E）。
       修复 iss_8d3cffaa96：此前该意图被静默吞掉、主部署路径从不调 e2e 闸。
+    - target_tab：【P4 混合模式】指定部署到哪个 Node-RED tab（按 tab id 或 label 匹配，不存在则自动创建）。
+      留空（默认）则按当前 Tab 组织模式部署（per_flow=独立tab / single_tab=AutoFlow集中tab）。
+      示例：target_tab="客厅" → 该 flow 部署到「客厅」tab 中，与其他 flow 共存。
     - 返回 {ok, proposal_id, scene_name, gate:{passed,...}, require_e2e, flow}。
     ⚠️ 不要用已废弃的 autoflow_propose_scene。"""
     agent = get_current_agent()
@@ -879,7 +882,8 @@ for _fn in _USER_TOOLS:
 @mcp_admin.tool()
 @mcp.tool()
 def autoflow_deploy_raw(flow_json: str, label: str = "", target: str = "staging",
-                        force: bool = False, require_e2e: bool = False) -> str:
+                        force: bool = False, require_e2e: bool = False,
+                        target_tab: str = "") -> str:
     """【⚠️逃生舱·非首选】把 Agent 产出的 Node-RED flow JSON 提交为**提案**（不直接部署到 NR）。
 
     🚨 这是**逃生舱（escape hatch）**，不是首选路径：手写裸 NR 节点 JSON 既费 token（一个 flow
@@ -934,7 +938,8 @@ def autoflow_deploy_raw(flow_json: str, label: str = "", target: str = "staging"
         return _js({"ok": False, "error": f"flow_json 非法 JSON: {e}"})
     # 原生手写统一：不再直写 NR，改为落提案（content.type=raw_flow），返回 proposal_id 待用户审核部署。
     return _js(_gw().propose_raw(data, agent_id=aid, label=label or None,
-                                 target=target, force=force, require_e2e=require_e2e))
+                                 target=target, force=force, require_e2e=require_e2e,
+                                 target_tab=target_tab or None))
 
 @mcp_admin.tool()
 @mcp.tool()

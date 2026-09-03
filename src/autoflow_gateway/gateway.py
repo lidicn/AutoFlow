@@ -3540,6 +3540,9 @@ class Gateway:
             return r
 
         ctype = content.get("type", "dsl")
+        # P4: 从提案 content 读取 target_tab（如果调用方未显式指定）
+        if target_tab is None:
+            target_tab = content.get("target_tab")
         if ctype == "subflow":
             # 子流程提案：人审通过后原子注册（写 NR 子流程实例 + 登记 subflow_registry）。
             # 不走 DSL/flow 部署路径（无 staging 闸门 / HA server 注入 / flow_catalog / e2e 闸）。
@@ -5382,7 +5385,8 @@ class Gateway:
                     label: Optional[str] = None,
                     target: str = "staging", force: bool = False,
                     run_gate: bool = True, dry_run: bool = False,
-                    require_e2e: bool = False) -> Dict[str, Any]:
+                    require_e2e: bool = False,
+                    target_tab: Optional[str] = None) -> Dict[str, Any]:
         """白盒提案闸：接受 Agent 产出的原始 Node-RED flow JSON，经校验后【落提案】而非直写 NR。
 
         与 deploy_raw 复用同一套校验（schema + lint 硬伤集 R13/R15/R17/R20/R22 +
@@ -5552,6 +5556,7 @@ class Gateway:
             "label": flow.get("label", ""),
             "node_count": len(nodes),
             "require_e2e": bool(require_e2e),
+            "target_tab": target_tab,
             "validation": validation,
             "lint_error_count": sum(1 for v in lint_issues if v["level"] == "error"),
             "lint_warning_count": sum(1 for v in lint_issues if v["level"] == "warning"),
