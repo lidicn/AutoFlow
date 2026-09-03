@@ -2428,9 +2428,9 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/deploy-tokens/{id}/rollback", deploy_token_rollback, methods=["POST"]),
         Route("/api/deploy-tokens/{id}/diff", deploy_token_diff, methods=["GET"]),
         # Lab 沙盒部署（缺陷D修复）
-        Route("/lab/validate", lab_validate, methods=["POST"]),
-        Route("/lab/deploy", lab_deploy, methods=["POST"]),
-        Route("/lab/deploys", lab_deploys, methods=["GET"]),
+        Route("/api/lab/validate", lab_validate, methods=["POST"]),
+        Route("/api/lab/deploy", lab_deploy, methods=["POST"]),
+        Route("/api/lab/deploys", lab_deploys, methods=["GET"]),
         # 设置管理界面（C3/C21/C25）
         Route("/api/connection/test", connection_test, methods=["POST"]),
         # 连接设置（#45）：HA / NR / Bark 凭据界面化，避免用户硬编码进脚本

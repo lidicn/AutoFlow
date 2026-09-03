@@ -3742,18 +3742,19 @@ class Gateway:
             except Exception:
                 pass
             if is_empty_tab:
-                # 空 tab 是撤回后残留，允许覆盖（视为本网关之前部署的）
-                pass
+                # 空 tab 是撤回后残留，直接覆盖原 tab（设置 target_flow_id 走 update_flow 分支）
+                target_flow_id = existing["id"]
             elif not force:
                 return {
                     "ok": False, "conflict": True,
                     "error": f"NR 中已存在同名 flow「{label}」({existing.get('id')})，且非本网关部署，避免覆盖。可改名后重试，或 force=true 以新建副本。",
                     "existing": {"id": existing.get("id"), "label": label},
                 }
-            # force：改名新建副本，绝不覆盖用户已有 flow
-            # 注意后缀避开受保护标签（protected_flow_labels 含 "AutoFlow"，子串匹配会触发拒绝）
-            label = f"{label} (网关副本)"
-            flow["label"] = label
+            else:
+                # force：改名新建副本，绝不覆盖用户已有 flow
+                # 注意后缀避开受保护标签（protected_flow_labels 含 "AutoFlow"，子串匹配会触发拒绝）
+                label = f"{label} (网关副本)"
+                flow["label"] = label
 
         # ── 解析 HA server id：优先配置，否则自动探测 NR 中第一个 server 节点 ──
         ha_server, unresolved = self._inject_ha_server(flow)

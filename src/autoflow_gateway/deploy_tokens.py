@@ -225,12 +225,14 @@ class DeployTokenStore:
         rate_limit = token_data.get("rate_limit_per_min", DEFAULT_RATE_LIMIT)
         if rate_window_start and (now - rate_window_start) < 60:
             if rate_window_count >= rate_limit:
+                # 频率超限也记录到日志（不通过 record_usage，因为那是成功/失败部署的日志）
                 return {"ok": False, "error": f"操作频率超限（每分钟最多 {rate_limit} 次），请稍后重试",
                         "token_id": token_id}
         else:
-            # 重置时间窗口
+            # 重置时间窗口 —— 必须保存，否则 rate_window_start 永远为 null，限流永不生效
             stats["rate_window_start"] = now
             stats["rate_window_count"] = 0
+            self._save_tokens(data)
 
         return {"ok": True, "token_id": token_id, "needs_manual_approval": False}
 

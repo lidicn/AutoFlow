@@ -1,3 +1,8 @@
+## 1.4.3 (2026-09-04)
+- 【P1 修复】缺陷 D /lab/* 路由仍 404：v1.4.2 注册的路由缺少 `/api` 前缀（注册为 `/lab/validate`，前端调用 `/api/lab/validate`）。改为 `/api/lab/validate|deploy|deploys`，三路由恢复正常。
+- 【P1 修复】授权码频率限制完全不生效：`validate_token` 中重置时间窗口时设置了 `rate_window_start=now` 但未调用 `_save_tokens` 持久化，导致 `rate_window_start` 永远为 null，限流永不拦截。修复为重置后立即保存。
+- 【P2 修复】空 tab「覆盖」语义未实现：v1.4.2 冲突检查时空 tab 仅 `pass` 放行，但后续 force 分支仍执行，把 label 改成 `(网关副本)` 另建 tab，原空 tab 残留。修复为空 tab 时设置 `target_flow_id=existing.id` 走 update_flow 分支直接覆盖原 tab，force 分支仅对非空用户 tab 生效。
+
 ## 1.4.2 (2026-09-03)
 - 【缺陷B修复】撤回节点分类：网关节点判定不仅靠 deployed_ids（可能遗漏边界 comment），增加特征判断：AF_START/AF_END 边界 comment 节点、af_scene_ 前缀节点均识别为网关节点。修复了纯网关节点流撤回时 `user_nodes_preserved=1` 的误判。
 - 【缺陷C修复】部署冲突检查增加空 tab 判断：撤回后残留的空 tab（只有 tab 节点，无其他节点）视为可覆盖，修复了网关自管流撤回后同 flow_id 重部署被 409 拦截的问题（"NR 中已存在同名 flow 且非本网关部署"）。
