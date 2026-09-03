@@ -1,3 +1,18 @@
+## 1.4.0 (2026-09-03)
+- 【P4 重大功能】部署授权码（Trusted Agent Auto-Deploy）：用户可为受信任 Agent 发放授权码，Agent 持码可在限定范围内自动部署 Flow，无需用户在 WebUI 手动确认。
+  - 授权码基础机制：生成/验证/吊销，SHA-256 哈希存储（不存明文），创建时只显示一次。
+  - 多重限制：目标 tab 绑定、有效期（默认4小时）、权限（deploy/modify/undeploy）、节点数阈值（超过仍需人工审批）、资源配额（最大节点数/最大flow数）、操作频率限制（次/分钟）。
+  - 可回溯机制：授权前全量快照、每次操作前增量快照、全量回滚/选择性回滚、回滚前自动创建新快照（防误回滚）、快照差异对比。
+  - 审计日志：每次操作记录时间、Agent、操作类型、Flow、节点数、成功/失败、错误信息，WebUI 可查看。
+  - 使用统计面板：每个授权码显示部署/修改/撤回次数、已用节点数、失败次数。
+  - 危险操作二次确认：require_confirm_dangerous 配置，前端吊销/回滚均需确认。
+  - 并发控制+NR实例绑定：bound_agent/bound_nr_instance 配置，授权码可绑定特定 Agent 和 NR 实例。
+  - fail-safe 设计：授权码无效/过期/吊销/超配额时自动回退到正常人工审批流程，不拒绝部署。
+- 新增模块：deploy_tokens.py（授权码存储/验证/日志）、snapshot_manager.py（快照/回滚/差异对比）。
+- 后端 API：GET/POST /api/deploy-tokens、DELETE /api/deploy-tokens/{id}、GET /api/deploy-tokens/{id}/logs、GET /api/deploy-tokens/{id}/snapshots、POST /api/deploy-tokens/{id}/rollback、GET /api/deploy-tokens/{id}/diff。
+- MCP 工具：autoflow_deploy_raw 和 autoflow_propose_dsl 增加 deploy_token 参数，持码自动部署。
+- WebUI：新增「授权码」管理页面（创建/列表/吊销/日志/快照/回滚），创建成功弹窗显示授权码（只显示一次）。
+
 ## 1.3.3 (2026-09-03)
 - P4 混合模式完善：WebUI 部署界面增加「目标 tab」选择器，用户部署提案时可选择：
   - 留空=按当前 Tab 组织模式自动部署

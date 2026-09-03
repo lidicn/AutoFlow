@@ -2224,7 +2224,8 @@ class Gateway:
                     expected_postconditions: Optional[List[Dict]] = None,
                     resolved_entities: Optional[List[str]] = None,
                     vhass_store=None, strict: bool = False,
-                    require_e2e: bool = False) -> Dict[str, Any]:
+                    require_e2e: bool = False,
+                    deploy_token: Optional[str] = None) -> Dict[str, Any]:
         """经 DSL 提案场景：解析 → 静态校验 → 编译 → staging 闸门(vhass 重放断言) → 落提案(raw)。
 
         - dsl：agent 输出的语义 DSL 文本（见 docs/dsl_design.md）。
@@ -2490,14 +2491,27 @@ class Gateway:
         except Exception:
             pass
 
+        # P4 授权码自动部署：如果 deploy_token 有效且闸门通过，自动部署
+        auto_deploy_result = None
+        if deploy_token and proposal_id and gate.get("passed"):
+            try:
+                auto_deploy_result = self._try_auto_deploy_with_token(
+                    deploy_token, proposal_id, agent_id, len(flow.get("nodes", [])),
+                    operation="deploy")
+            except Exception as _ade:
+                auto_deploy_result = {"ok": False, "error": f"自动部署异常: {_ade}",
+                                      "fallback": "manual"}
+
         _slog(_tid, "propose_dsl.done", elapsed=round(time.perf_counter() - _t0, 3),
-              proposal_id=proposal_id, gate_passed=bool(gate.get("passed")))
+              proposal_id=proposal_id, gate_passed=bool(gate.get("passed")),
+              auto_deploy=auto_deploy_result.get("ok") if auto_deploy_result else None)
         # lint 摘要已在 lint 阶段统一计算（lint_summary / lint_error_count / lint_warning_count）
         return {
             "ok": True,
             "proposal_id": proposal_id,
             "snapshot": snap,
             "_trace_id": _tid,
+            "auto_deploy": auto_deploy_result,
             "scene_name": scene.name,
             "dsl": dsl,
             "node_count": len(flow.get("nodes", [])),
@@ -3497,6 +3511,98 @@ class Gateway:
         if policy == "compiler_auto":
             return source != "compiler"
         return True  # review_all 及未知策略 → 总是需人审
+
+    def _try_auto_deploy_with_token(self, token_plaintext: str, proposal_id: str,
+                                      agent_id: str, node_count: int,
+                                      *, operation: str = "deploy",
+                                      target_tab: Optional[str] = None) -> Dict[str, Any]:
+        """尝试用授权码自动部署提案。
+
+        返回 {ok, deployed, flow_id?, error?, fallback?}
+        fallback=manual 表示授权码无效或需要人工审批，回退到人工审批流程。
+        """
+        from .deploy_tokens import DeployTokenStore, PERM_DEPLOY
+        from .snapshot_manager import SnapshotManager
+
+        try:
+            data_dir = getattr(self.cfg, "data_dir", None) or os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+            token_store = DeployTokenStore(data_dir)
+            snap_mgr = SnapshotManager(os.path.join(data_dir, "snapshots"))
+
+            # 验证授权码
+            validation = token_store.validate_token(
+                token_plaintext, operation=operation, agent_id=agent_id,
+                node_count=node_count)
+
+            if not validation.get("ok"):
+                # 授权码无效，回退到人工审批
+                token_store.record_usage(
+                    validation.get("token_id", "unknown"),
+                    operation=operation, agent_id=agent_id,
+                    success=False, error=validation.get("error", "授权码验证失败"))
+                return {"ok": False, "fallback": "manual",
+                        "reason": validation.get("error", "授权码无效")}
+
+            token_id = validation["token_id"]
+            token_data = token_store.get_token(token_id)
+            target_tab_from_token = token_data.get("target_tab") if token_data else None
+
+            # 如果需要人工审批（节点数超阈值），回退
+            if validation.get("needs_manual_approval"):
+                return {"ok": False, "fallback": "manual",
+                        "reason": validation.get("reason", "需要人工审批")}
+
+            # 确定目标 tab：授权码绑定的 target_tab 优先级最高
+            effective_target_tab = target_tab_from_token or target_tab
+
+            # 部署前做快照
+            try:
+                if effective_target_tab:
+                    # 查找目标 tab 的 flow_id
+                    all_flows = self.nr.list_flows()
+                    target_flow = None
+                    for f in all_flows:
+                        if f.get("label") == effective_target_tab or f.get("id") == effective_target_tab:
+                            target_flow = f
+                            break
+                    if target_flow:
+                        tab_data = self.nr.get_flow(target_flow["id"])
+                        snap_mgr.create_incremental_snapshot(
+                            token_id, target_flow["id"], tab_data, [],
+                            operation="auto_deploy",
+                            label=f"自动部署前快照（提案 {proposal_id}）",
+                            created_by=agent_id)
+            except Exception:
+                pass  # 快照失败不阻断部署
+
+            # 执行自动部署
+            deploy_result = self.deploy_proposal(
+                proposal_id, agent_id=agent_id,
+                target_tab=effective_target_tab,
+                allow_prod=True)
+
+            if deploy_result.get("ok"):
+                token_store.record_usage(
+                    token_id, operation=operation, agent_id=agent_id,
+                    flow_id=deploy_result.get("flow_id"),
+                    flow_label=deploy_result.get("label"),
+                    node_count=node_count, success=True)
+                return {"ok": True, "deployed": True,
+                        "flow_id": deploy_result.get("flow_id"),
+                        "label": deploy_result.get("label"),
+                        "token_id": token_id,
+                        "target_tab": effective_target_tab}
+            else:
+                token_store.record_usage(
+                    token_id, operation=operation, agent_id=agent_id,
+                    success=False, error=deploy_result.get("error", "部署失败"))
+                return {"ok": False, "fallback": "manual",
+                        "reason": deploy_result.get("error", "部署失败")}
+
+        except Exception as e:
+            return {"ok": False, "fallback": "manual",
+                    "reason": f"自动部署异常: {e}"}
 
     def deploy_proposal(self, pid: str, agent_id: str = "human",
                         target_flow_id: Optional[str] = None,
@@ -5386,7 +5492,8 @@ class Gateway:
                     target: str = "staging", force: bool = False,
                     run_gate: bool = True, dry_run: bool = False,
                     require_e2e: bool = False,
-                    target_tab: Optional[str] = None) -> Dict[str, Any]:
+                    target_tab: Optional[str] = None,
+                    deploy_token: Optional[str] = None) -> Dict[str, Any]:
         """白盒提案闸：接受 Agent 产出的原始 Node-RED flow JSON，经校验后【落提案】而非直写 NR。
 
         与 deploy_raw 复用同一套校验（schema + lint 硬伤集 R13/R15/R17/R20/R22 +
@@ -5585,8 +5692,20 @@ class Gateway:
                   elapsed=round(time.perf_counter() - _t0, 3))
             return {"ok": False, "stage": "proposal_store", "error": f"提案落档失败: {e}"}
 
+        # P4 授权码自动部署
+        auto_deploy_result = None
+        if deploy_token and proposal_id:
+            try:
+                auto_deploy_result = self._try_auto_deploy_with_token(
+                    deploy_token, proposal_id, agent_id, len(nodes),
+                    operation="deploy", target_tab=target_tab)
+            except Exception as _ade:
+                auto_deploy_result = {"ok": False, "error": f"自动部署异常: {_ade}",
+                                      "fallback": "manual"}
+
         _slog(_tid, "propose_raw.done", elapsed=round(time.perf_counter() - _t0, 3),
-              proposal_id=proposal_id, label=flow.get("label", ""))
+              proposal_id=proposal_id, label=flow.get("label", ""),
+              auto_deploy=auto_deploy_result.get("ok") if auto_deploy_result else None)
         return {
             "ok": True,
             # WB24 NEW-F5（透明性）：回显归一化后的 flow_json（已完成 HA server 注入/占位符回退），
@@ -5596,6 +5715,7 @@ class Gateway:
             "proposal_id": proposal_id,
             "label": flow.get("label", ""),
             "node_count": len(nodes),
+            "auto_deploy": auto_deploy_result,
             "validation": validation,
             "lint": lint_issues,
             "lint_error_count": sum(1 for v in lint_issues if v["level"] == "error"),

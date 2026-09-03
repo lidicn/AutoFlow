@@ -219,7 +219,7 @@ def autoflow_render_template(name: str, values_json: str = "{}") -> str:
 @mcp.tool()
 async def autoflow_propose_dsl(dsl: Optional[str] = None, expected_postconditions_json: str = "[]",
                                resolved_entities_json: str = "[]", strict: bool = False,
-                               require_e2e: bool = False) -> str:
+                               require_e2e: bool = False, deploy_token: str = "") -> str:
     """【★推荐·提交场景首选入口】经 DSL 提案：解析→静态校验→编译→staging 闸门(vhass 重放断言)→落提案(raw)。
 
     ⭐ 这是 agent 提交场景的**首选**路径：用高层语义 DSL 描述意图，编译器自动生成合规 flow，
@@ -238,7 +238,9 @@ async def autoflow_propose_dsl(dsl: Optional[str] = None, expected_postcondition
       （仅依赖 DSL 内实体引用 + 闸门强制校验）。闸门只放行白名单内实体，引用白名单外实体直接判 FAIL。
     - 注意：实体一律用 autoflow_resolve_entity 返回的真实 entity_id；引用目录外的实体闸门直接判 FAIL。
     - agent_id 由已认证身份自动注入；提案进入 raw，等待用户在 WebUI 审核升格。
-    - 返回 {ok, proposal_id, scene_name, gate, flow, ...}；gate 实际含
+    - deploy_token：【P4 授权码自动部署】部署授权码。如果提供且有效且闸门通过，提案将自动部署到 NR，
+      无需用户在 WebUI 手动确认。授权码无效或需要人工审批时，自动回退到正常人工审批流程。
+    - 返回 {ok, proposal_id, scene_name, gate, flow, ..., auto_deploy}；gate 实际含
       {passed, fully_verified, verdict, reasons, warnings, dead_branches,
        entity_count, external_calls, failures, replay_zero, replay_zero_policy,
        replayed_services, assertions}（写码以实际返回为准，勿仅依赖本节列举）。
@@ -249,6 +251,10 @@ async def autoflow_propose_dsl(dsl: Optional[str] = None, expected_postcondition
     - target_tab：【P4 混合模式】指定部署到哪个 Node-RED tab（按 tab id 或 label 匹配，不存在则自动创建）。
       留空（默认）则按当前 Tab 组织模式部署（per_flow=独立tab / single_tab=AutoFlow集中tab）。
       示例：target_tab="客厅" → 该 flow 部署到「客厅」tab 中，与其他 flow 共存。
+    - deploy_token：【P4 授权码自动部署】部署授权码。如果提供且有效，提案将自动通过审批并直接部署到 NR，
+      无需用户在 WebUI 手动确认。授权码由用户在 WebUI「授权码管理」页面创建，绑定目标 tab、有效期、权限等。
+      授权码无效或需要人工审批时，自动回退到正常人工审批流程（不会拒绝部署）。
+      示例：deploy_token="dt_xxxxxxxxxxxxxxxx" → 自动部署到授权码绑定的 tab。
     - 返回 {ok, proposal_id, scene_name, gate:{passed,...}, require_e2e, flow}。
     ⚠️ 不要用已废弃的 autoflow_propose_scene。"""
     agent = get_current_agent()
@@ -269,7 +275,8 @@ async def autoflow_propose_dsl(dsl: Optional[str] = None, expected_postcondition
     gw = _gw()
     return _js(await asyncio.to_thread(
         gw.propose_dsl, dsl, agent.agent_id, expected,
-        resolved_entities=resolved, strict=strict, require_e2e=require_e2e))
+        resolved_entities=resolved, strict=strict, require_e2e=require_e2e,
+        deploy_token=deploy_token or None))
 
 @mcp.tool()
 def autoflow_get_flow(flow_id: str, summary: bool = True) -> str:
@@ -883,7 +890,7 @@ for _fn in _USER_TOOLS:
 @mcp.tool()
 def autoflow_deploy_raw(flow_json: str, label: str = "", target: str = "staging",
                         force: bool = False, require_e2e: bool = False,
-                        target_tab: str = "") -> str:
+                        target_tab: str = "", deploy_token: str = "") -> str:
     """【⚠️逃生舱·非首选】把 Agent 产出的 Node-RED flow JSON 提交为**提案**（不直接部署到 NR）。
 
     🚨 这是**逃生舱（escape hatch）**，不是首选路径：手写裸 NR 节点 JSON 既费 token（一个 flow
@@ -939,7 +946,8 @@ def autoflow_deploy_raw(flow_json: str, label: str = "", target: str = "staging"
     # 原生手写统一：不再直写 NR，改为落提案（content.type=raw_flow），返回 proposal_id 待用户审核部署。
     return _js(_gw().propose_raw(data, agent_id=aid, label=label or None,
                                  target=target, force=force, require_e2e=require_e2e,
-                                 target_tab=target_tab or None))
+                                 target_tab=target_tab or None,
+                                 deploy_token=deploy_token or None))
 
 @mcp_admin.tool()
 @mcp.tool()
