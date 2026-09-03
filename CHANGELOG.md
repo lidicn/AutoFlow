@@ -1,3 +1,8 @@
+## 1.4.2 (2026-09-03)
+- 【缺陷B修复】撤回节点分类：网关节点判定不仅靠 deployed_ids（可能遗漏边界 comment），增加特征判断：AF_START/AF_END 边界 comment 节点、af_scene_ 前缀节点均识别为网关节点。修复了纯网关节点流撤回时 `user_nodes_preserved=1` 的误判。
+- 【缺陷C修复】部署冲突检查增加空 tab 判断：撤回后残留的空 tab（只有 tab 节点，无其他节点）视为可覆盖，修复了网关自管流撤回后同 flow_id 重部署被 409 拦截的问题（"NR 中已存在同名 flow 且非本网关部署"）。
+- 【缺陷D修复】实现 /lab/* 路由：新增 POST /lab/validate（flow JSON 校验，不落档）、POST /lab/deploy（直接部署到 NR，不需要提案审批）、GET /lab/deploys（部署历史，最多保留50条）。修复了前端 Lab 沙盒部署功能调用 404 的问题。
+
 ## 1.4.1 (2026-09-03)
 - 【P0 修复】修复 auto_deploy 和回滚 100% 失败：gateway.py 混合模式部署逻辑中两处调用 `self.nr.update_flow`，但 NRLayer 只暴露 `update_flow_nodes`，导致 `'NRLayer' object has no attribute 'update_flow'`。改为 `update_flow_nodes` 后 auto_deploy（raw+DSL）和全量/选择性回滚均恢复正常。
 - 【P0 修复】snapshot_manager.py 中两处 `nr_client.update_flow` 同样改为 `update_flow_nodes`。

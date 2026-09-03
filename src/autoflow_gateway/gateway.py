@@ -3726,13 +3726,25 @@ class Gateway:
         label = flow.get("label", "未命名场景")
 
         # ── 冲突检测：同名 flow 已存在且不是本网关部署的 → 拒绝覆盖用户已有 flow ──
+        # 缺陷C修复：撤回后空 tab（只有 tab 节点）可覆盖，避免网关自管流撤回后无法幂等重部署
         existing = None
         for f in self.nr.list_flows():
             if f.get("label") == label:
                 existing = f
                 break
         if existing and existing.get("id") not in self.state.get_flow_catalog().get("flows", {}):
-            if not force:
+            # 检查是否为空 tab（撤回后残留）：只有 tab 节点，无其他节点
+            is_empty_tab = False
+            try:
+                _existing_flow = self.nr.get_flow(existing["id"])
+                _non_tab_nodes = [n for n in _existing_flow.get("nodes", []) if n.get("type") != "tab"]
+                is_empty_tab = len(_non_tab_nodes) == 0
+            except Exception:
+                pass
+            if is_empty_tab:
+                # 空 tab 是撤回后残留，允许覆盖（视为本网关之前部署的）
+                pass
+            elif not force:
                 return {
                     "ok": False, "conflict": True,
                     "error": f"NR 中已存在同名 flow「{label}」({existing.get('id')})，且非本网关部署，避免覆盖。可改名后重试，或 force=true 以新建副本。",
@@ -5904,9 +5916,24 @@ class Gateway:
 
         live_nodes = live.get("nodes", [])
         tab_node = next((n for n in live_nodes if n.get("type") == "tab"), None)
-        gateway_nodes = [n for n in live_nodes if n.get("id") in deployed_ids]
+        # 缺陷B修复：网关节点判定不仅靠 deployed_ids（可能遗漏边界 comment），
+        # 还增加特征判断：AF_START/AF_END 边界 comment、af_scene_ 前缀节点
+        def _is_gateway_node(n):
+            if n.get("id") in deployed_ids:
+                return True
+            # 边界 comment 节点（AF_START/AF_END）
+            if n.get("type") == "comment":
+                _name = (n.get("name") or "") + " " + (n.get("text") or "")
+                if "AF_START" in _name or "AF_END" in _name:
+                    return True
+            # af_scene_ 前缀的网关节点
+            if str(n.get("name", "")).startswith("af_scene_"):
+                return True
+            return False
+
+        gateway_nodes = [n for n in live_nodes if _is_gateway_node(n)]
         user_nodes = [n for n in live_nodes
-                      if n.get("id") not in deployed_ids and n.get("type") != "tab"]
+                      if not _is_gateway_node(n) and n.get("type") != "tab"]
 
         # 带外删除防护：用户可能已在 NR UI 手动删掉本网关节点（或部分节点）。
         # 若账本登记的网关节点在活 flow 里一个都不剩 → 视为已撤回，直接清账本返回，
