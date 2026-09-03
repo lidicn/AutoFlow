@@ -1,3 +1,9 @@
+## 1.4.1 (2026-09-03)
+- 【P0 修复】修复 auto_deploy 和回滚 100% 失败：gateway.py 混合模式部署逻辑中两处调用 `self.nr.update_flow`，但 NRLayer 只暴露 `update_flow_nodes`，导致 `'NRLayer' object has no attribute 'update_flow'`。改为 `update_flow_nodes` 后 auto_deploy（raw+DSL）和全量/选择性回滚均恢复正常。
+- 【P0 修复】snapshot_manager.py 中两处 `nr_client.update_flow` 同样改为 `update_flow_nodes`。
+- 【P2 改进】创建授权码时 `target_tab` 改为可选：留空表示不绑定 tab，走 per_flow 模式（每个 flow 自动创建独立 tab）；绑定后 Agent 只能在指定 tab 部署。前端表单增加说明文字。
+- 【P3 改进】频率限制计数器改为成功和失败都累计：之前仅成功后 `rate_window_count+1`，失败风暴可绕过限流；现在失败尝试也计数，防止恶意/异常高频调用。
+
 ## 1.4.0 (2026-09-03)
 - 【P4 重大功能】部署授权码（Trusted Agent Auto-Deploy）：用户可为受信任 Agent 发放授权码，Agent 持码可在限定范围内自动部署 Flow，无需用户在 WebUI 手动确认。
   - 授权码基础机制：生成/验证/吊销，SHA-256 哈希存储（不存明文），创建时只显示一次。

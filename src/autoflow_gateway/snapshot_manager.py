@@ -219,7 +219,7 @@ class SnapshotManager:
 
         # 执行回滚
         try:
-            nr_client.update_flow(tab_id, snap_data, force=True, allow_prod=allow_prod)
+            nr_client.update_flow_nodes(tab_id, snap_data, force=True, allow_prod=allow_prod)
             node_count_after = len(snap_data.get("nodes", []))
             return {
                 "ok": True,
@@ -303,7 +303,7 @@ class SnapshotManager:
         merged_flow = dict(current)
         merged_flow["nodes"] = merged_nodes
         try:
-            nr_client.update_flow(tab_id, merged_flow, force=True, allow_prod=allow_prod)
+            nr_client.update_flow_nodes(tab_id, merged_flow, force=True, allow_prod=allow_prod)
             return {
                 "ok": True,
                 "snapshot_id": snapshot_id,

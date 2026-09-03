@@ -3956,7 +3956,7 @@ class Gateway:
                 merged_flow = dict(target_tab_data)
                 merged_flow["nodes"] = merged_nodes
                 merged_flow["id"] = target_tab_id
-                self.nr.update_flow(target_tab_id, merged_flow, force=True, allow_prod=allow_prod)
+                self.nr.update_flow_nodes(target_tab_id, merged_flow, force=True, allow_prod=allow_prod)
 
                 fid = deploy_id
                 created = True
@@ -3990,7 +3990,7 @@ class Gateway:
                 merged_flow = dict(af_tab)
                 merged_flow["nodes"] = merged_nodes
                 merged_flow["id"] = tab_id
-                self.nr.update_flow(tab_id, merged_flow, force=True, allow_prod=allow_prod)
+                self.nr.update_flow_nodes(tab_id, merged_flow, force=True, allow_prod=allow_prod)
                 fid = deploy_id
                 created = True
                 gateway_node_ids = [n.get("id") for n in shifted_nodes if n.get("id")]

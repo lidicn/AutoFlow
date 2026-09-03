@@ -91,7 +91,7 @@ class DeployTokenStore:
         with open(self.logs_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-    def create_token(self, *, name: str, target_tab: str,
+    def create_token(self, *, name: str, target_tab: Optional[str] = None,
                      expires_in_hours: float = DEFAULT_TOKEN_TTL_HOURS,
                      permissions: Optional[List[str]] = None,
                      node_threshold: int = DEFAULT_NODE_THRESHOLD,
@@ -115,7 +115,7 @@ class DeployTokenStore:
             "token_id": token_id,
             "token_hash": _hash_token(token_plaintext),
             "name": name,
-            "target_tab": target_tab,
+            "target_tab": target_tab or None,  # None=不绑定tab，走 per_flow 模式
             "permissions": permissions or [PERM_DEPLOY],
             "node_threshold": node_threshold,
             "max_nodes": max_nodes,
@@ -256,10 +256,10 @@ class DeployTokenStore:
                 stats["modify_count"] = stats.get("modify_count", 0) + 1
             elif operation == PERM_UNDEPLOY:
                 stats["undeploy_count"] = stats.get("undeploy_count", 0) + 1
-            # 频率计数
-            stats["rate_window_count"] = stats.get("rate_window_count", 0) + 1
         else:
             stats["failed_count"] = stats.get("failed_count", 0) + 1
+        # 频率计数：成功和失败都计数，防止失败风暴绕过限流
+        stats["rate_window_count"] = stats.get("rate_window_count", 0) + 1
 
         self._save_tokens(data)
 

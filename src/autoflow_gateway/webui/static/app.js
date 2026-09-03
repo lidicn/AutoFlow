@@ -455,8 +455,9 @@ function showCreateTokenModal() {
       <input type="text" id="dt-name" class="input" placeholder="如：客厅自动化 Agent">
     </div>
     <div class="field">
-      <label>目标 tab *</label>
-      <input type="text" id="dt-target-tab" class="input" placeholder="如：客厅（Agent 只能在此 tab 部署）">
+      <label>目标 tab（可选）</label>
+      <input type="text" id="dt-target-tab" class="input" placeholder="如：客厅（留空=不绑定，每个 flow 独立 tab）">
+      <div class="meta" style="font-size:11px;color:var(--text-muted);margin-top:4px">绑定后 Agent 只能在此 tab 部署；留空则走 per_flow 模式，每个 flow 自动创建独立 tab。</div>
     </div>
     <div class="field">
       <label>有效期（小时）</label>
@@ -495,7 +496,7 @@ function showCreateTokenModal() {
   $("#dt-create-confirm").onclick = async () => {
     const name = $("#dt-name").value.trim();
     const targetTab = $("#dt-target-tab").value.trim();
-    if (!name || !targetTab) { toast("名称和目标 tab 不能为空"); return; }
+    if (!name) { toast("名称不能为空"); return; }
 
     const permissions = [];
     if ($("#dt-perm-deploy").checked) permissions.push("deploy");

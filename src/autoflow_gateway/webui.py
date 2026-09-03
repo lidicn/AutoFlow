@@ -579,11 +579,10 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         """创建授权码。"""
         b = await _body(request)
         name = (b.get("name") or "").strip()
-        target_tab = (b.get("target_tab") or "").strip()
+        target_tab = (b.get("target_tab") or "").strip() or None
         if not name:
             return _js({"ok": False, "error": "名称不能为空"}, 400)
-        if not target_tab:
-            return _js({"ok": False, "error": "目标 tab 不能为空"}, 400)
+        # target_tab 可选：留空表示不绑定 tab，走 per_flow 模式（每个 flow 独立 tab）
 
         try:
             token = _token_store().create_token(
