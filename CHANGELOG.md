@@ -1,3 +1,13 @@
+## 1.3.3 (2026-09-03)
+- P4 混合模式完善：WebUI 部署界面增加「目标 tab」选择器，用户部署提案时可选择：
+  - 留空=按当前 Tab 组织模式自动部署
+  - AutoFlow 集中 tab（单 tab 模式）
+  - 已有 tab（混合模式，flow 部署到该 tab 中）
+  - 新建 tab（创建新 tab 并部署）
+- 后端 deploy_proposal API 增加 target_tab 参数接收。
+- 前端增加 _loadNRTabs 辅助函数加载 Node-RED tab 列表。
+- 部署确认对话框从原生 confirm() 改为自定义 modal，支持 tab 选择器交互。
+
 ## 1.3.2 (2026-09-03)
 - 修复 P0：`/tab-org/status` 和 `/tab-org/migrate` 恒 500 —— 根因是用 `request.app.state.gateway` 而非闭包变量 `gw`，且遗留记录缺 `tab_org_mode` 字段时缺少异常处理。
 - 修复 P1：WebUI「保存设置」用 POST `/settings`（405），改为 PUT（后端仅接受 PUT）。

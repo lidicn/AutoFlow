@@ -676,15 +676,97 @@ async function unarchiveProposal(id) {
   toast(r.ok ? "已取消归档" : "失败：" + (r.data?.error || r.status));
   if (r.ok) _loadProposalPage();
 }
+// 加载 Node-RED tab 列表（用于 P4 目标 tab 选择器）
+async function _loadNRTabs() {
+  try {
+    const r = await api("GET", "/catalog");
+    if (r.ok && r.data) {
+      const flows = r.data.flows || r.data.nr_flows || [];
+      return flows.filter(f => f.type !== "subflow").map(f => ({
+        id: f.id,
+        label: f.label || f.id,
+        node_count: (f.nodes || []).length
+      }));
+    }
+  } catch (e) {}
+  return [];
+}
+
 async function deployProposal(id) {
   const p = _allProposals.find((x) => x.id === id);
   let isSub = false;
-  try { isSub = !!(p && (p.kind === "subflow" || JSON.parse(p.content || "{}").type === "subflow")); } catch (e) {}
-  const msg = isSub
-    ? "确定注册该子流程到网关？\n（写 NR 子流程实例 + 登记子流程注册表，注册后 agent 可经 MCP 调用。冲突或失败不会动 NR。）"
-    : "确定部署到 Node-RED？部署后可在「已部署」安全撤回。";
-  if (!confirm(msg)) return;
-  const r = await api("POST", `/proposals/${id}/deploy`, { target: "prod" });
+  let proposalTargetTab = "";
+  try {
+    const c = JSON.parse(p.content || "{}");
+    isSub = !!(p && (p.kind === "subflow" || c.type === "subflow"));
+    proposalTargetTab = c.target_tab || "";
+  } catch (e) {}
+  if (isSub) {
+    if (!confirm("确定注册该子流程到网关？\n（写 NR 子流程实例 + 登记子流程注册表，注册后 agent 可经 MCP 调用。冲突或失败不会动 NR。）")) return;
+    const r = await api("POST", `/proposals/${id}/deploy`, { target: "prod" });
+    return _handleDeployResult(r, id);
+  }
+  // P4 混合模式：部署前显示目标 tab 选择器
+  const tabOptions = await _loadNRTabs();
+  const currentMode = (window._appConfig && window._appConfig.tab_org_mode) || "per_flow";
+  let defaultTab = proposalTargetTab || "";
+  if (!defaultTab && currentMode === "single_tab") defaultTab = "__auto_single__";
+
+  modal("部署到 Node-RED", `
+    <p style="line-height:1.7;margin-bottom:12px">确定部署 <b>${esc(p.title || p.id)}</b> 到 Node-RED？部署后可在「已部署」安全撤回。</p>
+    <div class="field" style="margin-bottom:12px">
+      <label style="display:block;margin-bottom:6px;font-weight:600">目标 tab（P4 混合模式，可选）</label>
+      <select id="deploy-target-tab" class="input" style="width:100%">
+        <option value="">按当前模式自动（${currentMode === "single_tab" ? "单 tab 集中" : "每个 flow 独立 tab"}）</option>
+        <option value="__auto_single__">AutoFlow 集中 tab（单 tab 模式）</option>
+        <optgroup label="已有 tab">
+          ${tabOptions.map(t => `<option value="${esc(t.label)}" ${defaultTab === t.label ? "selected" : ""}>${esc(t.label)}（${t.node_count || 0} 节点）</option>`).join("")}
+        </optgroup>
+        <option value="__new__">➕ 新建 tab…</option>
+      </select>
+      <input type="text" id="deploy-new-tab-name" class="input" placeholder="输入新 tab 名称" style="width:100%;margin-top:8px;display:none">
+      <p class="desc" style="font-size:12px;color:var(--text-muted);margin-top:6px">
+        留空=按当前 Tab 组织模式部署；选择已有 tab=混合模式，flow 部署到该 tab 中；新建 tab=创建新 tab 并部署。
+      </p>
+    </div>
+    <div style="margin-top:16px;text-align:right;display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" id="deploy-confirm-btn">确认部署</button>
+    </div>
+  `);
+  // 新建 tab 输入框显隐
+  const sel = $("#deploy-target-tab");
+  const newInput = $("#deploy-new-tab-name");
+  if (sel) sel.onchange = () => { if (newInput) newInput.style.display = sel.value === "__new__" ? "block" : "none"; };
+  // 确认部署
+  const confirmBtn = $("#deploy-confirm-btn");
+  if (confirmBtn) confirmBtn.onclick = async () => {
+    let targetTab = "";
+    const sel2 = $("#deploy-target-tab");
+    if (sel2) {
+      if (sel2.value === "__new__") {
+        targetTab = ($("#deploy-new-tab-name").value || "").trim();
+        if (!targetTab) { toast("请输入新 tab 名称"); return; }
+      } else if (sel2.value === "__auto_single__") {
+        targetTab = ""; // 留空，后端会走 single_tab 模式
+      } else {
+        targetTab = sel2.value;
+      }
+    }
+    closeModal();
+    const body = { target: "prod" };
+    if (targetTab) body.target_tab = targetTab;
+    const r = await api("POST", `/proposals/${id}/deploy`, body);
+    return _handleDeployResult(r, id, false);
+  };
+}
+
+// 部署结果处理（从原 deployProposal 中抽离）
+async function _handleDeployResult(r, id, isSub) {
+  const p = _allProposals.find((x) => x.id === id);
+  if (typeof isSub === "undefined") {
+    try { isSub = !!(p && (p.kind === "subflow" || JSON.parse(p.content || "{}").type === "subflow")); } catch (e) { isSub = false; }
+  }
   if (!r.ok) {
     if (r.data?.conflict) return toast("冲突：" + (r.data.error || "同名子流程已存在，可改名或 force 重建"));
     // 安全闸 / 测试环境拦截：常驻对话框，必须点「确定」才关闭（不自动消失）

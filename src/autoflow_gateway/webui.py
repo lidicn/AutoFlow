@@ -1092,10 +1092,15 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         require_e2e = b.get("require_e2e", None)
         # allow_prod：人手动部署默认 True（显式授权写 prod）；如需强制守卫可传 false。
         allow_prod = b.get("allow_prod", True)
+        # P4 混合模式：用户可在 WebUI 部署时指定目标 tab
+        target_tab = b.get("target_tab") or None
+        if target_tab:
+            target_tab = str(target_tab).strip() or None
         try:
             res = await asyncio.to_thread(gw.deploy_proposal, pid, agent_id="human",
                                           target=target, force=force, validate=validate,
-                                          require_e2e=require_e2e, allow_prod=allow_prod)
+                                          require_e2e=require_e2e, allow_prod=allow_prod,
+                                          target_tab=target_tab)
         except Exception as e:
             return _js({"ok": False, "error": str(e)}, 400)
         if not res.get("ok"):
