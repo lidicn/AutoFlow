@@ -733,6 +733,34 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         except Exception as e:
             return _js({"ok": False, "error": str(e)}, 500)
 
+    # ── Token 统计（v1.5.3）──
+    def _token_stats_store():
+        from .token_stats import TokenStatsStore
+        data_dir = getattr(cfg, "data_dir", None) or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+        return TokenStatsStore(os.path.join(data_dir, "token_stats"))
+
+    def _record_token(endpoint: str, agent_id: str, input_chars: int,
+                      output_chars: int, mode: str = "dsl"):
+        """记录一次 API 调用的 Token 消耗（异步非阻塞，失败不影响主流程）。"""
+        try:
+            _token_stats_store().record(endpoint, agent_id, input_chars, output_chars, mode)
+        except Exception:
+            pass
+
+    async def core_token_stats(request: Request):
+        """Token 消耗统计。"""
+        agent_info, err = _require_api_key(request, required_perm="read")
+        if err:
+            return err
+        try:
+            days = int(request.query_params.get("days", 7))
+            store = _token_stats_store()
+            stats = store.get_stats(days=days)
+            return _js({"ok": True, "stats": stats})
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
     # ── AutoFlow Pro：/api/core/* 轻量 Agent 客户端 REST API（v1.5.0）──
     async def core_version(request: Request):
         """网关版本 + 兼容性检查。"""
@@ -776,12 +804,16 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                 resolved_entities=resolved if isinstance(resolved, list) else None,
                 deploy_token=deploy_token,
             )
-            # 附加 telemetry
+            # 附加 telemetry + 记录 token
+            output_chars = len(json.dumps(result, ensure_ascii=False))
             result["_telemetry"] = {
                 "input_chars": len(dsl),
+                "output_chars": output_chars,
+                "estimated_tokens": (len(dsl) + output_chars) // 4,
                 "mode": "dsl",
                 "agent_id": agent_id,
             }
+            _record_token("propose-dsl", agent_id, len(dsl), output_chars, "dsl")
             return _js(result)
         except Exception as e:
             return _js({"ok": False, "error": str(e)}, 500)
@@ -830,12 +862,18 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                 flow_json=flow_json, agent_id=agent_id,
                 label=label, target=target,
             )
-            # 附加 DSL 转换建议（引导 Agent 用 DSL）
+            # 附加 DSL 转换建议 + 记录 token
+            input_chars = len(json.dumps(flow_json, ensure_ascii=False))
+            output_chars = len(json.dumps(result, ensure_ascii=False))
             result["_warning"] = "deploy-raw 是逃生舱，输出冗长且无编译校验。建议改用 propose-dsl 以节省 token。"
             result["_telemetry"] = {
+                "input_chars": input_chars,
+                "output_chars": output_chars,
+                "estimated_tokens": (input_chars + output_chars) // 4,
                 "mode": "raw",
                 "agent_id": agent_id,
             }
+            _record_token("deploy-raw", agent_id, input_chars, output_chars, "raw")
             return _js(result)
         except Exception as e:
             return _js({"ok": False, "error": str(e)}, 500)
@@ -2865,6 +2903,8 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/keys/{key_id}", api_keys_update, methods=["PUT"]),
         Route("/api/keys/{key_id}/revoke", api_keys_revoke, methods=["POST"]),
         Route("/api/keys/logs", api_keys_logs, methods=["GET"]),
+        # Token 统计（v1.5.3）
+        Route("/api/core/token-stats", core_token_stats, methods=["GET"]),
         # AutoFlow Pro: /api/core/* 轻量 Agent 客户端 API
         Route("/api/core/version", core_version, methods=["GET"]),
         Route("/api/core/health", core_health, methods=["GET"]),

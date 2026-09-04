@@ -1,3 +1,9 @@
+## 1.5.3 (2026-09-05)
+- 【新功能】Token 消耗统计：新建 token_stats.py 模块，按天/Agent/端点/模式聚合统计。
+- 【新功能】propose-dsl 和 deploy-raw 调用自动记录输入输出字符数，估算 Token 消耗。
+- 【新功能】新增 /api/core/token-stats API，返回最近 7/30 天 Token 消耗趋势。
+- 【新功能】API 返回 _telemetry 字段，包含本次调用的 input_chars/output_chars/estimated_tokens。
+
 ## 1.5.2 (2026-09-05)
 - 【Bug 修复】修复 /api/core/* 被全局 WebUI 认证拦截的问题：增加 PUBLIC_PATH_PREFIXES 前缀白名单，/api/core/* 豁免 session 认证，由各接口内部做 API Key 认证。
 - 【新功能】模板库：新建 templates.py 模块，支持模板 CRUD、变量渲染、从提案保存。
