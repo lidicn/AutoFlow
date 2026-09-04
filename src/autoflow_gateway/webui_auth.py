@@ -78,6 +78,12 @@ PUBLIC_PATHS = (
     "/api/health",
 )
 
+# 免鉴权前缀白名单：匹配前缀即豁免 WebUI session 认证
+# /api/core/* 由各接口内部做 API Key（Bearer）认证，不走 WebUI session
+PUBLIC_PATH_PREFIXES = (
+    "/api/core/",
+)
+
 # ── RBAC 权限矩阵（D1：一步到位多用户）──
 # 规则按 (methods, path_prefix, role) 登记；methods=None 表示所有方法。
 # 解析：最长前缀优先；未命中任何规则时走 _DEFAULT_ROLE（fail-closed 要求 admin）。
@@ -321,7 +327,13 @@ def required_role_for(method: str, path: str) -> Optional[str]:
 
 
 def is_public_path(path: str) -> bool:
-    return (path or "") in PUBLIC_PATHS
+    p = path or ""
+    if p in PUBLIC_PATHS:
+        return True
+    for prefix in PUBLIC_PATH_PREFIXES:
+        if p.startswith(prefix):
+            return True
+    return False
 
 
 def needs_csrf(method: str) -> bool:
