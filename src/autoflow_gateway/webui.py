@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 AutoFlow Gateway — WebUI 后端（人类控制面）
@@ -11,6 +11,7 @@ AutoFlow Gateway — WebUI 后端（人类控制面）
 MCP 身份闸另由 mcp_server 的 ASGI 中间件独立强制（两者互不替代）。
 """
 import os
+import json
 import asyncio
 import secrets
 import hmac
@@ -600,17 +601,20 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             return _js({"ok": False, "error": str(e)}, 500)
 
     async def api_keys_update(request: Request):
-        """更新 API Key 授权范围。"""
+        """更新 API Key 授权范围。支持 revoked=true 吊销。"""
         try:
             key_id = request.path_params.get("key_id", "")
             b = await _body(request)
             store = _api_key_store()
-            result = store.update_key(
-                key_id=key_id,
-                name=b.get("name"),
-                authorized_tabs=b.get("authorized_tabs"),
-                permissions=b.get("permissions"),
-            )
+            if b.get("revoked") is True:
+                result = store.revoke_key(key_id)
+            else:
+                result = store.update_key(
+                    key_id=key_id,
+                    name=b.get("name"),
+                    authorized_tabs=b.get("authorized_tabs"),
+                    permissions=b.get("permissions"),
+                )
             if not result.get("ok"):
                 return _js(result, 404)
             return _js(result)

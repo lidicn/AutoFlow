@@ -1,3 +1,8 @@
+## 1.5.4 (2026-09-05)
+- 【Bug 修复 P0】修复 propose-dsl 返回 500 `name 'json' is not defined`：webui.py 缺少 `import json`，导致 token 统计记录时崩溃。
+- 【Bug 修复 P1】修复 API Key 吊销兼容性：`PUT /api/keys/{id}` 现在支持 `revoked=true` 字段吊销（原设计用 `POST /api/keys/{id}/revoke`，两种方式都支持）。
+- 【说明】wb2 测试环境版本为 1.29.1（非 NAS 上的 1.5.3），部分 404 是版本差异导致。
+
 ## 1.5.3 (2026-09-05)
 - 【新功能】Token 消耗统计：新建 token_stats.py 模块，按天/Agent/端点/模式聚合统计。
 - 【新功能】propose-dsl 和 deploy-raw 调用自动记录输入输出字符数，估算 Token 消耗。
