@@ -420,7 +420,7 @@ function renderDeployTokenList() {
             ${statusBadge}
           </div>
           <div class="meta" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
-            目标 tab: <b>${esc(t.target_tab)}</b> ·
+            目标 tab: <b>${esc((t.target_tabs && t.target_tabs.length) ? t.target_tabs.length + " 个 tab" : (t.target_tab || "不绑定"))}</b> ·
             权限: ${(t.permissions || []).join(", ")} ·
             创建: ${esc((t.created_at || "").slice(0, 19).replace("T", " "))} ·
             到期: ${esc((t.expires_at || "").slice(0, 19).replace("T", " "))}
@@ -455,12 +455,15 @@ function showCreateTokenModal() {
       <input type="text" id="dt-name" class="input" placeholder="如：客厅自动化 Agent">
     </div>
     <div class="field">
-      <label>目标 tab（可选）</label>
-      <select id="dt-target-tab" class="input" style="width:100%">
-        <option value="">不绑定（每个 flow 独立 tab）</option>
-        <option value="__loading__" disabled>加载 tab 列表中…</option>
-      </select>
-      <div class="meta" style="font-size:11px;color:var(--text-muted);margin-top:4px">绑定后 Agent 只能在此 tab 部署；留空则走 per_flow 模式，每个 flow 自动创建独立 tab。</div>
+      <label>目标 tab（可多选，可选）</label>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+        <label style="font-weight:600"><input type="checkbox" id="dt-tab-bind" style="margin-right:4px"> 绑定到指定 tab</label>
+        <span class="meta" style="font-size:11px;color:var(--text-muted)">不勾选则走 per_flow 模式，每个 flow 自动创建独立 tab</span>
+      </div>
+      <div id="dt-tab-list" style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px;display:none">
+        <div style="color:var(--text-muted);font-size:12px">加载 tab 列表中…</div>
+      </div>
+      <div class="meta" style="font-size:11px;color:var(--text-muted);margin-top:4px">勾选后 Agent 只能在这些 tab 部署/修改，不会越界到其他 tab。</div>
     </div>
     <div class="field">
       <label>有效期（小时）</label>
@@ -496,32 +499,46 @@ function showCreateTokenModal() {
     </div>
   `);
 
-  // 加载 Node-RED tab 列表填充下拉菜单
+  // 绑定 tab 勾选框切换
+  const bindCheckbox = $("#dt-tab-bind");
+  const tabList = $("#dt-tab-list");
+  if (bindCheckbox && tabList) {
+    bindCheckbox.onchange = () => {
+      tabList.style.display = bindCheckbox.checked ? "block" : "none";
+    };
+  }
+  // 加载 Node-RED tab 列表填充勾选框
   (async () => {
     try {
       const tabs = await _loadNRTabs();
-      const sel = $("#dt-target-tab");
-      if (sel && tabs && tabs.length) {
-        // 移除 loading 选项，添加已有 tab
-        const loadingOpt = sel.querySelector('option[value="__loading__"]');
-        if (loadingOpt) loadingOpt.remove();
-        const optgroup = document.createElement("optgroup");
-        optgroup.label = "已有 tab";
-        tabs.forEach(t => {
-          const opt = document.createElement("option");
-          opt.value = t.label;
-          opt.textContent = t.label + "（" + (t.node_count || 0) + " 节点）";
-          optgroup.appendChild(opt);
-        });
-        sel.appendChild(optgroup);
+      const list = $("#dt-tab-list");
+      if (list && tabs && tabs.length) {
+        list.innerHTML = tabs.map(t =>
+          `<label style="display:flex;align-items:center;padding:4px 0;cursor:pointer">
+             <input type="checkbox" class="dt-tab-item" value="${esc(t.id)}" style="margin-right:8px">
+             <span>${esc(t.label)}</span>
+             <span style="color:var(--text-muted);font-size:11px;margin-left:8px">${t.node_count || 0} 节点</span>
+           </label>`
+        ).join("");
+      } else if (list) {
+        list.innerHTML = '<div style="color:var(--text-muted);font-size:12px">未找到 tab，请先在 Node-RED 中创建 tab</div>';
       }
-    } catch (e) { /* 加载失败保持默认选项 */ }
+    } catch (e) {
+      if (tabList) tabList.innerHTML = '<div style="color:var(--danger);font-size:12px">加载 tab 列表失败</div>';
+    }
   })();
 
   $("#dt-create-confirm").onclick = async () => {
     const name = $("#dt-name").value.trim();
-    const targetTab = $("#dt-target-tab").value.trim();
     if (!name) { toast("名称不能为空"); return; }
+    // 收集勾选的目标 tab
+    const targetTabs = [];
+    if ($("#dt-tab-bind")?.checked) {
+      document.querySelectorAll(".dt-tab-item:checked").forEach(cb => {
+        if (cb.value) targetTabs.push(cb.value);
+      });
+    }
+    const targetTab = targetTabs.length ? targetTabs[0] : "";
 
     const permissions = [];
     if ($("#dt-perm-deploy").checked) permissions.push("deploy");
@@ -534,7 +551,7 @@ function showCreateTokenModal() {
     btn.textContent = "创建中…";
     try {
       const r = await api("POST", "/deploy-tokens", {
-        name, target_tab: targetTab,
+        name, target_tab: targetTab, target_tabs: targetTabs,
         expires_in_hours: parseFloat($("#dt-expires").value),
         permissions,
         node_threshold: parseInt($("#dt-threshold").value),
@@ -554,7 +571,7 @@ function showCreateTokenModal() {
             <div style="background:#fff;padding:10px;border-radius:6px;border:1px solid #d1fae5;font-family:monospace;font-size:14px;word-break:break-all">${esc(token.token_plaintext)}</div>
           </div>
           <div class="meta" style="font-size:12px;color:var(--text-muted)">
-            <p>目标 tab: <b>${esc(token.target_tab)}</b></p>
+            <p>目标 tab: <b>${esc((token.target_tabs && token.target_tabs.length) ? token.target_tabs.join(", ") : (token.target_tab || "不绑定（per_flow 模式）"))}</b></p>
             <p>有效期: ${esc((token.expires_at || "").slice(0, 19).replace("T", " "))}</p>
             <p>权限: ${(token.permissions || []).join(", ")}</p>
           </div>

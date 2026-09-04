@@ -511,19 +511,35 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             if isinstance(flows, dict):
                 flows = flows.get("flows", [])
             flows = flows or []
-            tabs = []
+            # Node-RED flows 是扁平结构：tab 节点不含 nodes 数组，
+            # 普通节点通过 z 字段指向所属 tab id。需要按 z 统计。
+            tab_map = {}
+            node_count_by_tab = {}
             for f in flows:
                 if not isinstance(f, dict):
                     continue
-                if f.get("type") not in (None, "", "tab"):
-                    continue
-                if f.get("type") == "subflow":
-                    continue
-                tabs.append({
-                    "id": f.get("id", ""),
-                    "label": f.get("label") or f.get("id") or "(未命名)",
-                    "node_count": len(f.get("nodes", [])) if isinstance(f.get("nodes"), list) else 0,
-                })
+                ftype = f.get("type")
+                if ftype in (None, "", "tab"):
+                    tid = f.get("id", "")
+                    if tid:
+                        tab_map[tid] = {
+                            "id": tid,
+                            "label": f.get("label") or tid or "(未命名)",
+                            "node_count": 0,
+                        }
+                        node_count_by_tab[tid] = 0
+                elif ftype != "subflow":
+                    # 普通节点，按 z 统计
+                    z = f.get("z")
+                    if z and z in node_count_by_tab:
+                        node_count_by_tab[z] += 1
+            # 回填节点数
+            tabs = []
+            for tid, t in tab_map.items():
+                t["node_count"] = node_count_by_tab.get(tid, 0)
+                tabs.append(t)
+            # 按 label 排序
+            tabs.sort(key=lambda x: x["label"])
             return _js({"ok": True, "tabs": tabs})
         except Exception as e:
             return _js({"ok": False, "error": str(e), "tabs": []}, 500)
@@ -601,18 +617,45 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         return _js({"ok": True, "tokens": tokens})
 
     async def deploy_token_create(request: Request):
-        """创建授权码。"""
+        """创建授权码。支持 target_tab（单 tab）和 target_tabs（多 tab 列表）。"""
         b = await _body(request)
         name = (b.get("name") or "").strip()
-        target_tab = (b.get("target_tab") or "").strip() or None
         if not name:
             return _js({"ok": False, "error": "名称不能为空"}, 400)
-        # target_tab 可选：留空表示不绑定 tab，走 per_flow 模式（每个 flow 独立 tab）
+
+        # 解析目标 tab：支持单 tab 字符串和多 tab 列表
+        # 兼容 URL 格式：从 http://host:1880/#flow/abc123 中提取 abc123
+        def _normalize_tab(t):
+            t = (t or "").strip()
+            if not t:
+                return None
+            if "#flow/" in t:
+                t = t.split("#flow/")[-1].split("/")[0].split("?")[0]
+            return t or None
+
+        target_tabs = []
+        # 优先使用 target_tabs 列表
+        raw_tabs = b.get("target_tabs")
+        if isinstance(raw_tabs, list):
+            for t in raw_tabs:
+                nt = _normalize_tab(t)
+                if nt:
+                    target_tabs.append(nt)
+        # 兼容旧字段 target_tab（单 tab 字符串）
+        raw_single = b.get("target_tab")
+        if raw_single:
+            nt = _normalize_tab(raw_single)
+            if nt and nt not in target_tabs:
+                target_tabs.append(nt)
+
+        # target_tab 用于向后兼容（取第一个）
+        target_tab = target_tabs[0] if target_tabs else None
 
         try:
             token = _token_store().create_token(
                 name=name,
                 target_tab=target_tab,
+                target_tabs=target_tabs if target_tabs else None,
                 expires_in_hours=float(b.get("expires_in_hours", 4)),
                 permissions=b.get("permissions") or ["deploy"],
                 node_threshold=int(b.get("node_threshold", 50)),

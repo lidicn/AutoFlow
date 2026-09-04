@@ -92,6 +92,7 @@ class DeployTokenStore:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     def create_token(self, *, name: str, target_tab: Optional[str] = None,
+                     target_tabs: Optional[List[str]] = None,
                      expires_in_hours: float = DEFAULT_TOKEN_TTL_HOURS,
                      permissions: Optional[List[str]] = None,
                      node_threshold: int = DEFAULT_NODE_THRESHOLD,
@@ -115,7 +116,10 @@ class DeployTokenStore:
             "token_id": token_id,
             "token_hash": _hash_token(token_plaintext),
             "name": name,
-            "target_tab": target_tab or None,  # None=不绑定tab，走 per_flow 模式
+            # target_tabs: 允许部署的 tab id 列表；空列表/None=不绑定，走 per_flow 模式
+            # 兼容旧字段 target_tab（单 tab），自动转为 target_tabs
+            "target_tab": target_tab or None,
+            "target_tabs": target_tabs if target_tabs else ([target_tab] if target_tab else None),
             "permissions": permissions or [PERM_DEPLOY],
             "node_threshold": node_threshold,
             "max_nodes": max_nodes,
@@ -156,7 +160,8 @@ class DeployTokenStore:
     def validate_token(self, token_plaintext: str, *, operation: str,
                        agent_id: Optional[str] = None,
                        nr_instance: Optional[str] = None,
-                       node_count: int = 0) -> Dict[str, Any]:
+                       node_count: int = 0,
+                       target_tab: Optional[str] = None) -> Dict[str, Any]:
         """验证授权码是否可用于指定操作。
 
         返回 {ok, token_id?, error?, reason?, needs_manual_approval?}
@@ -192,6 +197,17 @@ class DeployTokenStore:
         if token_data.get("bound_agent") and agent_id and token_data["bound_agent"] != agent_id:
             return {"ok": False, "error": f"授权码绑定的 agent 是 {token_data['bound_agent']}，当前 agent 是 {agent_id}",
                     "token_id": token_id}
+
+        # 检查目标 tab 是否在允许列表中
+        allowed_tabs = token_data.get("target_tabs") or ([token_data["target_tab"]] if token_data.get("target_tab") else None)
+        if allowed_tabs and target_tab:
+            # 兼容 URL 格式：提取 #flow/ 后面的 tab id
+            check_tab = target_tab
+            if "#flow/" in check_tab:
+                check_tab = check_tab.split("#flow/")[-1].split("/")[0].split("?")[0]
+            if check_tab not in allowed_tabs:
+                return {"ok": False, "error": f"授权码只允许在指定 tab 操作，当前 tab 不在允许列表中",
+                        "token_id": token_id, "allowed_tabs": allowed_tabs}
 
         # 检查绑定的 NR 实例
         if token_data.get("bound_nr_instance") and nr_instance and token_data["bound_nr_instance"] != nr_instance:

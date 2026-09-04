@@ -3530,10 +3530,10 @@ class Gateway:
             token_store = DeployTokenStore(data_dir)
             snap_mgr = SnapshotManager(os.path.join(data_dir, "snapshots"))
 
-            # 验证授权码
+            # 验证授权码（传入目标 tab 做越界检查）
             validation = token_store.validate_token(
                 token_plaintext, operation=operation, agent_id=agent_id,
-                node_count=node_count)
+                node_count=node_count, target_tab=target_tab)
 
             if not validation.get("ok"):
                 # 授权码无效，回退到人工审批
@@ -3546,7 +3546,11 @@ class Gateway:
 
             token_id = validation["token_id"]
             token_data = token_store.get_token(token_id)
-            target_tab_from_token = token_data.get("target_tab") if token_data else None
+            # 优先取 target_tabs 列表的第一个，兼容旧字段 target_tab
+            target_tabs_from_token = token_data.get("target_tabs") if token_data else None
+            if not target_tabs_from_token and token_data and token_data.get("target_tab"):
+                target_tabs_from_token = [token_data["target_tab"]]
+            target_tab_from_token = target_tabs_from_token[0] if target_tabs_from_token else None
 
             # 如果需要人工审批（节点数超阈值），回退
             if validation.get("needs_manual_approval"):
