@@ -474,12 +474,12 @@ function showCreateTokenModal() {
     <div class="field">
       <label>目标 tab（可多选，可选）</label>
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
-        <label style="font-weight:600;display:flex;align-items:center;gap:6px;cursor:pointer">
-          <input type="checkbox" id="dt-tab-bind"> 绑定到指定 tab
+        <label style="font-weight:600;display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap">
+          <input type="checkbox" id="dt-tab-bind" style="margin:0"> 绑定到指定 tab
         </label>
         <span class="meta" style="font-size:11px;color:var(--text-muted)">不勾选则走 per_flow 模式，每个 flow 自动创建独立 tab</span>
       </div>
-      <div id="dt-tab-list" style="max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:6px 10px;display:none">
+      <div id="dt-tab-list" style="max-height:220px;overflow-y:auto;overflow-x:hidden;border:1px solid var(--border);border-radius:8px;padding:6px 10px;display:none">
         <div style="color:var(--text-muted);font-size:12px;padding:4px 0">加载 tab 列表中…</div>
       </div>
       <div class="meta" style="font-size:11px;color:var(--text-muted);margin-top:4px">勾选后 Agent 只能在这些 tab 部署/修改，不会越界到其他 tab。</div>
@@ -533,9 +533,9 @@ function showCreateTokenModal() {
       const list = $("#dt-tab-list");
       if (list && tabs && tabs.length) {
         list.innerHTML = tabs.map(t =>
-          `<label style="display:flex;align-items:center;padding:6px 4px;cursor:pointer;border-bottom:1px solid var(--border);gap:10px">
-             <input type="checkbox" class="dt-tab-item" value="${esc(t.id)}" style="flex-shrink:0;margin:0">
-             <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.label)}</span>
+          `<label style="display:flex;align-items:center;padding:6px 4px;cursor:pointer;border-bottom:1px solid var(--border);gap:8px;min-width:0">
+             <input type="checkbox" class="dt-tab-item" value="${esc(t.id)}" style="flex-shrink:0;margin:0;width:16px;height:16px">
+             <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px">${esc(t.label)}</span>
              <span style="color:var(--text-muted);font-size:11px;flex-shrink:0;white-space:nowrap">${t.node_count || 0} 节点</span>
            </label>`
         ).join("");
