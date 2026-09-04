@@ -1,3 +1,9 @@
+## 1.4.6 (2026-09-04)
+- 【紧急修复】修复 v1.4.5 中授权码目标 tab 下拉菜单加载失败的问题。根因：`_loadNRTabs()` 错误调用了 `/api/catalog`（设备目录 API），该接口返回 `{total, freshness}` 而非 flow 列表，导致下拉菜单永远停在"加载 tab 列表中..."。
+- 新建 `/api/nr/tabs` API：返回 Node-RED 中所有 tab 列表（id, label, node_count）。
+- 修改 `_loadNRTabs()`：改为调用 `/api/nr/tabs`，直接返回 `r.data.tabs`。
+- 此 bug 同时影响部署确认弹窗的目标 tab 选择器（P4 功能），本次一并修复。
+
 ## 1.4.5 (2026-09-04)
 - 【易用性改进】创建授权码弹窗的「目标 tab」从文本输入框改为下拉菜单，自动加载 Node-RED 中所有 tab 供用户选择，避免用户手动输入完整 URL 导致匹配失败。
 - 【容错修复】后端 target_tab 增加 URL 解析容错：如果用户粘贴了完整 NR URL（如 `http://host:1880/#flow/abc123`），自动从中提取 tab id（`#flow/` 后面的部分），避免匹配失败导致授权码无法自动部署。
