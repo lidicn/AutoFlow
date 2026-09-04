@@ -3390,10 +3390,14 @@ async function loadUpdate() {
           <select id="updateMirror" class="input" style="max-width:280px">
             <option value="">GitHub 直连（默认）</option>
             <option value="https://ghproxy.com/https://github.com/lidicn/AutoFlow.git">ghproxy 镜像</option>
+            <option value="https://mirror.ghproxy.com/https://github.com/lidicn/AutoFlow.git">ghproxy 备用</option>
             <option value="https://gitclone.com/github.com/lidicn/AutoFlow.git">gitclone 镜像</option>
-            <option value="https://mirror.ghproxy.com/https://github.com/lidicn/AutoFlow.git">ghproxy 备用镜像</option>
+            <option value="https://kkgithub.com/lidicn/AutoFlow.git">kkgithub 镜像</option>
+            <option value="https://hub.gitmirror.com/https://github.com/lidicn/AutoFlow.git">gitmirror 镜像</option>
+            <option value="__custom__">自定义镜像…</option>
           </select>
-          <span class="meta" id="mirrorHint" style="font-size:12px;color:var(--text-muted)">国内网络建议选镜像</span>
+          <input type="text" id="updateMirrorCustom" class="input" style="max-width:280px;display:none;margin-top:6px" placeholder="输入镜像 URL，如 https://xxx/https://github.com/...">
+          <span class="meta" id="mirrorHint" style="font-size:12px;color:var(--text-muted)">国内网络建议选镜像；若全部失败可手动 SCP 离线更新</span>
         </div>
         <div id="updateProgress" style="margin-top:12px;display:none">
           <div class="tutorial-progress-bar" style="height:8px;margin-bottom:6px"><div class="tutorial-progress-fill" id="updateProgressFill" style="width:0%"></div></div>
@@ -3411,6 +3415,14 @@ async function loadUpdate() {
       </div>`;
     const btn = $("#doUpdate");
     if (btn) btn.onclick = doUpdate;
+    // 自定义镜像切换
+    const mirrorSel = $("#updateMirror");
+    if (mirrorSel) {
+      mirrorSel.onchange = () => {
+        const customInput = $("#updateMirrorCustom");
+        if (customInput) customInput.style.display = mirrorSel.value === "__custom__" ? "block" : "none";
+      };
+    }
   } catch (e) {
     v.innerHTML = errBox(e.message || "加载失败", loadUpdate);
   }
@@ -3420,7 +3432,11 @@ async function doUpdate() {
   const prog = $("#updateProgress");
   const progFill = $("#updateProgressFill");
   const progText = $("#updateProgressText");
-  const mirror = $("#updateMirror")?.value || "";
+  let mirror = $("#updateMirror")?.value || "";
+  if (mirror === "__custom__") {
+    mirror = ($("#updateMirrorCustom")?.value || "").trim();
+    if (!mirror) { toast("请输入自定义镜像 URL"); return; }
+  }
   const btn = $("#doUpdate");
   if (btn) { btn.disabled = true; btn.textContent = "更新中…"; }
   if (prog) { prog.style.display = "block"; }

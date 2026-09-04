@@ -67,12 +67,14 @@ def _remote_url() -> str:
     return os.environ.get("AF_GIT_REMOTE") or DEFAULT_REMOTE
 
 
-def _run_git(repo: str, args: List[str], check: bool = True) -> subprocess.CompletedProcess:
+def _run_git(repo: str, args: List[str], check: bool = True,
+              timeout: Optional[int] = None) -> subprocess.CompletedProcess:
     # safe.directory=*：容器内以 root 运行，/repo 属主为 lidicn，git 默认拒访；
     # 自更新本就需要写入该仓库，放宽属主检查（仅对本仓操作，不波及其他）。
     return subprocess.run(
         ["git", "-c", "safe.directory=*", "-C", repo] + list(args),
         capture_output=True, text=True, env=_git_env(), check=check,
+        timeout=timeout,
     )
 
 
@@ -242,33 +244,46 @@ def perform_update(ref: Optional[str] = None, *,
         return {"ok": False, "error": f"备份失败：{e}", "current": cur}
 
     # 2) fetch（支持国内镜像）
+    # ★ 修复：用 try-finally 确保 remote 一定被恢复，避免 fetch 失败后
+    #   origin 永久指向失效镜像，导致后续所有更新都失败。
     fetch_url = mirror or _remote_url()
     original_remote = None
+    mirror_switched = False
     if mirror:
         # 临时切换 remote 到镜像，fetch 后恢复
         try:
             r = _run_git(repo, ["remote", "get-url", "origin"], check=False)
             original_remote = r.stdout.strip() if r.returncode == 0 else None
             _run_git(repo, ["remote", "set-url", "origin", mirror], check=True)
-        except Exception:
-            original_remote = None
+            mirror_switched = True
+        except Exception as e:
+            mirror_switched = False
+            return {"ok": False, "error": f"切换镜像失败：{e}", "current": cur,
+                    "backup": backup_path}
+    fetch_error = None
     try:
-        _run_git(repo, ["fetch", "--tags", "origin"], check=True)
+        # fetch 增加 60 秒超时，避免网络问题时无限等待
+        _run_git(repo, ["fetch", "--tags", "origin"], check=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        fetch_error = "fetch 超时（60秒），请检查网络或切换其他镜像"
     except Exception as e:
-        # 恢复原 remote
-        if original_remote:
+        # 提取 git 的详细错误信息（stderr）
+        detail = ""
+        if hasattr(e, "stderr") and e.stderr:
+            detail = f"（{e.stderr.strip()[:200]}）"
+        elif hasattr(e, "output") and e.output:
+            detail = f"（{str(e.output).strip()[:200]}）"
+        fetch_error = f"fetch 失败：{e}{detail}"
+    finally:
+        # ★ 无论 fetch 成功还是失败，都恢复原 remote
+        if mirror_switched and original_remote:
             try:
                 _run_git(repo, ["remote", "set-url", "origin", original_remote], check=False)
             except Exception:
                 pass
-        return {"ok": False, "error": f"fetch 失败：{e}", "current": cur,
-                "backup": backup_path}
-    # 恢复原 remote
-    if original_remote:
-        try:
-            _run_git(repo, ["remote", "set-url", "origin", original_remote], check=False)
-        except Exception:
-            pass
+    if fetch_error:
+        return {"ok": False, "error": fetch_error, "current": cur,
+                "backup": backup_path, "mirror_used": mirror}
 
     # 3) checkout -f（丢弃已跟踪改动，但不删未跟踪文件）
     try:
