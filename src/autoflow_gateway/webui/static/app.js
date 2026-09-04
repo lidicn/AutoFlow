@@ -456,7 +456,10 @@ function showCreateTokenModal() {
     </div>
     <div class="field">
       <label>目标 tab（可选）</label>
-      <input type="text" id="dt-target-tab" class="input" placeholder="如：客厅（留空=不绑定，每个 flow 独立 tab）">
+      <select id="dt-target-tab" class="input" style="width:100%">
+        <option value="">不绑定（每个 flow 独立 tab）</option>
+        <option value="__loading__" disabled>加载 tab 列表中…</option>
+      </select>
       <div class="meta" style="font-size:11px;color:var(--text-muted);margin-top:4px">绑定后 Agent 只能在此 tab 部署；留空则走 per_flow 模式，每个 flow 自动创建独立 tab。</div>
     </div>
     <div class="field">
@@ -492,6 +495,28 @@ function showCreateTokenModal() {
       <button class="btn primary" id="dt-create-confirm">创建</button>
     </div>
   `);
+
+  // 加载 Node-RED tab 列表填充下拉菜单
+  (async () => {
+    try {
+      const tabs = await _loadNRTabs();
+      const sel = $("#dt-target-tab");
+      if (sel && tabs && tabs.length) {
+        // 移除 loading 选项，添加已有 tab
+        const loadingOpt = sel.querySelector('option[value="__loading__"]');
+        if (loadingOpt) loadingOpt.remove();
+        const optgroup = document.createElement("optgroup");
+        optgroup.label = "已有 tab";
+        tabs.forEach(t => {
+          const opt = document.createElement("option");
+          opt.value = t.label;
+          opt.textContent = t.label + "（" + (t.node_count || 0) + " 节点）";
+          optgroup.appendChild(opt);
+        });
+        sel.appendChild(optgroup);
+      }
+    } catch (e) { /* 加载失败保持默认选项 */ }
+  })();
 
   $("#dt-create-confirm").onclick = async () => {
     const name = $("#dt-name").value.trim();
@@ -952,14 +977,9 @@ async function unarchiveProposal(id) {
 // 加载 Node-RED tab 列表（用于 P4 目标 tab 选择器）
 async function _loadNRTabs() {
   try {
-    const r = await api("GET", "/catalog");
-    if (r.ok && r.data) {
-      const flows = r.data.flows || r.data.nr_flows || [];
-      return flows.filter(f => f.type !== "subflow").map(f => ({
-        id: f.id,
-        label: f.label || f.id,
-        node_count: (f.nodes || []).length
-      }));
+    const r = await api("GET", "/nr/tabs");
+    if (r.ok && r.data && r.data.tabs) {
+      return r.data.tabs;
     }
   } catch (e) {}
   return [];

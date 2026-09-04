@@ -503,6 +503,31 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                     "deploy_policy": get_deploy_policy(cfg),
                     "selfheal_budget": load_feature_flags(cfg).get("selfheal_budget", 3)})
 
+    # ── Node-RED tab 列表（用于授权码/部署时的目标 tab 选择器）──
+    async def nr_tabs(request: Request):
+        """返回 Node-RED 中所有 tab 列表（id, label, node_count）。"""
+        try:
+            flows = gw.nr.list_flows()
+            if isinstance(flows, dict):
+                flows = flows.get("flows", [])
+            flows = flows or []
+            tabs = []
+            for f in flows:
+                if not isinstance(f, dict):
+                    continue
+                if f.get("type") not in (None, "", "tab"):
+                    continue
+                if f.get("type") == "subflow":
+                    continue
+                tabs.append({
+                    "id": f.get("id", ""),
+                    "label": f.get("label") or f.get("id") or "(未命名)",
+                    "node_count": len(f.get("nodes", [])) if isinstance(f.get("nodes"), list) else 0,
+                })
+            return _js({"ok": True, "tabs": tabs})
+        except Exception as e:
+            return _js({"ok": False, "error": str(e), "tabs": []}, 500)
+
     # ── Tab 组织模式：迁移状态 + 执行迁移（P2）──
     async def tab_org_status(request: Request):
         """获取当前 Tab 组织模式状态和迁移统计。"""
@@ -2417,6 +2442,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/config", config_view, methods=["GET"]),
         Route("/api/settings", settings_update, methods=["PUT"]),
         # Tab 组织模式（P2 迁移 + P3 预警）
+        Route("/api/nr/tabs", nr_tabs, methods=["GET"]),
         Route("/api/tab-org/status", tab_org_status, methods=["GET"]),
         Route("/api/tab-org/migrate", tab_org_migrate, methods=["POST"]),
         # 部署授权码（P4）

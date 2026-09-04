@@ -3556,6 +3556,11 @@ class Gateway:
             # 确定目标 tab：授权码绑定的 target_tab 优先级最高
             effective_target_tab = target_tab_from_token or target_tab
 
+            # URL 容错：如果用户粘贴了完整 NR URL（如 http://host:1880/#flow/abc123），
+            # 从中提取 tab id（#flow/ 后面的部分），避免匹配失败。
+            if effective_target_tab and "#flow/" in effective_target_tab:
+                effective_target_tab = effective_target_tab.split("#flow/")[-1].split("/")[0].split("?")[0].strip()
+
             # 部署前做快照
             try:
                 if effective_target_tab:
