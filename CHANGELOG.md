@@ -1,3 +1,11 @@
+## 1.5.0 (2026-09-05)
+- 【新功能】AutoFlow Pro 首发：核心版连网关模式，兼顾省 token 和安全性。
+- 【新功能】网关新增 `/api/core/*` 系列 REST API：version、health、propose-dsl、deploy-proposal、deploy-raw、entities、resolve-entity、snapshots、rollback。
+- 【新功能】nr_client.py 增加 `--gateway` 模式：支持 propose-dsl（★首选）、deploy-raw（⚠️逃生舱）、entities、resolve-entity、snapshots、rollback、doctor 等命令。
+- 【文档】core/skill/SKILL.md 增加 Pro 网关模式章节，明确引导 DSL 优先、raw 补充。
+- 【文档】新增产品定位文档，三版本对比（Core/Standard/Pro）。
+- 【设计】Agent 身份 + 授权范围双层模型：API Key 解决"你是谁"，Tab 授权解决"你能做什么"。
+
 ## 1.4.10 (2026-09-04)
 - 【Bug 修复】修复创建授权码弹窗中「目标 tab」多选勾选框的布局错乱问题。包括：总开关勾选框与文字对齐、勾选框列表项 flex 布局换行、节点数显示换行、列表项分隔线等。
 

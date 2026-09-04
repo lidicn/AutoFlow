@@ -1,13 +1,89 @@
 ---
 name: autoflow-core
-description: AutoFlow Core — 让 agent 安全编写/修改/验证 Node-RED flow 的最小核心。nr_client.py 唯一写入通道，含 doctor 自检、只读 inventory、自愈闭环验证。
+description: AutoFlow Core / Pro — 让 agent 安全编写/修改/验证 Node-RED flow。支持两种模式：直连 NR（Core）和连网关（Pro，推荐，省 token + 安全闸门）。nr_client.py 唯一写入通道。
 ---
 
-# AutoFlow Core（核心版）
+# AutoFlow Core / Pro（核心版 / 专业版）
 
 你（agent）通过本 skill 获得对 Node-RED 实例的安全编程能力：读取、编写、修改、验证 flow。
 所有写入经 `scripts/nr_client.py`（纯标准库，无 pip 依赖），自带护栏：写前快照、
 结构 lint、节点数熔断、prod 闸、操作日志、回读校验。
+
+## ⭐ 两种模式（优先用 Pro 网关模式）
+
+| 模式 | 命令前缀 | 特点 | 推荐场景 |
+|------|---------|------|---------|
+| **Pro（网关模式）** ★推荐 | `nr_client.py --gateway ...` | DSL 优先，省 5-10 倍 token，有编译闸门和快照，对话即部署 | 99% 日常场景 |
+| Core（直连模式） | `nr_client.py ...` | 直连 NR 写 JSON，无网关，无编译校验 | 离线/网关不可用/极端定制 |
+
+**默认用 Pro 网关模式。** 只有网关不可用或 DSL 确实表达不了时才用 Core 直连模式。
+
+## 🚀 Pro 网关模式（首选）
+
+### 配置
+
+配置文件 `~/.autoflow-core/config.json` 增加：
+```json
+{
+  "gateway_url": "http://<gateway-host>:8000",
+  "api_key": "af_pro_xxxxxx",
+  "agent_id": "my-agent"
+}
+```
+
+或环境变量：`AF_GATEWAY_URL`、`AF_API_KEY`、`AF_AGENT_ID`。
+
+### 标准流程（Pro 模式）
+
+```
+1. --gateway doctor                    # 自检：网关连通性
+2. --gateway resolve-entity "书房灯"   # 获取真实 entity_id（写 DSL 前必调）
+3. --gateway propose-dsl "触发: 书房人体传感器 on\n动作: light.turn_on(书房灯)"  # ★首选
+4. 成功 → 自动部署（授权范围内）
+5. 失败 → 看编译错误，改 DSL，重跑步骤 3（上限 3 轮）
+6. 不满意 → --gateway snapshots 查看快照，--gateway rollback <id> 回滚
+```
+
+### Pro 模式命令
+
+```bash
+# ★首选：提交 DSL，网关编译+闸门校验，自动部署
+nr_client.py --gateway propose-dsl "触发: 传感器 on\n动作: light.turn_on(灯)"
+nr_client.py --gateway propose-dsl --dsl-file flow.dsl   # 从文件读 DSL
+nr_client.py --gateway propose-dsl "..." --preview        # 仅生成提案，不部署
+
+# ⚠️逃生舱：直接提交 raw JSON（仅在 DSL 表达不了时使用）
+nr_client.py --gateway deploy-raw --flow-file flow.json
+
+# 实体查询
+nr_client.py --gateway entities --domain light --area 书房
+nr_client.py --gateway resolve-entity "书房灯"
+
+# 快照与回滚
+nr_client.py --gateway snapshots
+nr_client.py --gateway rollback <snapshot_id>
+
+# 自检
+nr_client.py --gateway doctor
+nr_client.py --gateway version
+```
+
+### DSL 语法速查
+
+```
+场景: <名称>
+触发: <entity_id> <状态>    # 如 binary_sensor.motion on
+条件: <entity_id> <状态>    # 可选，多条件用 AND
+动作: <service>(<entity_id>)  # 如 light.turn_on(light.lamp)
+动作: <service>(<entity_id>, brightness=80)
+延时: <秒数>秒
+分支: <条件> → <动作>
+否则: <动作>
+并行: <动作1> | <动作2>
+调用子流程: <子流程名>(参数=值)
+```
+
+**写 DSL 前必须先调 `resolve-entity` 获取真实 entity_id，禁止凭记忆编造。**
 
 ## 🚨 黄金法则（违反任何一条立即停止）
 
