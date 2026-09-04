@@ -1,3 +1,7 @@
+## 1.4.4 (2026-09-04)
+- 【健壮性修复】撤回 fail-atomic：NR 侧删除/更新失败时不再清账本，保持注册表与 NR 实际状态一致。之前失败仍清账本，导致"注册表说已删但 NR 实际没删"的不一致，出现孤儿边界注释残留、网关节点实际未删等问题。现在失败时返回明确错误（ok=False），用户可修复 NR 侧问题后重试撤回。
+- 【副作用修复】部署归一化不再反向补全 api-call-service 节点的 domain/service：`_normalize_api_call_service` 之前会对所有 api-call-service 节点做 action ⇄ domain/service 双向补全，包括用户手动添加的节点（如「💾 存档」节点的空 domain/service 被补为 input_text/set_value），属部署副作用。v7 格式只需要 action 字段，domain/service 是可选的，反向补全非必须。现在只正向补全 action（从 domain+service 推出），不反向补全，避免改写用户节点原始字段。
+
 ## 1.4.3 (2026-09-04)
 - 【P1 修复】缺陷 D /lab/* 路由仍 404：v1.4.2 注册的路由缺少 `/api` 前缀（注册为 `/lab/validate`，前端调用 `/api/lab/validate`）。改为 `/api/lab/validate|deploy|deploys`，三路由恢复正常。
 - 【P1 修复】授权码频率限制完全不生效：`validate_token` 中重置时间窗口时设置了 `rate_window_start=now` 但未调用 `_save_tokens` 持久化，导致 `rate_window_start` 永远为 null，限流永不拦截。修复为重置后立即保存。
