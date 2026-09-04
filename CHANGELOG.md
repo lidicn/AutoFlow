@@ -1,3 +1,11 @@
+## 1.5.1 (2026-09-05)
+- 【新功能】API Key 管理：新建 api_keys.py 模块，支持创建/列表/编辑/吊销/审计日志。
+- 【新功能】/api/core/* 全部接口强制 API Key 认证（Bearer token），按权限分级（read/deploy/modify）。
+- 【新功能】WebUI 新增「API Key 管理」页面：创建弹窗（名称/Agent ID/授权tab多选/权限/有效期）、列表、编辑、吊销、日志查看。
+- 【新功能】API Key 绑定授权 tab 列表，越界操作返回 403；空列表=全部 tab。
+- 【安全】API Key 只存 SHA-256 hash，不存明文；创建时只显示一次明文。
+- 【文档】API Key 管理页面内置 6 步使用说明，明确与授权码的区别（身份凭证 vs 临时权限）。
+
 ## 1.5.0 (2026-09-05)
 - 【新功能】AutoFlow Pro 首发：核心版连网关模式，兼顾省 token 和安全性。
 - 【新功能】网关新增 `/api/core/*` 系列 REST API：version、health、propose-dsl、deploy-proposal、deploy-raw、entities、resolve-entity、snapshots、rollback。
