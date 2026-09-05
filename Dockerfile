@@ -39,5 +39,12 @@ VOLUME ["/data"]
 
 EXPOSE 8000
 
+# M6: 创建非 root 用户并切换到它运行。
+# 自更新路径（self_update.py）通过 -c safe.directory=* 放宽 git 归属检查，
+# 不需要写数据目录以外的文件，故降权是安全的。
+# useradd -r：系统账户，无家目录，无登录 shell。
+RUN useradd -r -u 1000 -s /usr/sbin/nologin autoflow
+
 # 默认启动 MCP(/mcp) + WebUI(/) 同端口 :8000（控制面用于配连接 / 建 agent 身份码）
 CMD ["/app/.venv/bin/python", "run.py", "serve"]
+USER autoflow

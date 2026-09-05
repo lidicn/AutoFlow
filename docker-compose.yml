@@ -9,6 +9,8 @@ services:
       dockerfile: Dockerfile
     container_name: autoflow-v2
     restart: unless-stopped
+    read_only: true                  # M6: 只读根文件系统，防止容器被入侵后写入系统文件
+    user: "1000:1000"                # M6: 以非 root 用户运行（Dockerfile 中创建的 autoflow 用户）
     ports:
       - "8002:8000"  # MCP + WebUI（实验版，与主版 8000 隔离；绑定到 LAN IP 通过 HASS_SERVER/NR_URL 环境变量控制）
     environment:
@@ -27,6 +29,9 @@ services:
       - ./src:/app/src:ro           # 源码绑定挂载（只读，改代码后 restart 生效）
       - ./data:/data                # 持久化数据（授权码、API Key、Token 统计等）
       - ./skills:/app/skills:ro     # skills 绑定挂载
+    tmpfs:
+      - /tmp:size=64M               # M6: /tmp 临时可写（Pygments 词法分析缓存、tempfile 落点）
+      - /run:size=16M               # M6: /run 临时可写（部分库可能写 run 目录）
     networks:
       - autoflow-v2-net
     healthcheck:
