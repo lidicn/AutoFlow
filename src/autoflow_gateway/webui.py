@@ -1475,7 +1475,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         """获取授权码快照列表。"""
         token_id = request.path_params["id"]
         snapshot_type = request.query_params.get("type")
-        snaps = _snap_mgr().list_snapshots(token_id, snapshot_type=snapshot_type)
+        snaps = await asyncio.to_thread(_snap_mgr().list_snapshots, token_id, snapshot_type=snapshot_type)
         return _js({"ok": True, "snapshots": snaps})
 
     async def deploy_token_rollback(request: Request):
@@ -1507,7 +1507,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         snap2 = request.query_params.get("snapshot_2")
         if not snap1 or not snap2:
             return _js({"ok": False, "error": "需要 snapshot_1 和 snapshot_2 参数"}, 400)
-        result = _snap_mgr().diff_snapshots(token_id, snap1, snap2)
+        result = await asyncio.to_thread(_snap_mgr().diff_snapshots, token_id, snap1, snap2)
         return _js(result)
 
     # ── Lab 沙盒部署（缺陷D修复：实现 /lab/* 路由）──
@@ -2281,7 +2281,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
 
     # ── 工作区 plan（总体/当前/最近完成）──
     async def plan_view(request: Request):
-        return _js(gw.get_plan())
+        return _js(await asyncio.to_thread(gw.get_plan))
 
     async def plan_update(request: Request):
         b = await _body(request)
@@ -3246,7 +3246,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     async def catalog_import(request: Request):
         """POST /api/catalog/import → 全量刷新设备目录（仅用户显式点击）。不触发部署。"""
         try:
-            res = gw.refresh_catalog(full=True)
+            res = await asyncio.to_thread(gw.refresh_catalog, full=True)
         except Exception as e:
             return _js({"ok": False, "error": f"导入失败: {e}"}, status=500)
         return _js({
@@ -3266,7 +3266,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             limit = int(request.query_params.get("limit", "20"))
         except (TypeError, ValueError):
             limit = 20
-        res = gw.list_entities(keyword=kw, limit=limit)
+        res = await asyncio.to_thread(gw.list_entities, keyword=kw, limit=limit)
         return _js({"ok": True, **res})
 
     async def audit_list(request: Request):
@@ -3300,13 +3300,13 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
 
     # ── debug 回读（#644，只读，从本地缓冲取，绝不现打 NR）──
     async def debug_read_global(request: Request):
-        return _debug_read_impl(request, None)
+        return await _debug_read_impl(request, None)
 
     async def debug_read(request: Request):
         flow_id = request.path_params.get("flow_id")
-        return _debug_read_impl(request, flow_id)
+        return await _debug_read_impl(request, flow_id)
 
-    def _debug_read_impl(request: Request, flow_id):
+    async def _debug_read_impl(request: Request, flow_id):
         try:
             q = request.query_params
             node_id = (q.get("node_id") or "") or None
@@ -3315,7 +3315,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             full = (q.get("full") or "0") in ("1", "true", "True")
             since = int(since_s) if since_s.isdigit() else None
             limit = int(limit_s) if limit_s.isdigit() else 50
-            return _js(gw.get_debug_read(
+            return _js(await asyncio.to_thread(gw.get_debug_read,
                 flow_id=flow_id, node_id=node_id, since=since, limit=limit, full=full))
         except Exception as e:
             return _js({"ok": False, "error": str(e)}, 500)
