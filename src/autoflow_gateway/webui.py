@@ -769,14 +769,26 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     async def core_version(request: Request):
         """网关版本 + 兼容性检查。"""
         try:
-            # VERSION 在项目根目录，比 src/autoflow_gateway/ 高两级
-            version_path = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                "VERSION")
             ver = "unknown"
-            if os.path.exists(version_path):
-                with open(version_path, "r", encoding="utf-8") as f:
-                    ver = f.read().strip()
+            # 多路径尝试：容器内可能是 /app/src/... 或 /repo/src/...
+            _candidates = [
+                # 相对于 __file__ 的项目根（开发环境）
+                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "VERSION"),
+                # 容器常见挂载点
+                "/repo/VERSION",
+                "/app/VERSION",
+                # 工作目录
+                os.path.join(os.getcwd(), "VERSION"),
+            ]
+            for _vp in _candidates:
+                if os.path.exists(_vp):
+                    try:
+                        with open(_vp, "r", encoding="utf-8") as f:
+                            ver = f.read().strip()
+                        if ver and ver != "unknown":
+                            break
+                    except Exception:
+                        continue
             return _js({"ok": True, "version": ver, "api_version": "v1",
                         "features": ["propose_dsl", "deploy_raw", "entities", "snapshots", "templates"]})
         except Exception as e:
