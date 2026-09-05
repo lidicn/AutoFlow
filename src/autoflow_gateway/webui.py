@@ -48,6 +48,7 @@ from .api_specs import (
     resolve_system_placeholders,
 )
 from . import connections
+from .arena import ArenaManager
 
 # 人工抽查（spotcheck）与评测工作台（eval）已从网关剥离，迁移至 archive/agent-loop-migration/（C4）。
 
@@ -189,6 +190,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     device_guard = DeviceGuardStore(cfg)
     audit_store = AuditStore(gw)
     api_configs = ApiConfigStore(cfg)  # A0/A2：Link API 运行时配置（api_configs 表）
+    arena_mgr = ArenaManager(cfg.data_dir, gateway=gw)  # 竞技场（v2.0）
     static_dir = os.path.join(os.path.dirname(__file__), "webui", "static")
     index_path = os.path.join(static_dir, "index.html")
 
@@ -1610,6 +1612,90 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         """Lab: 获取部署历史。"""
         history = _lab_load_history()
         return _js({"ok": True, "deploys": history})
+
+    # ── 竞技场（v2.0）──
+    async def arena_list(request: Request):
+        """列出所有竞技场分区。"""
+        try:
+            arenas = await asyncio.to_thread(arena_mgr.list_arenas)
+            return _js({"ok": True, "arenas": arenas})
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def arena_detail(request: Request):
+        """获取单个分区详情。"""
+        arena_id = request.path_params.get("arena_id", "")
+        try:
+            arena = await asyncio.to_thread(arena_mgr.get_arena, arena_id)
+            if not arena:
+                return _js({"ok": False, "error": f"分区 {arena_id} 不存在"}, 404)
+            return _js({"ok": True, "arena": arena})
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def arena_tasks(request: Request):
+        """列出分区的题目。"""
+        arena_id = request.path_params.get("arena_id", "")
+        status = request.query_params.get("status")
+        try:
+            tasks = await asyncio.to_thread(arena_mgr.list_tasks, arena_id, status)
+            return _js({"ok": True, "tasks": tasks})
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def arena_propose_task(request: Request):
+        """提交题目（审核 + 创造力评分）。"""
+        arena_id = request.path_params.get("arena_id", "")
+        b = await _body(request)
+        title = (b.get("title") or "").strip()
+        description = (b.get("description") or "").strip()
+        entity_ids = b.get("entity_ids") or []
+        agent_id = (b.get("agent_id") or "arena-agent").strip()
+        if isinstance(entity_ids, str):
+            entity_ids = [e.strip() for e in entity_ids.split(",") if e.strip()]
+        try:
+            result = await asyncio.to_thread(
+                arena_mgr.propose_task, arena_id, title, description, entity_ids, agent_id
+            )
+            return _js(result, 200 if result.get("ok") else 400)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def arena_submit_flow(request: Request):
+        """提交 flow 进行验收。"""
+        arena_id = request.path_params.get("arena_id", "")
+        b = await _body(request)
+        task_id = (b.get("task_id") or "").strip()
+        dsl = (b.get("dsl") or "").strip()
+        agent_id = (b.get("agent_id") or "arena-agent").strip()
+        if not task_id:
+            return _js({"ok": False, "error": "task_id 不能为空"}, 400)
+        if not dsl:
+            return _js({"ok": False, "error": "dsl 不能为空"}, 400)
+        try:
+            result = await asyncio.to_thread(
+                arena_mgr.submit_flow, arena_id, task_id, dsl, agent_id
+            )
+            return _js(result, 200 if result.get("ok") else 400)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def arena_leaderboard(request: Request):
+        """获取排行榜。"""
+        arena_id = request.path_params.get("arena_id", "")
+        try:
+            board = await asyncio.to_thread(arena_mgr.get_leaderboard, arena_id)
+            return _js({"ok": True, "leaderboard": board})
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def arena_stats(request: Request):
+        """获取竞技场全局统计。"""
+        try:
+            stats = await asyncio.to_thread(arena_mgr.get_stats)
+            return _js({"ok": True, "stats": stats})
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
 
     # ── 诊断查看器（P4-C，只读）──
     async def diagnostics_view(request: Request):
@@ -3318,6 +3404,14 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/lab/validate", lab_validate, methods=["POST"]),
         Route("/api/lab/deploy", lab_deploy, methods=["POST"]),
         Route("/api/lab/deploys", lab_deploys, methods=["GET"]),
+        # 竞技场（v2.0）
+        Route("/api/arena/arenas", arena_list, methods=["GET"]),
+        Route("/api/arena/arenas/{arena_id}", arena_detail, methods=["GET"]),
+        Route("/api/arena/arenas/{arena_id}/tasks", arena_tasks, methods=["GET"]),
+        Route("/api/arena/arenas/{arena_id}/propose", arena_propose_task, methods=["POST"]),
+        Route("/api/arena/arenas/{arena_id}/submit", arena_submit_flow, methods=["POST"]),
+        Route("/api/arena/arenas/{arena_id}/leaderboard", arena_leaderboard, methods=["GET"]),
+        Route("/api/arena/stats", arena_stats, methods=["GET"]),
         # 设置管理界面（C3/C21/C25）
         Route("/api/connection/test", connection_test, methods=["POST"]),
         # 连接设置（#45）：HA / NR / Bark 凭据界面化，避免用户硬编码进脚本
