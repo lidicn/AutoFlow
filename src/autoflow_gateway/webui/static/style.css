@@ -374,11 +374,17 @@ body {
   .bottomnav { display: flex; }
   .grid.cols-4 { grid-template-columns: repeat(2, 1fr); }
   .view-head h2 { font-size: 17px; }
+  /* 移动端：防止输入框<16px触发iOS自动缩放 */
+  .field input, .field select, .field textarea { font-size: 16px !important; }
   /* 顶栏紧凑：图标按钮收窄，避免小屏溢出；Safe Area 已在 --sat 处理 */
   .topbar { padding: 8px 12px; padding-top: calc(8px + var(--sat)); gap: 6px; }
   .topbar-right { gap: 2px; }
   .topbar .btn.ghost { padding: 6px 7px; font-size: 15px; }
   .mobile-sheet-grid { grid-template-columns: repeat(4, 1fr); }
+  /* 触摸目标最小 44px */
+  .btn.sm, .bc-ops .btn { min-height: 44px; min-width: 44px; }
+  /* 禁用双击缩放 */
+  button, .btn, a, label[role="button"] { touch-action: manipulation; }
 }
 @media (max-width: 420px) {
   .grid.cols-4 { grid-template-columns: 1fr; }

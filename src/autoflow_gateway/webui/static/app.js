@@ -101,8 +101,63 @@ function modal(title, html, confirmCb, closeLabel) {
 function closeModal() { $("#modalMask").hidden = true; }
 
 function esc(s) {
-  return String(s == null ? "" : s).replace(/[&<>"]/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+// BUG-3: HTTP 环境下 navigator.clipboard 不可用，提供 execCommand 降级方案
+async function safeCopy(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try { await navigator.clipboard.writeText(text); return true; } catch { /* ignore */ }
+  }
+  // fallback: 创建临时 textarea 选中后 execCommand
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.left = '-9999px';
+  ta.style.top = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  const ok = document.execCommand('copy');
+  document.body.removeChild(ta);
+  return ok;
+}
+// BUG-2: PWA 独立模式下 confirm/prompt 不可用，使用自定义模态框替代
+function confirmDialog(msg) {
+  return new Promise(resolve => {
+    const html = `<p style="line-height:1.6;margin:0">${esc(msg)}</p>`;
+    modal("确认操作", html, async () => resolve(true), "取消");
+    // 覆盖 footer 按钮语义
+    const foot = $("#modalFoot");
+    if (foot) {
+      foot.innerHTML = `<button class="btn ghost" id="confirmCancelBtn">取消</button><button class="btn primary" id="confirmOkBtn">确认</button>`;
+      $("#confirmCancelBtn").onclick = () => { closeModal(); resolve(false); };
+      $("#confirmOkBtn").onclick = () => { closeModal(); resolve(true); };
+    }
+  });
+}
+function promptDialog(msg, defaultValue) {
+  return new Promise(resolve => {
+    const html = `
+      <p style="line-height:1.6;margin:0 0 12px">${esc(msg)}</p>
+      <div class="field">
+        <input type="text" id="promptInput" class="input" value="${esc(defaultValue || '')}" placeholder="输入内容...">
+      </div>`;
+    modal("请输入", html, async () => {
+      const val = $("#promptInput")?.value.trim() || "";
+      resolve(val || null);
+    }, "取消");
+    const foot = $("#modalFoot");
+    if (foot) {
+      foot.innerHTML = `<button class="btn ghost" id="promptCancelBtn">取消</button><button class="btn primary" id="promptOkBtn">确定</button>`;
+      $("#promptCancelBtn").onclick = () => { closeModal(); resolve(null); };
+      $("#promptOkBtn").onclick = async () => {
+        const val = $("#promptInput")?.value.trim() || "";
+        closeModal();
+        resolve(val || null);
+      };
+    }
+    setTimeout(() => { const inp = $("#promptInput"); if (inp) { inp.focus(); inp.select(); } }, 50);
+  });
 }
 function badge(cls, text) { return `<span class="badge ${cls}">${esc(text)}</span>`; }
 const MODES = ["normal", "expert", "developer"];
@@ -509,7 +564,7 @@ async function showTemplateDetail(templateId) {
     if (renderBtn) renderBtn.onclick = () => showRenderTemplateModal(t);
     const delBtn = $("#tpl-delete-btn");
     if (delBtn) delBtn.onclick = async () => {
-      if (!confirm("确定删除此模板？")) return;
+      if (!(await confirmDialog("确定删除此模板？"))) return;
       await api("DELETE", "/templates/" + templateId);
       closeModal();
       toast("已删除", "success");
@@ -562,7 +617,9 @@ function showRenderTemplateModal(t) {
       $("#tpl-rendered-dsl").textContent = r.data.dsl;
       $("#tpl-copy-dsl").style.display = "inline-block";
       $("#tpl-copy-dsl").onclick = () => {
-        navigator.clipboard.writeText(r.data.dsl).then(() => toast("已复制 DSL", "success"));
+        safeCopy(r.data.dsl).then(ok => {
+          if (ok) toast("已复制 DSL", "success"); else toast("复制失败，请手动选择", "error");
+        });
       };
     } catch (e) {
       toast("渲染失败: " + e.message, "error");
@@ -676,7 +733,7 @@ async function refreshTokenStats() {
       <div style="display:flex;align-items:flex-end;gap:4px;height:120px;padding:8px 0">
         ${daily.map(d => `
           <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
-            <div style="width:100%;background:var(--primary);opacity:0.7;border-radius:4px 4px 0 0;height:${Math.max(2, (d.estimated_tokens / maxTokens) * 100)}%" title="${d.estimated_tokens} tokens"></div>
+            <div style='width:100%;background:var(--primary);opacity:0.7;border-radius:4px 4px 0 0;height:${Math.max(2, (d.estimated_tokens / maxTokens) * 100)}%' title='${esc(d.estimated_tokens)} tokens'></div>
             <span style="font-size:10px;color:var(--text-muted)">${d.date.slice(5)}</span>
           </div>
         `).join("")}
@@ -998,7 +1055,9 @@ function showApiKeyCreated(data) {
   setTimeout(() => {
     const btn = $("#ak-copy-btn");
     if (btn) btn.onclick = () => {
-      navigator.clipboard.writeText(data.key).then(() => toast("已复制", "success"));
+      safeCopy(data.key).then(ok => {
+        if (ok) toast("已复制", "success"); else toast("复制失败，请手动选择", "error");
+      });
     };
   }, 100);
 }
@@ -1070,7 +1129,7 @@ async function editApiKey(keyId) {
 }
 
 async function revokeApiKey(keyId) {
-  if (!confirm("确定吊销此 API Key？吊销后立即失效，Agent 将无法调用网关。")) return;
+  if (!(await confirmDialog("确定吊销此 API Key？吊销后立即失效，Agent 将无法调用网关。"))) return;
   try {
     const r = await api("POST", "/keys/" + keyId + "/revoke");
     if (!r.ok) throw new Error(r.data?.error || r.status);
@@ -1354,7 +1413,7 @@ function showCreateTokenModal() {
 }
 
 async function revokeToken(tokenId) {
-  if (!confirm("确定吊销此授权码吗？吊销后立即失效，正在使用的 Agent 将无法自动部署。")) return;
+  if (!(await confirmDialog("确定吊销此授权码吗？吊销后立即失效，正在使用的 Agent 将无法自动部署。"))) return;
   try {
     const r = await api("DELETE", "/deploy-tokens/" + tokenId);
     if (r.ok) {
@@ -1594,7 +1653,7 @@ function renderDiffResult(data, previewMode = false) {
 }
 
 async function rollbackToSnapshot(tokenId, snapshotId) {
-  if (!confirm("确定回滚到此快照吗？回滚会恢复 tab 到快照时的状态，当前未保存的变更将丢失。回滚前会自动创建新快照。")) return;
+  if (!(await confirmDialog("确定回滚到此快照吗？回滚会恢复 tab 到快照时的状态，当前未保存的变更将丢失。回滚前会自动创建新快照。"))) return;
   try {
     const r = await api("POST", "/deploy-tokens/" + tokenId + "/rollback", {
       snapshot_id: snapshotId, type: "full"
@@ -1671,20 +1730,20 @@ async function createAgent() {
   loadAgents();
 }
 async function regenAgent(id) {
-  if (!confirm("重置后旧接入令牌立即失效，确定？")) return;
+  if (!(await confirmDialog("重置后旧接入令牌立即失效，确定？"))) return;
   const r = await api("POST", `/agents/${id}/regen`);
   if (!r.ok) return toast("失败：" + (r.data?.error || r.status));
   modal("新接入令牌（仅此一次）", `<div class="code-box">${esc(r.data.identity_code)}</div>`);
   loadAgents();
 }
 async function revokeAgent(id) {
-  if (!confirm("停用后该 Agent 无法连接网关（行仍保留，可恢复），确定？")) return;
+  if (!(await confirmDialog("停用后该 Agent 无法连接网关（行仍保留，可恢复），确定？"))) return;
   const r = await api("POST", `/agents/${id}/revoke`);
   toast(r.ok ? "已停用" : "失败：" + (r.data?.error || r.status));
   if (r.ok) loadAgents();
 }
 async function deleteAgent(id) {
-  if (!confirm("⚠️ 彻底删除：该 Agent 将从身份库彻底移除（含接入令牌哈希），不可恢复。确定？")) return;
+  if (!(await confirmDialog("⚠️ 彻底删除：该 Agent 将从身份库彻底移除（含接入令牌哈希），不可恢复。确定？"))) return;
   const r = await api("DELETE", `/agents/${id}`);
   toast(r.ok ? "已删除" : "失败：" + (r.data?.error || r.status));
   if (r.ok) loadAgents();
@@ -1899,19 +1958,19 @@ function _renderProposalPager() {
   if (arch) arch.onclick = () => { _propIncludeArchived = arch.checked; _propOffset = 0; _loadProposalPage(); };
 }
 async function rejectProposal(id) {
-  const reason = prompt("拒绝理由（可选）：") || "";
+  const reason = (await promptDialog("拒绝理由（可选）：", "")) ?? "";
   const r = await api("POST", `/proposals/${id}/reject`, { reason });
   toast(r.ok ? "已拒绝" : "失败：" + (r.data?.error || r.status));
   if (r.ok) loadProposals();
 }
 async function deleteProposal(id) {
-  if (!confirm("删除该流程？（不可恢复；若已部署，对应 flow 不会被自动移除，需到「已部署」手动移除）")) return;
+  if (!(await confirmDialog("删除该流程？（不可恢复；若已部署，对应 flow 不会被自动移除，需到「已部署」手动移除）"))) return;
   const r = await api("DELETE", `/proposals/${id}/delete`);
   toast(r.ok ? "已删除" : "失败：" + (r.data?.error || r.status));
   if (r.ok) loadProposals();
 }
 async function archiveProposal(id) {
-  if (!confirm("归档该提案？（退休语义：默认从有效列表隐藏，仍可经「显示已归档」查看与恢复）")) return;
+  if (!(await confirmDialog("归档该提案？（退休语义：默认从有效列表隐藏，仍可经「显示已归档」查看与恢复）"))) return;
   const r = await api("POST", `/proposals/${id}/archive`);
   toast(r.ok ? "已归档" : "失败：" + (r.data?.error || r.status));
   if (r.ok) _loadProposalPage();
@@ -1942,7 +2001,7 @@ async function deployProposal(id) {
     proposalTargetTab = c.target_tab || "";
   } catch (e) {}
   if (isSub) {
-    if (!confirm("确定注册该子流程到网关？\n（写 NR 子流程实例 + 登记子流程注册表，注册后 agent 可经 MCP 调用。冲突或失败不会动 NR。）")) return;
+    if (!(await confirmDialog("确定注册该子流程到网关？\n（写 NR 子流程实例 + 登记子流程注册表，注册后 agent 可经 MCP 调用。冲突或失败不会动 NR。）"))) return;
     const r = await api("POST", `/proposals/${id}/deploy`, { target: "prod" });
     return _handleDeployResult(r, id);
   }
@@ -2063,10 +2122,10 @@ async function loadDeployed() {
   } catch (e) { $("#d-list").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
 async function undeployProposal(id) {
-  if (!confirm("确定撤回？\n该 tab 中你自己的节点将被保留，仅移除本网关写入的节点。")) return;
+  if (!(await confirmDialog("确定撤回？\n该 tab 中你自己的节点将被保留，仅移除本网关写入的节点。"))) return;
   let r = await api("POST", `/deployed/${id}/undeploy`, {});
   if (!r.ok && r.data?.code === "nr_unreachable") {
-    if (confirm("Node-RED 当前不可达，无法确认 flow 状态。\n若你确认已在 NR 手动删除该 flow，是否仅清理本网关注册表？")) {
+    if (await confirmDialog("Node-RED 当前不可达，无法确认 flow 状态。\n若你确认已在 NR 手动删除该 flow，是否仅清理本网关注册表？")) {
       r = await api("POST", `/deployed/${id}/undeploy`, { force: true });
     }
   }
@@ -2120,8 +2179,8 @@ async function openRollbackDialog(flowId) {
   if (!options) { toast("无有效快照可回滚"); return; }
 
   // 二次确认对话框
-  const sel = prompt(
-    `请选择要回滚到的快照版本：\n\n${snaps.map(s => `[${s.snapshot_id}] ${s.label || s.snapshot_id} (${s.ts}) · ${s.node_count}节点`).join("\n")}\n\n输入 snapshot_id 或编号(0-${snaps.length - 1})：`
+  const sel = await promptDialog(
+    `请选择要回滚到的快照版本：\n\n${snaps.map(s => `[${s.snapshot_id}] ${s.label || s.snapshot_id} (${s.ts}) · ${s.node_count}节点`).join("\n")}\n\n输入 snapshot_id 或编号(0-${snaps.length - 1})：`, ""
   );
   if (!sel) return;
   const idx = parseInt(sel, 10);
@@ -2130,12 +2189,12 @@ async function openRollbackDialog(flowId) {
     toast("无效的快照选择");
     return;
   }
-  if (!confirm(
+  if (!(await confirmDialog(
     `确定回滚到快照「${snapId}」？\n` +
     `目标 flow: ${flowId}\n` +
     `快照内容: ${snaps.find(s => s.snapshot_id === snapId)?.label || snapId} (${snaps.find(s => s.snapshot_id === snapId)?.ts || "未知时间"})\n\n` +
     `回滚前会自动创建当前状态备份，恢复后可用「↩ 回滚」进一步操作。\n\n此操作不可撤销！`
-  )) return;
+  ))) return;
 
   try {
     const rb = await api("POST", `/flows/${flowId}/rollback`, { snapshot_id: snapId });
@@ -2223,7 +2282,7 @@ async function editNote(id) {
   };
 }
 async function deleteNote(id) {
-  if (!confirm("删除该笔记？")) return;
+  if (!(await confirmDialog("删除该笔记？"))) return;
   const r = await api("DELETE", `/notes/${id}`);
   toast(r.ok ? "已删除" : "失败");
   if (r.ok) loadNotesList();
@@ -2311,7 +2370,7 @@ function stageBadge(stage) {
 }
 
 async function setStageFor(id, stage) {
-  const ver = prompt(`设置 stage=${stage}。版本号（留空沿用现有，缺省 1.0.0）：`, "");
+  const ver = (await promptDialog(`设置 stage=${stage}。版本号（留空沿用现有，缺省 1.0.0）：`, "")) ?? "";
   const body = { id, stage };
   if (ver && ver.trim()) body.version = ver.trim();
   const r = await api("POST", "/sync/set-stage", body);
@@ -2331,7 +2390,7 @@ async function previewPush() {
 }
 
 async function pushReleaseManual() {
-  if (!confirm("确认将 NR 中所有 release 且版本号大于已推送版本的 flow 推送到 prod？\n（dev/agent 不会推送；推送后 flow 在 prod 自动启用）")) return;
+  if (!(await confirmDialog("确认将 NR 中所有 release 且版本号大于已推送版本的 flow 推送到 prod？\n（dev/agent 不会推送；推送后 flow 在 prod 自动启用）"))) return;
   const r = await api("POST", "/sync/push-release", { dry_run: false });
   if (!r.ok) return toast("失败：" + (r.data?.error || r.status));
   const pushed = r.data?.pushed || [];
@@ -2567,7 +2626,7 @@ async function loadSpotcheck() {
 async function scRun(dry) {
   const taskId = $("#sc-task").value;
   if (!taskId || taskId === "加载中…") return toast("请先选择任务");
-  if (!dry && !confirm("确定把 3 家提交合并为一份「白盒提案」？\n（待你在「待审核流程」面板审核后一键部署到 NR；触发器已禁用，不会自动触发）")) return;
+  if (!dry && !(await confirmDialog("确定把 3 家提交合并为一份「白盒提案」？\n（待你在「待审核流程」面板审核后一键部署到 NR；触发器已禁用，不会自动触发）"))) return;
   const r = await api("POST", "/spotcheck", {
     task_id: taskId,
     label: $("#sc-label").value.trim(),
@@ -3176,11 +3235,11 @@ async function installSingleLinkApi(key) {
 async function deleteLinkApi(key) {
   const s = _sfList.find((x) => x.key === key);
   const title = s ? (s.title || key) : key;
-  if (!confirm(
+  if (!(await confirmDialog(
     `确定删除 Link API「${title}」？\n`
     + "\n将清空它的本机配置（token 等），并移除 Node-RED「AutoFlow API」tab 中"
     + "由它派生的节点。\n其它 Link API 的链路与你自己的流程不受影响；"
-    + "能力声明保留在网关，之后可重新配置并安装回去。")) return;
+    + "能力声明保留在网关，之后可重新配置并安装回去。"))) return;
   try {
     const r = await api("DELETE", "/link-apis/" + encodeURIComponent(key));
     if (!r.ok) return toast("删除失败：" + (r.data?.error || r.status));
@@ -3288,7 +3347,7 @@ async function deleteSubflow(key) {
     : s.source_type === "managed"
       ? "\n⚠️ 这是本网关内置的子流程，Node-RED 上的子流程实例将被一并删除。"
       : "\n（仅从本网关注册表移除，Node-RED 上的子流程保持原样。）";
-  if (!confirm(`确定删除子流程「${key}」？${tail}\n此操作不可撤销，已引用它的 flow 将失效。`)) return;
+  if (!(await confirmDialog(`确定删除子流程「${key}」？${tail}\n此操作不可撤销，已引用它的 flow 将失效。`))) return;
   try {
     const r = await api("DELETE", "/subflows/" + encodeURIComponent(key));
     if (!r.ok) return toast("删除失败：" + (r.data?.error || r.status));
@@ -3598,7 +3657,7 @@ async function saveConnGroup(g) {
 }
 
 async function clearConnField(g, f) {
-  if (!confirm(`确定清除「${f.label}」？清除后将回退到环境变量或默认值。`)) return;
+  if (!(await confirmDialog(`确定清除「${f.label}」？清除后将回退到环境变量或默认值。`))) return;
   try {
     const r = await api("PUT", "/settings/connections", { [f.key]: null });
     if (!r.ok) throw new Error(r.data?.error || r.status);
@@ -3841,7 +3900,7 @@ async function loadAdvancedSettings() {
     const migrateResult = $("#adv-migrate-result");
 
     async function doMigrate(targetMode, btn) {
-      if (!confirm(`确定要将所有 flow 迁移到${targetMode === "single_tab" ? "单 tab" : "独立 tab"}模式吗？\n\n建议先备份 Node-RED flows。迁移过程中 NR 可能短暂不可用。`)) return;
+      if (!(await confirmDialog(`确定要将所有 flow 迁移到${targetMode === "single_tab" ? "单 tab" : "独立 tab"}模式吗？\n\n建议先备份 Node-RED flows。迁移过程中 NR 可能短暂不可用。`))) return;
       btn.disabled = true;
       btn.textContent = "迁移中…";
       migrateResult.innerHTML = `<div class="desc">正在迁移，请稍候…</div>`;
@@ -4094,15 +4153,15 @@ function showAcpTokenOnce(tok) {
       <button class="btn primary" id="acpCopy">复制</button>
     </div>`);
   $("#acpCopy").onclick = () => {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(plain).then(() => toast("已复制"), () => toast("复制失败，请手动选择"));
-    } else { toast("复制失败，请手动选择"); }
+    safeCopy(plain).then(ok => {
+      if (ok) toast("已复制"); else toast("复制失败，请手动选择", "error");
+    });
   };
   $("#acpClose").onclick = () => { closeModal(); loadAcpTokens(); };
 }
 
 async function revokeAcpToken(id) {
-  if (!confirm("停用该 ACP 令牌？停用后该对端无法再调 /acp（哈希保留用于审计）。")) return;
+  if (!(await confirmDialog("停用该 ACP 令牌？停用后该对端无法再调 /acp（哈希保留用于审计）。"))) return;
   try {
     const r = await api("POST", `/acp/tokens/${id}/revoke`);
     if (!r.ok) throw new Error(r.data?.error || "停用失败");
@@ -4112,7 +4171,7 @@ async function revokeAcpToken(id) {
 }
 
 async function deleteAcpToken(id) {
-  if (!confirm("⚠️ 彻底删除该令牌？含记录一并删除，不可恢复。确定？")) return;
+  if (!(await confirmDialog("⚠️ 彻底删除该令牌？含记录一并删除，不可恢复。确定？"))) return;
   try {
     const r = await api("DELETE", `/acp/tokens/${id}`);
     if (!r.ok) throw new Error(r.data?.error || "删除失败");
@@ -4807,7 +4866,7 @@ const afAuth = (() => {
     };
     $$("#modalBody [data-reset]").forEach((b) => {
       b.onclick = async () => {
-        const pw = prompt("设置新密码（该用户下次登录需改密）：");
+        const pw = (await promptDialog("设置新密码（该用户下次登录需改密）：", "")) ?? "";
         if (!pw) return;
         const rr = await api("POST", "/auth/users/" + b.dataset.reset + "/reset-password", { new_password: pw });
         toast(rr.ok ? "已重置" : ((rr.data && rr.data.error) || "失败"));
@@ -4815,7 +4874,7 @@ const afAuth = (() => {
     });
     $$("#modalBody [data-del]").forEach((b) => {
       b.onclick = async () => {
-        if (!confirm("确认删除该用户？")) return;
+        if (!(await confirmDialog("确认删除该用户？"))) return;
         const rr = await api("DELETE", "/auth/users/" + b.dataset.del);
         if (rr.ok) showUsers(); else toast((rr.data && rr.data.error) || "删除失败");
       };
