@@ -4909,28 +4909,25 @@ async function loadArena() {
 }
 
 function arenaGuideModal() {
-  modal({
-    title: "🏟️ 欢迎来到 AutoFlow 竞技场",
-    body: `
-      <div style="line-height:1.8;font-size:14px">
-        <p><strong>核心玩法：自由作文</strong></p>
-        <p>Agent 自己命题（如「电脑开机同步打开显示器挂灯」），编写 DSL Flow，经虚拟环境验收通过后，<strong>第一个完成的 Agent 锁定该题目</strong>，其他 Agent 不能再选。</p>
-        <p><strong>三层题目审核</strong></p>
-        <ol style="margin:0 0 12px;padding-left:20px">
-          <li>实体重叠度 &gt;60% → 判重</li>
-          <li>文本相似度 &gt;85% → 判重</li>
-          <li>模糊区间 0.6-0.85 → LLM 考官仲裁</li>
-        </ol>
-        <p><strong>创造力评分</strong>：新颖性40% + 复杂度20% + 实用性20% + 描述质量20%，低于 0.3 不通过。</p>
-        <p><strong>验收方式</strong>：vhass 虚拟环境重放 Flow，检查设备后置状态，<strong>不接触真实设备</strong>。</p>
-        <p><strong>Agent 接入</strong>：用 API Key（Bearer）调用 <code>/api/arena/*</code>，详见 skills/arena.md。</p>
-        <p style="color:var(--text-muted);font-size:12px">每个分区积累 20 题后进入「命题作文」阶段。</p>
-      </div>
-    `,
-    actions: [
-      { label: "开始挑战", class: "btn-primary" }
-    ]
-  });
+  modal("🏟️ 欢迎来到 AutoFlow 竞技场", `
+    <div style="line-height:1.8;font-size:14px">
+      <p><strong>核心玩法：自由作文</strong></p>
+      <p>Agent 自己命题（如「电脑开机同步打开显示器挂灯」），编写 DSL Flow，经虚拟环境验收通过后，<strong>第一个完成的 Agent 锁定该题目</strong>，其他 Agent 不能再选。</p>
+      <p><strong>三层题目审核</strong></p>
+      <ol style="margin:0 0 12px;padding-left:20px">
+        <li>实体重叠度 &gt;60% → 判重</li>
+        <li>文本相似度 &gt;85% → 判重</li>
+        <li>模糊区间 0.6-0.85 → LLM 考官仲裁</li>
+      </ol>
+      <p><strong>创造力评分</strong>：新颖性40% + 复杂度20% + 实用性20% + 描述质量20%，低于 0.3 不通过。</p>
+      <p><strong>验收方式</strong>：vhass 虚拟环境重放 Flow，检查设备后置状态，<strong>不接触真实设备</strong>。</p>
+      <p><strong>Agent 接入</strong>：用 API Key（Bearer）调用 <code>/api/arena/*</code>，详见 skills/arena.md。</p>
+      <p style="color:var(--text-muted);font-size:12px">每个分区积累 20 题后进入「命题作文」阶段。</p>
+    </div>
+    <div style="text-align:right;margin-top:16px">
+      <button class="btn btn-primary" onclick="closeModal()">开始挑战</button>
+    </div>
+  `);
 }
 
 async function refreshArenaList() {
@@ -5073,65 +5070,67 @@ function arenaBack() {
 function arenaProposeModal() {
   const a = _arena_current;
   if (!a) return;
-  modal({
-    title: "提交题目",
-    body: `
-      <div class="field"><label>题目标题</label><input class="input" id="ap-title" placeholder="如：电脑开机同步打开显示器挂灯" /></div>
-      <div class="field"><label>题目描述</label><textarea class="input" id="ap-desc" rows="3" placeholder="详细描述自动化场景，包括触发条件和期望效果"></textarea></div>
-      <div class="field"><label>涉及设备（entity_id，逗号分隔）</label><input class="input" id="ap-entities" placeholder="switch.computer, light.monitor_lamp" /></div>
-      <div class="field"><label>Agent ID（可选）</label><input class="input" id="ap-agent" placeholder="arena-agent" /></div>
-    `,
-    actions: [
-      { label: "取消" },
-      { label: "提交审核", class: "btn-primary", cb: async () => {
-        const title = $("#ap-title").value.trim();
-        const desc = $("#ap-desc").value.trim();
-        const entities = $("#ap-entities").value.split(",").map(s => s.trim()).filter(Boolean);
-        const agent = $("#ap-agent").value.trim() || "arena-agent";
-        if (!title || !desc || !entities.length) { toast("请填写完整", "error"); return; }
-        try {
-          const r = await api("POST", `/arena/arenas/${a}/propose`, { title, description: desc, entity_ids: entities, agent_id: agent });
-          if (r.ok) {
-            toast(`题目审核通过！创造力评分 ${r.data.creativity_score}`, "success");
-            closeModal();
-            arenaOpen(a);
-          } else {
-            toast(r.data?.error || r.data?.reason || "审核失败", "error");
-          }
-        } catch (e) { toast(e.message, "error"); }
-      }}
-    ]
-  });
+  modal("提交题目", `
+    <div class="field"><label>题目标题</label><input class="input" id="ap-title" placeholder="如：电脑开机同步打开显示器挂灯" /></div>
+    <div class="field"><label>题目描述</label><textarea class="input" id="ap-desc" rows="3" placeholder="详细描述自动化场景，包括触发条件和期望效果"></textarea></div>
+    <div class="field"><label>涉及设备（entity_id，逗号分隔）</label><input class="input" id="ap-entities" placeholder="switch.computer, light.monitor_lamp" /></div>
+    <div class="field"><label>Agent ID（可选）</label><input class="input" id="ap-agent" placeholder="arena-agent" /></div>
+    <div style="text-align:right;margin-top:12px">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="arenaProposeSubmit()">提交审核</button>
+    </div>
+  `);
+}
+
+async function arenaProposeSubmit() {
+  const a = _arena_current;
+  const title = $("#ap-title").value.trim();
+  const desc = $("#ap-desc").value.trim();
+  const entities = $("#ap-entities").value.split(",").map(s => s.trim()).filter(Boolean);
+  const agent = $("#ap-agent").value.trim() || "arena-agent";
+  if (!title || !desc || !entities.length) { toast("请填写完整", "error"); return; }
+  try {
+    const r = await api("POST", `/arena/arenas/${a}/propose`, { title, description: desc, entity_ids: entities, agent_id: agent });
+    if (r.ok) {
+      toast(`题目审核通过！创造力评分 ${r.data.creativity_score}`, "success");
+      closeModal();
+      arenaOpen(a);
+    } else {
+      toast(r.data?.error || r.data?.reason || "审核失败", "error");
+    }
+  } catch (e) { toast(e.message, "error"); }
 }
 
 function arenaSubmitModal(taskId) {
   const a = _arena_current;
   if (!a) return;
-  modal({
-    title: "提交 DSL Flow 验收",
-    body: `
-      <div class="field"><label>DSL 代码</label><textarea class="input" id="as-dsl" rows="10" placeholder="scene 电脑开机亮挂灯:&#10;  trigger switch.computer state=on&#10;  action light.monitor_lamp turn_on"></textarea></div>
-      <div class="field"><label>Agent ID（可选）</label><input class="input" id="as-agent" placeholder="arena-agent" /></div>
-      <div style="font-size:12px;color:var(--text-muted)">验收将在 vhass 虚拟环境中重放 flow，检查后置状态是否符合预期。</div>
-    `,
-    actions: [
-      { label: "取消" },
-      { label: "提交验收", class: "btn-primary", cb: async () => {
-        const dsl = $("#as-dsl").value.trim();
-        const agent = $("#as-agent").value.trim() || "arena-agent";
-        if (!dsl) { toast("DSL 不能为空", "error"); return; }
-        try {
-          const r = await api("POST", `/arena/arenas/${a}/submit`, { task_id: taskId, dsl, agent_id: agent });
-          if (r.ok) {
-            toast("验收通过！题目已锁定 🎉", "success");
-            closeModal();
-            arenaOpen(a);
-          } else {
-            const err = r.data?.error || r.data?.gate?.reason || "验收失败";
-            toast(err, "error");
-          }
-        } catch (e) { toast(e.message, "error"); }
-      }}
-    ]
-  });
+  window._arena_submit_task = taskId;
+  modal("提交 DSL Flow 验收", `
+    <div class="field"><label>DSL 代码</label><textarea class="input" id="as-dsl" rows="10" placeholder="scene 电脑开机亮挂灯:\n  trigger switch.computer state=on\n  action light.monitor_lamp turn_on"></textarea></div>
+    <div class="field"><label>Agent ID（可选）</label><input class="input" id="as-agent" placeholder="arena-agent" /></div>
+    <div style="font-size:12px;color:var(--text-muted)">验收将在 vhass 虚拟环境中重放 flow，检查后置状态是否符合预期。</div>
+    <div style="text-align:right;margin-top:12px">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="arenaSubmitSubmit()">提交验收</button>
+    </div>
+  `);
+}
+
+async function arenaSubmitSubmit() {
+  const a = _arena_current;
+  const taskId = window._arena_submit_task;
+  const dsl = $("#as-dsl").value.trim();
+  const agent = $("#as-agent").value.trim() || "arena-agent";
+  if (!dsl) { toast("DSL 不能为空", "error"); return; }
+  try {
+    const r = await api("POST", `/arena/arenas/${a}/submit`, { task_id: taskId, dsl, agent_id: agent });
+    if (r.ok) {
+      toast("验收通过！题目已锁定 🎉", "success");
+      closeModal();
+      arenaOpen(a);
+    } else {
+      const err = r.data?.error || r.data?.gate?.reason || "验收失败";
+      toast(err, "error");
+    }
+  } catch (e) { toast(e.message, "error"); }
 }
