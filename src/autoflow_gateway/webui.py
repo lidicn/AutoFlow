@@ -798,6 +798,61 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         except Exception as e:
             return _js({"ok": False, "error": str(e)}, 500)
 
+    # ── 经验数据收集（v1.6.1）──
+    def _experience_logger():
+        from .experience import ExperienceLogger
+        data_dir = getattr(cfg, "data_dir", None) or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+        return ExperienceLogger(os.path.join(data_dir, "experience"))
+
+    async def experience_summary(request: Request):
+        """经验数据汇总。"""
+        try:
+            days = int(request.query_params.get("days", 7))
+            logger = _experience_logger()
+            result = logger.get_summary(days=days)
+            return _js(result)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def experience_logs(request: Request):
+        """操作日志查询。"""
+        try:
+            qp = request.query_params
+            logger = _experience_logger()
+            result = logger.get_logs(
+                days=int(qp.get("days", 7)),
+                operation=qp.get("operation") or None,
+                agent_id=qp.get("agent_id") or None,
+                limit=int(qp.get("limit", 100)),
+            )
+            return _js(result)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def experience_entities(request: Request):
+        """实体共现统计。"""
+        try:
+            qp = request.query_params
+            logger = _experience_logger()
+            result = logger.get_entity_cooccur(
+                entity=qp.get("entity") or None,
+                top_n=int(qp.get("top_n", 20)),
+            )
+            return _js(result)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def experience_patterns(request: Request):
+        """DSL 模式统计。"""
+        try:
+            top_n = int(request.query_params.get("top_n", 20))
+            logger = _experience_logger()
+            result = logger.get_dsl_patterns(top_n=top_n)
+            return _js(result)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
     # ── AutoFlow Pro：/api/core/* 轻量 Agent 客户端 REST API（v1.5.0）──
     async def core_version(request: Request):
         """网关版本 + 兼容性检查。"""
@@ -875,6 +930,18 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                 "agent_id": agent_id,
             }
             _record_token("propose-dsl", agent_id, len(dsl), output_chars, "dsl")
+            # 记录经验日志（v1.6.1）
+            try:
+                _experience_logger().log_operation(
+                    operation="propose-dsl",
+                    agent_id=agent_id,
+                    input_data={"dsl": dsl, "target_tab": target_tab},
+                    output_data={"ok": result.get("ok"), "proposal_id": result.get("proposal_id")},
+                    success=bool(result.get("ok")),
+                    metadata={"target_tab": target_tab},
+                )
+            except Exception:
+                pass
             # 失败时自动记录到错误知识库
             if not result.get("ok"):
                 try:
@@ -3113,6 +3180,11 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/keys/{key_id}", api_keys_update, methods=["PUT"]),
         Route("/api/keys/{key_id}/revoke", api_keys_revoke, methods=["POST"]),
         Route("/api/keys/logs", api_keys_logs, methods=["GET"]),
+        # 经验数据收集（v1.6.1）
+        Route("/api/experience/summary", experience_summary, methods=["GET"]),
+        Route("/api/experience/logs", experience_logs, methods=["GET"]),
+        Route("/api/experience/entities", experience_entities, methods=["GET"]),
+        Route("/api/experience/patterns", experience_patterns, methods=["GET"]),
         # 错误知识库（v1.5.7）
         Route("/api/errors", error_knowledge_list, methods=["GET"]),
         Route("/api/errors/stats", error_knowledge_stats, methods=["GET"]),

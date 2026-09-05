@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""经验数据收集模块 —— 操作日志、实体关联、DSL 模式挖掘。
+
+设计原则：
+  · 自动收集：propose-dsl/deploy-raw 等操作自动记录，无需人工干预
+  · 结构化存储：JSON 文件，按天滚动，便于分析
+  · 关联挖掘：实体共现、触发-动作模式、成功/失败模式
+  · 可导出：提供 API 供下游分析和经验库使用
+
+存储：data/<env>/experience/
+  - logs/YYYY-MM-DD.jsonl  操作日志（按天）
+  - entity_cooccur.json    实体共现统计
+  - dsl_patterns.json      DSL 模式统计
+"""
+import json
+import os
+import re
+from collections import Counter, defaultdict
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _utcnow_iso() -> str:
+    return _utcnow().isoformat()
+
+
+def _today_str() -> str:
+    return _utcnow().strftime("%Y-%m-%d")
+
+
+class ExperienceLogger:
+    """经验数据收集器。"""
+
+    def __init__(self, data_dir: str):
+        self.base_dir = os.path.join(data_dir, "experience")
+        self.logs_dir = os.path.join(self.base_dir, "logs")
+        self.entity_file = os.path.join(self.base_dir, "entity_cooccur.json")
+        self.pattern_file = os.path.join(self.base_dir, "dsl_patterns.json")
+        os.makedirs(self.logs_dir, exist_ok=True)
+
+    def _log_file(self, date_str: str = None) -> str:
+        date_str = date_str or _today_str()
+        return os.path.join(self.logs_dir, f"{date_str}.jsonl")
+
+    def log_operation(self, operation: str, agent_id: str,
+                      input_data: Dict[str, Any], output_data: Dict[str, Any],
+                      success: bool, duration_ms: int = 0,
+                      metadata: Dict[str, Any] = None) -> None:
+        """记录一次操作。"""
+        entry = {
+            "timestamp": _utcnow_iso(),
+            "operation": operation,
+            "agent_id": agent_id,
+            "success": success,
+            "duration_ms": duration_ms,
+            "input": self._truncate(input_data, 2000),
+            "output": self._truncate(output_data, 2000),
+            "metadata": metadata or {},
+        }
+        log_file = self._log_file()
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+        # 如果是成功的 propose-dsl，更新实体关联和 DSL 模式
+        if operation == "propose-dsl" and success:
+            dsl = input_data.get("dsl", "")
+            if dsl:
+                self._update_entity_cooccur(dsl)
+                self._update_dsl_patterns(dsl)
+
+    def _truncate(self, data: Any, max_len: int) -> Any:
+        """截断过大的数据。"""
+        if isinstance(data, str):
+            return data[:max_len]
+        if isinstance(data, dict):
+            result = {}
+            for k, v in data.items():
+                if isinstance(v, str) and len(v) > max_len:
+                    result[k] = v[:max_len] + "...(truncated)"
+                elif isinstance(v, (dict, list)):
+                    result[k] = self._truncate(v, max_len)
+                else:
+                    result[k] = v
+            return result
+        if isinstance(data, list):
+            return [self._truncate(item, max_len) for item in data[:100]]
+        return data
+
+    def _extract_entities(self, dsl: str) -> List[str]:
+        """从 DSL 中提取 entity_id。"""
+        # 匹配常见的 entity_id 格式：domain.entity
+        pattern = r'\b([a-z_]+\.[a-z0-9_]+)\b'
+        entities = re.findall(pattern, dsl)
+        # 过滤掉非实体的匹配（如 light.turn_on 是服务不是实体）
+        service_suffixes = [".turn_on", ".turn_off", ".toggle", ".set_temperature",
+                           ".set_brightness", ".set_color", ".select_option",
+                           ".play_media", ".media_play", ".media_pause"]
+        real_entities = []
+        for e in entities:
+            if not any(e.endswith(s) for s in service_suffixes):
+                real_entities.append(e)
+        return list(set(real_entities))
+
+    def _extract_trigger_action(self, dsl: str) -> List[Dict[str, str]]:
+        """从 DSL 中提取触发-动作对。"""
+        patterns = []
+        lines = dsl.split("\n")
+        current_trigger = None
+        for line in lines:
+            line = line.strip()
+            if line.startswith("trigger:") or line.startswith("trigger :"):
+                current_trigger = line.split(":", 1)[1].strip()
+            elif (line.startswith("action:") or line.startswith("action :")) and current_trigger:
+                action = line.split(":", 1)[1].strip()
+                patterns.append({"trigger": current_trigger, "action": action})
+        return patterns
+
+    def _update_entity_cooccur(self, dsl: str) -> None:
+        """更新实体共现统计。"""
+        entities = self._extract_entities(dsl)
+        if len(entities) < 2:
+            return
+
+        data = self._load_json(self.entity_file, {"cooccur": {}, "entity_count": {}})
+
+        # 更新单个实体计数
+        for e in entities:
+            data["entity_count"][e] = data["entity_count"].get(e, 0) + 1
+
+        # 更新共现对
+        for i in range(len(entities)):
+            for j in range(i + 1, len(entities)):
+                pair = tuple(sorted([entities[i], entities[j]]))
+                key = f"{pair[0]}|{pair[1]}"
+                data["cooccur"][key] = data["cooccur"].get(key, 0) + 1
+
+        self._save_json(self.entity_file, data)
+
+    def _update_dsl_patterns(self, dsl: str) -> None:
+        """更新 DSL 模式统计。"""
+        patterns = self._extract_trigger_action(dsl)
+        if not patterns:
+            return
+
+        data = self._load_json(self.pattern_file, {"patterns": {}, "trigger_count": {}, "action_count": {}})
+
+        for p in patterns:
+            trigger = p["trigger"]
+            action = p["action"]
+            key = f"{trigger}|{action}"
+            data["patterns"][key] = data["patterns"].get(key, 0) + 1
+            data["trigger_count"][trigger] = data["trigger_count"].get(trigger, 0) + 1
+            data["action_count"][action] = data["action_count"].get(action, 0) + 1
+
+        self._save_json(self.pattern_file, data)
+
+    def _load_json(self, path: str, default: Any) -> Any:
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return default
+        return default
+
+    def _save_json(self, path: str, data: Any) -> None:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+
+    def get_logs(self, days: int = 7, operation: str = None,
+                 agent_id: str = None, limit: int = 100) -> Dict[str, Any]:
+        """获取操作日志。"""
+        logs = []
+        cutoff = _utcnow() - timedelta(days=days)
+
+        for i in range(days + 1):
+            date_str = (cutoff + timedelta(days=i)).strftime("%Y-%m-%d")
+            log_file = self._log_file(date_str)
+            if not os.path.exists(log_file):
+                continue
+            try:
+                with open(log_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line.strip())
+                            if operation and entry.get("operation") != operation:
+                                continue
+                            if agent_id and entry.get("agent_id") != agent_id:
+                                continue
+                            logs.append(entry)
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+
+        # 按时间倒序
+        logs = sorted(logs, key=lambda x: x.get("timestamp", ""), reverse=True)
+        total = len(logs)
+        logs = logs[:limit]
+
+        return {"ok": True, "logs": logs, "total": total, "period": f"最近 {days} 天"}
+
+    def get_entity_cooccur(self, entity: str = None, top_n: int = 20) -> Dict[str, Any]:
+        """获取实体共现统计。"""
+        data = self._load_json(self.entity_file, {"cooccur": {}, "entity_count": {}})
+
+        if entity:
+            # 查找与指定实体共现的其他实体
+            related = []
+            for key, count in data["cooccur"].items():
+                parts = key.split("|")
+                if entity in parts:
+                    other = parts[0] if parts[1] == entity else parts[1]
+                    related.append({"entity": other, "cooccur_count": count})
+            related = sorted(related, key=lambda x: x["cooccur_count"], reverse=True)[:top_n]
+            return {
+                "ok": True,
+                "entity": entity,
+                "entity_count": data["entity_count"].get(entity, 0),
+                "related_entities": related,
+            }
+
+        # 返回最常见的共现对
+        top_pairs = sorted(data["cooccur"].items(), key=lambda x: x[1], reverse=True)[:top_n]
+        top_entities = sorted(data["entity_count"].items(), key=lambda x: x[1], reverse=True)[:top_n]
+
+        return {
+            "ok": True,
+            "top_entity_pairs": [{"pair": k.split("|"), "count": v} for k, v in top_pairs],
+            "top_entities": [{"entity": k, "count": v} for k, v in top_entities],
+            "total_entities": len(data["entity_count"]),
+            "total_pairs": len(data["cooccur"]),
+        }
+
+    def get_dsl_patterns(self, top_n: int = 20) -> Dict[str, Any]:
+        """获取 DSL 模式统计。"""
+        data = self._load_json(self.pattern_file, {"patterns": {}, "trigger_count": {}, "action_count": {}})
+
+        top_patterns = sorted(data["patterns"].items(), key=lambda x: x[1], reverse=True)[:top_n]
+        top_triggers = sorted(data["trigger_count"].items(), key=lambda x: x[1], reverse=True)[:top_n]
+        top_actions = sorted(data["action_count"].items(), key=lambda x: x[1], reverse=True)[:top_n]
+
+        return {
+            "ok": True,
+            "top_patterns": [{"trigger": k.split("|")[0], "action": k.split("|")[1], "count": v}
+                            for k, v in top_patterns],
+            "top_triggers": [{"trigger": k, "count": v} for k, v in top_triggers],
+            "top_actions": [{"action": k, "count": v} for k, v in top_actions],
+            "total_patterns": len(data["patterns"]),
+        }
+
+    def get_summary(self, days: int = 7) -> Dict[str, Any]:
+        """获取经验数据汇总。"""
+        logs_result = self.get_logs(days=days, limit=10000)
+        logs = logs_result["logs"]
+
+        by_operation = Counter()
+        by_agent = Counter()
+        success_count = 0
+        total_duration = 0
+
+        for log in logs:
+            by_operation[log.get("operation", "unknown")] += 1
+            by_agent[log.get("agent_id", "unknown")] += 1
+            if log.get("success"):
+                success_count += 1
+            total_duration += log.get("duration_ms", 0)
+
+        entity_data = self._load_json(self.entity_file, {"cooccur": {}, "entity_count": {}})
+        pattern_data = self._load_json(self.pattern_file, {"patterns": {}})
+
+        return {
+            "ok": True,
+            "period": f"最近 {days} 天",
+            "total_operations": len(logs),
+            "success_rate": round(success_count / len(logs) * 100, 1) if logs else 0,
+            "avg_duration_ms": total_duration // len(logs) if logs else 0,
+            "by_operation": dict(by_operation.most_common(10)),
+            "by_agent": dict(by_agent.most_common(10)),
+            "entity_count": len(entity_data.get("entity_count", {})),
+            "entity_pairs": len(entity_data.get("cooccur", {})),
+            "dsl_patterns": len(pattern_data.get("patterns", {})),
+        }

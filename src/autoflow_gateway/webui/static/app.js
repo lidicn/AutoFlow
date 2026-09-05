@@ -118,7 +118,7 @@ function fmtTime(s) {
 }
 
 // ── 导航（C1/C3：工作区 + 版本同步已移除，新增设置管理界面）──
-const TABS = ["dashboard", "tutorials", "safe", "proposals", "deployed", "subflows", "link_apis", "agents", "deploy_tokens", "api_keys", "templates", "token_stats", "error_kb", "diagnostics", "notes", "settings", "help", "acp_tokens", "llm_settings", "llm_agent", "update"];
+const TABS = ["dashboard", "tutorials", "safe", "proposals", "deployed", "subflows", "link_apis", "agents", "deploy_tokens", "api_keys", "templates", "token_stats", "error_kb", "experience", "diagnostics", "notes", "settings", "help", "acp_tokens", "llm_settings", "llm_agent", "update"];
 function setTab(tab) {
   if (!TABS.includes(tab)) tab = "dashboard";
   $$(".navitem[data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
@@ -132,6 +132,7 @@ function setTab(tab) {
   else if (tab === "templates") loadTemplates();
   else if (tab === "token_stats") loadTokenStats();
   else if (tab === "error_kb") loadErrorKB();
+  else if (tab === "experience") loadExperience();
   else if (tab === "safe") loadSafeGate();
   else if (tab === "proposals") loadProposals();
   else if (tab === "deployed") loadDeployed();
@@ -759,6 +760,143 @@ async function refreshErrorKB() {
     `).join("") : '<div class="empty">暂无错误记录</div>';
   } catch (e) {
     $("#ek-list").innerHTML = errBox(e.message, refreshErrorKB);
+  }
+}
+
+// ── 经验数据（v1.6.1）──
+async function loadExperience() {
+  const v = $("#view-experience");
+  v.innerHTML = `
+    <div class="view-head">
+      <h2>经验数据</h2>
+      <span class="sub">自动收集操作日志、实体关联、DSL 模式，为经验复用提供数据基础</span>
+    </div>
+    <div style="display:flex;gap:12px;margin-bottom:16px">
+      <select id="exp-days" class="input" style="width:auto">
+        <option value="7">最近 7 天</option>
+        <option value="14">最近 14 天</option>
+        <option value="30">最近 30 天</option>
+      </select>
+      <button class="btn" id="exp-refresh">刷新</button>
+    </div>
+    <div id="exp-summary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+      <div class="card">
+        <h3 style="margin:0 0 12px">热门实体共现</h3>
+        <div id="exp-entities"><div class="empty">加载中…</div></div>
+      </div>
+      <div class="card">
+        <h3 style="margin:0 0 12px">热门 DSL 模式</h3>
+        <div id="exp-patterns"><div class="empty">加载中…</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3 style="margin:0 0 12px">最近操作日志</h3>
+      <div id="exp-logs"><div class="empty">加载中…</div></div>
+    </div>`;
+
+  $("#exp-days").onchange = () => refreshExperience();
+  $("#exp-refresh").onclick = () => refreshExperience();
+  await refreshExperience();
+}
+
+async function refreshExperience() {
+  const days = $("#exp-days").value;
+  try {
+    // 汇总
+    const sr = await api("GET", "/experience/summary?days=" + days);
+    if (!sr.ok) throw new Error(sr.data?.error || sr.status);
+    const s = sr.data;
+    $("#exp-summary").innerHTML = `
+      <div class="card" style="background:var(--bg-soft);text-align:center;padding:14px">
+        <div style="font-size:22px;font-weight:700">${s.total_operations || 0}</div>
+        <div style="font-size:11px;color:var(--text-muted)">总操作数</div>
+      </div>
+      <div class="card" style="background:var(--bg-soft);text-align:center;padding:14px">
+        <div style="font-size:22px;font-weight:700">${s.success_rate || 0}%</div>
+        <div style="font-size:11px;color:var(--text-muted)">成功率</div>
+      </div>
+      <div class="card" style="background:var(--bg-soft);text-align:center;padding:14px">
+        <div style="font-size:22px;font-weight:700">${s.avg_duration_ms || 0}ms</div>
+        <div style="font-size:11px;color:var(--text-muted)">平均耗时</div>
+      </div>
+      <div class="card" style="background:var(--bg-soft);text-align:center;padding:14px">
+        <div style="font-size:22px;font-weight:700">${s.entity_count || 0}</div>
+        <div style="font-size:11px;color:var(--text-muted)">实体数</div>
+      </div>
+      <div class="card" style="background:var(--bg-soft);text-align:center;padding:14px">
+        <div style="font-size:22px;font-weight:700">${s.entity_pairs || 0}</div>
+        <div style="font-size:11px;color:var(--text-muted)">实体共现对</div>
+      </div>
+      <div class="card" style="background:var(--bg-soft);text-align:center;padding:14px">
+        <div style="font-size:22px;font-weight:700">${s.dsl_patterns || 0}</div>
+        <div style="font-size:11px;color:var(--text-muted)">DSL 模式</div>
+      </div>`;
+
+    // 实体共现
+    const er = await api("GET", "/experience/entities?top_n=10");
+    if (er.ok && er.data.top_entity_pairs) {
+      $("#exp-entities").innerHTML = er.data.top_entity_pairs.length ? `
+        <table style="width:100%;font-size:12px">
+          ${er.data.top_entity_pairs.map(p => `
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:6px"><code>${esc(p.pair[0])}</code></td>
+              <td style="padding:6px;color:var(--text-muted)">↔</td>
+              <td style="padding:6px"><code>${esc(p.pair[1])}</code></td>
+              <td style="padding:6px;text-align:right"><b>${p.count}</b></td>
+            </tr>
+          `).join("")}
+        </table>
+      ` : '<div class="empty">暂无数据（需要成功的 propose-dsl 调用）</div>';
+    }
+
+    // DSL 模式
+    const pr = await api("GET", "/experience/patterns?top_n=10");
+    if (pr.ok && pr.data.top_patterns) {
+      $("#exp-patterns").innerHTML = pr.data.top_patterns.length ? `
+        <table style="width:100%;font-size:12px">
+          ${pr.data.top_patterns.map(p => `
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:6px;color:var(--text-muted)">${esc(p.trigger)}</td>
+              <td style="padding:6px;color:var(--text-muted)">→</td>
+              <td style="padding:6px">${esc(p.action)}</td>
+              <td style="padding:6px;text-align:right"><b>${p.count}</b></td>
+            </tr>
+          `).join("")}
+        </table>
+      ` : '<div class="empty">暂无数据</div>';
+    }
+
+    // 操作日志
+    const lr = await api("GET", "/experience/logs?days=" + days + "&limit=20");
+    if (lr.ok && lr.data.logs) {
+      $("#exp-logs").innerHTML = lr.data.logs.length ? `
+        <div style="max-height:300px;overflow:auto">
+          <table style="width:100%;font-size:12px">
+            <thead><tr style="text-align:left;color:var(--text-muted);position:sticky;top:0;background:var(--bg)">
+              <th style="padding:6px">时间</th>
+              <th style="padding:6px">操作</th>
+              <th style="padding:6px">Agent</th>
+              <th style="padding:6px">结果</th>
+              <th style="padding:6px">耗时</th>
+            </tr></thead>
+            <tbody>
+              ${lr.data.logs.map(l => `
+                <tr style="border-bottom:1px solid var(--border)">
+                  <td style="padding:6px;font-size:11px">${esc((l.timestamp || "").slice(11, 19))}</td>
+                  <td style="padding:6px"><code>${esc(l.operation || "")}</code></td>
+                  <td style="padding:6px;font-size:11px">${esc(l.agent_id || "")}</td>
+                  <td style="padding:6px">${l.success ? '<span style="color:#16a34a">✅</span>' : '<span style="color:#dc2626">❌</span>'}</td>
+                  <td style="padding:6px;font-size:11px">${l.duration_ms || 0}ms</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      ` : '<div class="empty">暂无操作日志</div>';
+    }
+  } catch (e) {
+    $("#exp-summary").innerHTML = errBox(e.message, refreshExperience);
   }
 }
 
