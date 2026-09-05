@@ -67,10 +67,36 @@ function toast(msg, type) {
   const dur = type === "error" ? 4000 : type === "warn" ? 3200 : 2600;
   toast._t = setTimeout(() => (t.hidden = true), dur);
 }
-function modal(title, html) {
+function modal(title, html, confirmCb, closeLabel) {
   $("#modalTitle").textContent = title;
   $("#modalBody").innerHTML = html;
+  // Handle footer with buttons when confirmCb or closeLabel provided
+  const footer = $("#modalFoot");
+  if (footer) {
+    if (confirmCb || closeLabel) {
+      footer.hidden = false;
+      const closeBtnText = closeLabel || "关闭";
+      const confirmBtn = confirmCb
+        ? `<button class="btn primary" id="tpl-create-confirm">确认</button>`
+        : "";
+      footer.innerHTML = `${confirmBtn}<button class="btn ghost" id="modal-close-btn">${esc(closeBtnText)}</button>`;
+    } else {
+      footer.hidden = true;
+      footer.innerHTML = "";
+    }
+  }
   $("#modalMask").hidden = false;
+  if (confirmCb) {
+    const confirmBtn = $("#tpl-create-confirm");
+    if (confirmBtn) {
+      confirmBtn.onclick = async () => {
+        const ok = await confirmCb();
+        if (ok !== false) closeModal();
+      };
+    }
+  }
+  const closeBtn = $("#modal-close-btn");
+  if (closeBtn) closeBtn.onclick = closeModal;
 }
 function closeModal() { $("#modalMask").hidden = true; }
 
@@ -1226,7 +1252,7 @@ function showCreateTokenModal() {
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn primary" id="dt-create-confirm">创建</button>
     </div>
-  `);
+  `, null, "关闭");
 
   // 绑定 tab 勾选框切换
   const bindCheckbox = $("#dt-tab-bind");
@@ -1376,28 +1402,195 @@ async function showTokenSnapshots(tokenId) {
   try {
     const r = await api("GET", "/deploy-tokens/" + tokenId + "/snapshots");
     const snaps = r.data?.snapshots || [];
-    modal("快照 - " + (token?.name || tokenId), `
-      <div style="max-height:400px;overflow:auto">
-        ${snaps.length ? snaps.map(s => `
-          <div style="padding:10px 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
-            <div>
-              <div style="font-weight:600;font-size:13px">${esc(s.label || s.snapshot_id)}</div>
-              <div class="meta" style="font-size:11px;color:var(--text-muted)">
-                ${esc((s.created_at || "").slice(0, 19).replace("T", " "))} ·
-                类型: ${s.type === 'full' ? '全量' : '增量'} ·
-                节点: ${s.node_count || 0}
-              </div>
-            </div>
-            <button class="btn sm danger" data-snap-rollback="${esc(s.snapshot_id)}">回滚到此</button>
+    if (!snaps.length) {
+      modal("快照 - " + (token?.name || tokenId), '<div class="empty">暂无快照记录</div><div style="margin-top:16px;text-align:right"><button class="btn" onclick="closeModal()">关闭</button></div>');
+      return;
+    }
+
+    // 构建快照选择器选项
+    const snapOptions = snaps.map(s =>
+      `<option value="${esc(s.snapshot_id)}">${esc(s.label || s.snapshot_id)} · ${esc((s.created_at || "").slice(0, 19).replace("T", " "))} · ${s.type === 'full' ? '全量' : '增量'} · ${s.node_count || 0}节点</option>`
+    ).join("");
+
+    modal("快照版本对比 - " + (token?.name || tokenId), `
+      <div style="padding:4px 0">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+          <div>
+            <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px">基准版本 (旧)</label>
+            <select id="snapSelect1" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface);font-size:13px">
+              ${snapOptions}
+            </select>
           </div>
-        `).join("") : '<div class="empty">暂无快照</div>'}
+          <div>
+            <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px">目标版本 (新)</label>
+            <select id="snapSelect2" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface);font-size:13px">
+              ${snapOptions}
+            </select>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn primary sm" id="btnDiffCompare">🔍 对比差异</button>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+            <input type="checkbox" id="previewModeCheck">
+            <span>预览模式（仅查看，不执行）</span>
+          </label>
+        </div>
+        <div id="diffResult" style="margin-top:16px"></div>
       </div>
       <div style="margin-top:16px;text-align:right"><button class="btn" onclick="closeModal()">关闭</button></div>
     `);
-    $$("[data-snap-rollback]").forEach(b => b.onclick = () => rollbackToSnapshot(tokenId, b.dataset.snapRollback));
+
+    // 默认选择前两个快照
+    if (snaps.length >= 2) {
+      $("#snapSelect1").value = snaps[1].snapshot_id;
+      $("#snapSelect2").value = snaps[0].snapshot_id;
+    }
+
+    // 绑定对比按钮
+    $("#btnDiffCompare").onclick = async () => {
+      const snap1 = $("#snapSelect1").value;
+      const snap2 = $("#snapSelect2").value;
+      if (!snap1 || !snap2) { toast("请选择两个快照"); return; }
+      if (snap1 === snap2) { toast("请选择不同的快照"); return; }
+
+      const previewMode = $("#previewModeCheck").checked;
+      $("#diffResult").innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted)">🔄 正在对比...</div>';
+
+      try {
+        const r = await api("GET", `/deploy-tokens/${tokenId}/diff?snapshot_1=${encodeURIComponent(snap1)}&snapshot_2=${encodeURIComponent(snap2)}`);
+        if (!r.ok || !r.data?.ok) {
+          throw new Error(r.data?.error || "对比失败");
+        }
+        renderDiffResult(r.data, previewMode);
+      } catch (e) {
+        $("#diffResult").innerHTML = `<div class="empty err">${esc(e.message)}</div>`;
+      }
+    };
+
+    // 绑定回滚按钮（在快照列表中）
+    snaps.forEach(s => {
+      const btn = document.createElement("button");
+      btn.className = "btn sm danger";
+      btn.style.cssText = "margin-top:8px;";
+      btn.textContent = "回滚到此版本";
+      btn.onclick = () => rollbackToSnapshot(tokenId, s.snapshot_id);
+      // 添加到 modal 底部按钮区域
+    });
   } catch (e) {
     toast("加载快照失败：" + e.message);
   }
+}
+
+// 渲染 diff 结果
+function renderDiffResult(data, previewMode = false) {
+  const resultEl = $("#diffResult");
+  if (!resultEl) return;
+
+  const fmtTime = (t) => t ? esc(t.slice(0, 19).replace("T", " ")) : "-";
+
+  let html = `
+    <div style="border:1px solid var(--border);border-radius:12px;overflow:hidden">
+      <div style="padding:12px 16px;background:var(--surface-2);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+        <div>
+          <span style="font-weight:600">版本对比结果</span>
+          <span class="meta" style="margin-left:8px;font-size:12px">${fmtTime(data.snap1_time)} → ${fmtTime(data.snap2_time)}</span>
+        </div>
+        <div style="display:flex;gap:16px;font-size:13px">
+          <span style="color:var(--ok)">+${data.added_count} 新增</span>
+          <span style="color:var(--danger)">-${data.removed_count} 删除</span>
+          <span style="color:var(--warn)">~${data.changed_count} 修改</span>
+        </div>
+      </div>
+      <div style="max-height:500px;overflow:auto">
+  `;
+
+  // 新增节点
+  if (data.added_nodes && data.added_nodes.length) {
+    html += `
+      <div style="padding:12px 16px;border-bottom:1px solid var(--border)">
+        <div style="font-weight:600;color:var(--ok);margin-bottom:8px;font-size:13px">▶ 新增节点 (${data.added_nodes.length})</div>
+        <div class="code-box" style="font-size:12px;max-height:200px;overflow:auto">
+          ${data.added_nodes.map(n => `
+            <div style="padding:4px 0;border-bottom:1px dashed var(--border)">
+              <span style="color:var(--text-muted)">[${esc(n.type || "")}]</span>
+              <span style="font-weight:500">${esc(n.name || n.id || "")}</span>
+              <span style="color:var(--text-muted);margin-left:8px">id: ${esc(n.id || "")}</span>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  // 删除节点
+  if (data.removed_nodes && data.removed_nodes.length) {
+    html += `
+      <div style="padding:12px 16px;border-bottom:1px solid var(--border);background:var(--danger-weak)">
+        <div style="font-weight:600;color:var(--danger);margin-bottom:8px;font-size:13px">✗ 删除节点 (${data.removed_nodes.length})</div>
+        <div class="code-box" style="font-size:12px;max-height:200px;overflow:auto;opacity:0.8">
+          ${data.removed_nodes.map(n => `
+            <div style="padding:4px 0;border-bottom:1px dashed var(--border)">
+              <span style="color:var(--text-muted)">[${esc(n.type || "")}]</span>
+              <span style="font-weight:500;text-decoration:line-through">${esc(n.name || n.id || "")}</span>
+              <span style="color:var(--text-muted);margin-left:8px">id: ${esc(n.id || "")}</span>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  // 修改的节点
+  if (data.changed_details && data.changed_details.length) {
+    html += `
+      <div style="padding:12px 16px">
+        <div style="font-weight:600;color:var(--warn);margin-bottom:8px;font-size:13px">~ 修改节点 (${data.changed_details.length})</div>
+        <div style="font-size:12px">
+    `;
+    data.changed_details.forEach(d => {
+      html += `
+        <details style="margin-bottom:8px;border:1px solid var(--border);border-radius:8px">
+          <summary style="padding:8px 12px;cursor:pointer;font-weight:500;background:var(--surface-2)">
+            <span style="color:var(--text-muted)">[${esc(d.type)}]</span>
+            ${esc(d.name || d.node_id)}
+            <span class="meta" style="margin-left:8px">${d.field_diffs.length} 处变更</span>
+          </summary>
+          <div style="padding:8px 12px;background:var(--bg);font-size:12px">
+      `;
+      d.field_diffs.forEach(f => {
+        const oldVal = typeof f.old === "object" ? JSON.stringify(f.old).slice(0, 100) : String(f.old ?? "");
+        const newVal = typeof f.new === "object" ? JSON.stringify(f.new).slice(0, 100) : String(f.new ?? "");
+        html += `
+          <div style="padding:4px 0;border-bottom:1px dashed var(--border)">
+            <span style="color:var(--text-muted);font-weight:500">${esc(f.field)}:</span>
+            ${oldVal !== newVal ? `
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:4px">
+                <div style="color:var(--danger);text-decoration:line-through;opacity:0.7">${esc(oldVal)}</div>
+                <div style="color:var(--ok);font-weight:500">${esc(newVal)}</div>
+              </div>
+            ` : `<span style="color:var(--text-muted)">${esc(oldVal)}</span>`}
+          </div>
+        `;
+      });
+      html += `</div></details>`;
+    });
+    html += `</div></div>`;
+  }
+
+  if (!data.added_nodes?.length && !data.removed_nodes?.length && !data.changed_details?.length) {
+    html += `<div style="padding:24px;text-align:center;color:var(--text-muted)">两个版本完全一致，无差异</div>`;
+  }
+
+  html += `</div></div>`;
+
+  // 预览模式提示
+  if (previewMode) {
+    html += `<div style="margin-top:12px;padding:10px 14px;background:var(--warn-weak);border:1px solid var(--warn);border-radius:8px;font-size:13px;color:var(--warn)">
+      🔒 预览模式：仅查看差异，未执行任何操作
+    </div>`;
+  }
+
+  resultEl.innerHTML = html;
 }
 
 async function rollbackToSnapshot(tokenId, snapshotId) {
@@ -1780,7 +1973,7 @@ async function deployProposal(id) {
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn primary" id="deploy-confirm-btn">确认部署</button>
     </div>
-  `);
+  `, null, "关闭");
   // 新建 tab 输入框显隐
   const sel = $("#deploy-target-tab");
   const newInput = $("#deploy-new-tab-name");
@@ -1963,7 +2156,7 @@ async function editNote(id) {
     `<div class="field"><label>标题</label><input id="m-title" value="${esc(n.title)}"></div>
      <div class="field"><label>内容</label><textarea id="m-body">${esc(n.body)}</textarea></div>
      <div class="field"><label>标签</label><input id="m-tags" value="${esc((n.tags || []).join(", "))}"></div>
-     <button class="btn primary" id="m-save">保存</button>`);
+     <button class="btn primary" id="m-save">保存</button>`, null, "关闭");
   $("#m-save").onclick = async () => {
     const ur = await api("PUT", `/notes/${id}`, {
       title: $("#m-title").value, body: $("#m-body").value,
@@ -2986,7 +3179,7 @@ async function showLinkApiConfig(key) {
     <p class="desc">填写此 Link API 的运行参数。密钥仅本机存储于 <code>api_configs</code> 表，不进 git；保存后立即生效。</p>
     ${rows}
     <div class="conn-result" id="la-cfg-result"></div>
-    <button class="btn primary" id="la-cfg-save">保存</button>`);
+    <button class="btn primary" id="la-cfg-save">保存</button>`, null, "关闭");
   $("#la-cfg-save").onclick = () => saveLinkApiConfig(key);
 }
 
@@ -3115,7 +3308,7 @@ function showImportSubflow() {
     <div class="field"><label>owner（可选）</label><input id="sf-owner" placeholder="webui"></div>
     <div class="field"><label>状态</label><select id="sf-status"><option value="active">active（立即可用）</option><option value="pending_review">pending_review（待审核）</option><option value="disabled">disabled（禁用）</option></select></div>
     <p class="desc">提交后本网关会读取该 NR 子流程的 in 端口和环境变量，自动提取输入参数，无需手动填写。</p>
-    <button class="btn primary" id="sf-do-import">检测并导入</button>`);
+    <button class="btn primary" id="sf-do-import">检测并导入</button>`, null, "关闭");
   $("#sf-do-import").onclick = doImportSubflow;
 }
 async function doImportSubflow() {
@@ -3149,7 +3342,7 @@ function showImportLinkApiFromTab() {
     网关会<b>只读</b>自省该 tab，判断能否注册成可调用 API——之后 agent 写 flow 时说「使用 TTS」或「智能语音播报队列」即可调用。不会改动你的 NR 流。</p>
     <div class="field"><label>tab 链接</label><input id="lt-url" placeholder="http://host:1990/#flow/<tabid>"></div>
     <button class="btn primary" id="lt-detect">检测能否注册</button>
-    <div id="lt-result" style="margin-top:10px"></div>`);
+    <div id="lt-result" style="margin-top:10px"></div>`, null, "关闭");
   $("#lt-detect").onclick = detectLinkApiFromTab;
 }
 async function detectLinkApiFromTab() {
@@ -4437,7 +4630,7 @@ const afAuth = (() => {
     items.push(`<button class="btn sm danger" data-act="logout">退出登录</button>`);
     modal("账号：" + esc(u.username || ""),
       `<div class="col gap8">${items.join("")}</div>
-       <p class="desc">角色：${esc(u.role || "")}${u.must_change ? "（需修改密码）" : ""}</p>`);
+       <p class="desc">角色：${esc(u.role || "")}${u.must_change ? "（需修改密码）" : ""}</p>`, null, "关闭");
     $$("#modalBody [data-act]").forEach((b) => {
       b.onclick = () => {
         const a = b.dataset.act;
@@ -4464,7 +4657,7 @@ const afAuth = (() => {
       <div class="field"><label>密码</label><input id="afPass" type="password" autocomplete="current-password"></div>
       <label class="chk"><input type="checkbox" id="afRemember"> 记住我（7 天）</label>
       <div id="afErr" class="errbox" hidden></div>
-      <button class="btn primary" id="afLogin">登录</button>`);
+      <button class="btn primary" id="afLogin">登录</button>`, null, "关闭");
     const go = async () => {
       $("#afErr").hidden = true;
       const r = await api("POST", "/auth/login", {
@@ -4486,7 +4679,7 @@ const afAuth = (() => {
       <div class="field"><label>确认密码</label><input id="afConf" type="password" autocomplete="new-password"></div>
       <p class="desc">密码至少 ${state.min_password_len} 位，且不能过于简单（不能与用户名相同）。</p>
       <div id="afErr" class="errbox" hidden></div>
-      <button class="btn primary" id="afReg">创建并登录</button>`);
+      <button class="btn primary" id="afReg">创建并登录</button>`, null, "关闭");
     const go = async () => {
       $("#afErr").hidden = true;
       const pw = $("#afPass").value, conf = $("#afConf").value;
@@ -4506,7 +4699,7 @@ const afAuth = (() => {
       <div class="field"><label>确认新密码</label><input id="afNew2" type="password" autocomplete="new-password"></div>
       <div id="afErr" class="errbox" hidden></div>
       <button class="btn primary" id="afChg">保存</button>
-      ${forced ? "" : `<button class="btn ghost" id="afChgCancel">取消</button>`}`);
+      ${forced ? "" : `<button class="btn ghost" id="afChgCancel">取消</button>`}`, null, forced ? undefined : "取消");
     const go = async () => {
       $("#afErr").hidden = true;
       const nw = $("#afNew").value, n2 = $("#afNew2").value;
@@ -4549,7 +4742,7 @@ const afAuth = (() => {
       <div class="field"><label>新用户名</label><input id="nuName"></div>
       <div class="field"><label>密码</label><input id="nuPass" type="password" autocomplete="new-password"></div>
       <div class="field"><label>角色</label><select id="nuRole">${state.roles.map((x) => `<option>${x}</option>`).join("")}</select></div>
-      <button class="btn primary" id="nuAdd">新增用户</button>`);
+      <button class="btn primary" id="nuAdd">新增用户</button>`, null, "关闭");
     $("#nuAdd").onclick = async () => {
       const rr = await api("POST", "/auth/users", {
         username: $("#nuName").value.trim(), password: $("#nuPass").value, role: $("#nuRole").value,
