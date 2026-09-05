@@ -236,16 +236,27 @@ class APIKeyStore:
                           "已吊销", success=False)
                 return {"ok": False, "error": "API Key 已吊销", "status": 403}
 
-            # 检查过期
+            # 检查过期（P0 修复：fail-closed，naive datetime 不再静默放行）
             if k.get("expires_at"):
+                exp_str = k["expires_at"]
                 try:
-                    exp = datetime.fromisoformat(k["expires_at"])
-                    if _utcnow() > exp:
-                        self._log(k["key_id"], k["agent_id"], "validate",
-                                  "已过期", success=False)
-                        return {"ok": False, "error": "API Key 已过期", "status": 403}
-                except Exception:
-                    pass
+                    exp = datetime.fromisoformat(exp_str)
+                except (ValueError, TypeError, OverflowError):
+                    exp = None
+                if exp is None:
+                    # 无法解析 → fail-closed：拒绝（避免静默放行造成永不失效）
+                    self._log(k["key_id"], k["agent_id"], "validate",
+                              f"expires_at 格式无效: {exp_str}", success=False)
+                    return {"ok": False, "error": "API Key 已过期", "status": 401}
+                if exp.tzinfo is None:
+                    # naive 时间无时区，无法与 aware _utcnow() 可靠比较 → 拒绝
+                    self._log(k["key_id"], k["agent_id"], "validate",
+                              "expires_at 为 naive 格式(缺时区)，拒绝", success=False)
+                    return {"ok": False, "error": "API Key 已过期", "status": 401}
+                if _utcnow() > exp:
+                    self._log(k["key_id"], k["agent_id"], "validate",
+                              "已过期", success=False)
+                    return {"ok": False, "error": "API Key 已过期", "status": 403}
 
             # 检查权限
             perms = k.get("permissions", DEFAULT_PERMS)
