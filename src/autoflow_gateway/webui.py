@@ -101,6 +101,7 @@ def _bootstrap_webui_token(cfg) -> Optional[str]:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(tok)
+            os.chmod(p, 0o600)
             os.replace(tmp, p)
         finally:
             try:
@@ -111,7 +112,7 @@ def _bootstrap_webui_token(cfg) -> Optional[str]:
         print(f"[WebUI] 警告：生成 .webui_token 失败（{e}），WebUI 仅本机开放。", flush=True)
         return None
     print(f"[WebUI] 首次启动已生成访问令牌 -> {p}", flush=True)
-    print(f"[WebUI] 浏览器访问 WebUI 请携带 ?token={tok}（或登录页粘贴）。令牌已写入文件，重启不失效。", flush=True)
+    print(f"[WebUI] 浏览器访问 WebUI 请携带 ?token=***（或登录页粘贴）。令牌已写入文件，重启不失效。", flush=True)
     return tok
 
 
@@ -510,7 +511,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     async def nr_tabs(request: Request):
         """返回 Node-RED 中所有 tab 列表（id, label, node_count）。"""
         try:
-            flows = gw.nr.list_flows()
+            flows = await asyncio.to_thread(gw.nr.list_flows)
             if isinstance(flows, dict):
                 flows = flows.get("flows", [])
             flows = flows or []
@@ -992,7 +993,8 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             deploy_token = (b.get("deploy_token") or "").strip() or None
             preview = bool(b.get("preview", False))
 
-            result = gw.propose_dsl(
+            result = await asyncio.to_thread(
+                gw.propose_dsl,
                 dsl=dsl, agent_id=agent_id,
                 expected_postconditions=expected if isinstance(expected, list) else None,
                 resolved_entities=resolved if isinstance(resolved, list) else None,
@@ -1078,8 +1080,8 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             target_tab = (b.get("target_tab") or "").strip() or None
             deploy_token = (b.get("deploy_token") or "").strip() or None
 
-            result = gw.deploy_proposal(
-                pid, agent_id=agent_id, target=target,
+            result = await asyncio.to_thread(
+                gw.deploy_proposal, pid, agent_id=agent_id, target=target,
                 target_flow_id=target_tab,
             )
             return _js(result)
@@ -1232,7 +1234,8 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             label = (b.get("label") or "").strip() or None
             target = (b.get("target") or "staging").strip()
 
-            result = gw.deploy_raw(
+            result = await asyncio.to_thread(
+                gw.deploy_raw,
                 flow_json=flow_json, agent_id=agent_id,
                 label=label, target=target,
             )
@@ -1259,7 +1262,8 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             return err
         try:
             qp = request.query_params
-            result = gw.list_entities(
+            result = await asyncio.to_thread(
+                gw.list_entities,
                 domain=qp.get("domain") or None,
                 area=qp.get("area") or None,
                 keyword=qp.get("keyword") or None,
@@ -1280,7 +1284,8 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             name = (qp.get("name") or "").strip()
             if not name:
                 return _js({"ok": False, "error": "name 参数不能为空"}, 400)
-            result = gw.resolve_entity(
+            result = await asyncio.to_thread(
+                gw.resolve_entity,
                 name=name,
                 area=qp.get("area") or None,
                 top_n=int(qp.get("top_n", 5)),
@@ -1328,7 +1333,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         """获取当前 Tab 组织模式状态和迁移统计。"""
         from . import tab_organizer as tab_org
         try:
-            status = tab_org.get_migration_status(gw.state)
+            status = await asyncio.to_thread(tab_org.get_migration_status, gw.state)
         except Exception as e:
             return _js({"ok": False, "error": f"获取状态失败: {e}",
                         "current_mode": tab_org.get_tab_org_mode(),
@@ -1338,7 +1343,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         warning = None
         if tab_org.is_single_tab_mode():
             try:
-                af_tab = tab_org.get_single_tab(gw.nr)
+                af_tab = await asyncio.to_thread(tab_org.get_single_tab, gw.nr)
                 if af_tab:
                     node_count = len(af_tab.get("nodes", []))
                     threshold = int(os.environ.get("AF_SINGLE_TAB_WARN_THRESHOLD", "200"))
@@ -1367,9 +1372,11 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
 
         try:
             if target_mode == "single_tab":
-                result = tab_org.migrate_per_flow_to_single_tab(gw.nr, gw.state, allow_prod=True)
+                result = await asyncio.to_thread(
+                    tab_org.migrate_per_flow_to_single_tab, gw.nr, gw.state, allow_prod=True)
             else:
-                result = tab_org.migrate_single_tab_to_per_flow(gw.nr, gw.state, allow_prod=True)
+                result = await asyncio.to_thread(
+                    tab_org.migrate_single_tab_to_per_flow, gw.nr, gw.state, allow_prod=True)
             return _js(result)
         except Exception as e:
             import traceback
@@ -1481,12 +1488,14 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
 
         rollback_type = b.get("type", "full")
         if rollback_type == "full":
-            result = _snap_mgr().full_rollback(token_id, snapshot_id, gw.nr, allow_prod=True)
+            result = await asyncio.to_thread(
+                _snap_mgr().full_rollback, token_id, snapshot_id, gw.nr, allow_prod=True)
         else:
             flow_ids = b.get("flow_ids", [])
             if not flow_ids:
                 return _js({"ok": False, "error": "选择性回滚需要 flow_ids"}, 400)
-            result = _snap_mgr().selective_rollback(
+            result = await asyncio.to_thread(
+                _snap_mgr().selective_rollback,
                 token_id, snapshot_id, flow_ids, gw.nr,
                 lambda: gw.state.get_flow_catalog(), allow_prod=True)
         return _js(result)
@@ -1532,8 +1541,9 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             return _js({"ok": False, "error": "flow_json 不能为空"}, 400)
         try:
             # 用 propose_raw 的 dry_run 模式做校验（不写 NR，不落档到待审批）
-            result = gw.propose_raw(flow_json, agent_id="lab", label="lab-validate",
-                                     run_gate=False, dry_run=True)
+            result = await asyncio.to_thread(
+                gw.propose_raw, flow_json, agent_id="lab", label="lab-validate",
+                run_gate=False, dry_run=True)
             if result.get("ok"):
                 lint_issues = result.get("lint", [])
                 errors = [v for v in lint_issues if v["level"] == "error"]
@@ -1565,17 +1575,18 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             return _js({"ok": False, "error": "flow_json 不能为空"}, 400)
 
         try:
-            # 先提案（落档），然后自动部署
-            propose_result = gw.propose_raw(flow_json, agent_id=agent_id, label=label,
-                                             target=target, run_gate=False)
+            propose_result = await asyncio.to_thread(
+                gw.propose_raw, flow_json, agent_id=agent_id, label=label,
+                target=target, run_gate=False)
             if not propose_result.get("ok"):
                 return _js({"ok": False, "error": propose_result.get("error", "提案失败"),
                             "validation": propose_result.get("validation", [])})
 
             proposal_id = propose_result.get("proposal_id")
             # 自动部署
-            deploy_result = gw.deploy_proposal(proposal_id, agent_id=agent_id,
-                                                target_flow_id=target_flow_id, allow_prod=True)
+            deploy_result = await asyncio.to_thread(
+                gw.deploy_proposal, proposal_id, agent_id=agent_id,
+                target_flow_id=target_flow_id, allow_prod=True)
 
             # 记录历史
             history = _lab_load_history()
@@ -1725,7 +1736,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         except Exception:
             deployed_n = 0
         try:
-            traces = gw.get_recent_traces(50)
+            traces = await asyncio.to_thread(gw.get_recent_traces, 50)
         except Exception:
             traces = []
         return _js({
@@ -1745,7 +1756,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                 "proposals_by_status": by_status,
             },
             "traces": traces,
-            "golden_jobs": gw.list_golden_jobs(),
+            "golden_jobs": await asyncio.to_thread(gw.list_golden_jobs),
         })
 
     # ── 评测工作台（eval）已迁移至 archive/agent-loop-migration/（C4）；此处保留 agents 区 ──
@@ -2106,7 +2117,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
 
     # ── 确认闸 ──
     async def list_pending(request: Request):
-        return _js({"pending": gw.list_pending()})
+        return _js({"pending": await asyncio.to_thread(gw.list_pending)})
 
     async def approve(request: Request):
         op_id = request.path_params["id"]
@@ -2117,7 +2128,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     async def reject(request: Request):
         op_id = request.path_params["id"]
         b = await _body(request)
-        return _js(gw.reject(op_id, "human", b.get("reason")))
+        return _js(await asyncio.to_thread(gw.reject, op_id, "human", b.get("reason")))
 
     # ── 场景提案（部署候选） ──
     # 注意：经验沉淀(P5)已推迟。promote API 保留兼容，但 UI 不再暴露。
@@ -2279,7 +2290,8 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         append_completed = b.get("append_completed")
         if not (overall is not None or current is not None or append_completed):
             return _js({"ok": False, "error": "至少传 overall / current / append_completed 之一"}, 400)
-        state = gw.update_plan(
+        state = await asyncio.to_thread(
+            gw.update_plan,
             overall=overall,
             current=current,
             append_completed=append_completed,
@@ -2292,7 +2304,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             limit = int(request.query_params.get("limit", "30"))
         except (TypeError, ValueError):
             limit = 30
-        return _js({"commands": gw.list_commands(limit=limit)})
+        return _js({"commands": await asyncio.to_thread(gw.list_commands, limit=limit)})
 
     async def submit_command(request: Request):
         b = await _body(request)
@@ -2300,13 +2312,13 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         if not text:
             return _js({"ok": False, "error": "text 必填"}, 400)
         target = b.get("target", "deepseek")
-        res = gw.submit_command(text, target=target)
+        res = await asyncio.to_thread(gw.submit_command, text, target=target)
         return _js(res, 201 if res.get("ok") else 400)
 
     # ── 多选项决策闸（人类请示）──
     async def list_decisions(request: Request):
         status = request.query_params.get("status")
-        return _js({"decisions": gw.list_decisions(status=status)})
+        return _js({"decisions": await asyncio.to_thread(gw.list_decisions, status=status)})
 
     async def resolve_decision(request: Request):
         did = request.path_params["id"]
