@@ -3569,6 +3569,26 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         if _wa.is_public_path(p):
             return await raw(scope, receive, send)
 
+        # 1.5) Bearer API Key 通道（Pro 版 Agent 调用竞技场等管理面 API）
+        # 与 /api/core/* 的 _require_api_key 共用同一套 APIKeyStore
+        _hdr = dict(scope.get("headers", []))
+        _auth = _hdr.get(b"authorization", b"").decode("latin-1", "ignore")
+        if _auth.startswith("Bearer "):
+            _key = _auth[7:].strip()
+            try:
+                _kstore = _api_key_store()
+                _kresult = _kstore.validate_key(_key)
+                if _kresult.get("ok"):
+                    scope["af_auth"] = {
+                        "mode": "api_key", "user_id": "",
+                        "username": _kresult.get("agent_id", "api-key"),
+                        "role": "admin", "session_id": "",
+                        "agent_id": _kresult.get("agent_id"),
+                    }
+                    return await raw(scope, receive, send)
+            except Exception:
+                pass  # API Key 验证失败 → 继续走 session/旧令牌通道
+
         # 2) 主通道：服务端会话（Cookie）。★ token_only 回滚模式：密码子系统关闭，不受理会话
         sess = None if auth.auth_mode == "token_only" else auth.resolve_session(_wa.session_id_from_scope(scope))
         if sess is not None:

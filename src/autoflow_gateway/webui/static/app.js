@@ -133,6 +133,7 @@ function setTab(tab) {
   else if (tab === "token_stats") loadTokenStats();
   else if (tab === "error_kb") loadErrorKB();
   else if (tab === "experience") loadExperience();
+  else if (tab === "arena") loadArena();
   else if (tab === "safe") loadSafeGate();
   else if (tab === "proposals") loadProposals();
   else if (tab === "deployed") loadDeployed();
@@ -4879,4 +4880,228 @@ function renderChangelog() {
       </ul>
     </div>
   `).join("");
+}
+
+
+// ═══════════════════════════════════════════════════════════
+// 竞技场 (v2.0)
+// ═══════════════════════════════════════════════════════════
+
+let _arena_current = null; // 当前选中的分区 id
+
+async function loadArena() {
+  const v = $("#view-arena");
+  v.innerHTML = `
+    <div class="view-head">
+      <h2>🏟️ 竞技场</h2>
+      <span class="sub">自由作文优先 — Agent 自己命题，第一个完成验收的锁定题目。积累到 20 题进入命题作文阶段。</span>
+    </div>
+    <div id="arena-stats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px"></div>
+    <div id="arena-arenas" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px"></div>
+    <div id="arena-detail" hidden></div>
+  `;
+  await refreshArenaList();
+}
+
+async function refreshArenaList() {
+  try {
+    const sr = await api("GET", "/arena/stats");
+    if (sr.ok) {
+      const s = sr.data.stats;
+      $("#arena-stats").innerHTML = `
+        <div class="card" style="background:var(--bg-soft);text-align:center;padding:14px">
+          <div style="font-size:22px;font-weight:700">${s.total_arenas}</div>
+          <div style="font-size:11px;color:var(--text-muted)">分区数</div>
+        </div>
+        <div class="card" style="background:var(--bg-soft);text-align:center;padding:14px">
+          <div style="font-size:22px;font-weight:700">${s.locked_tasks}</div>
+          <div style="font-size:11px;color:var(--text-muted)">已锁定题目</div>
+        </div>
+        <div class="card" style="background:var(--bg-soft);text-align:center;padding:14px">
+          <div style="font-size:22px;font-weight:700">${s.total_tasks}</div>
+          <div style="font-size:11px;color:var(--text-muted)">总题目数</div>
+        </div>
+        <div class="card" style="background:var(--bg-soft);text-align:center;padding:14px">
+          <div style="font-size:22px;font-weight:700">${s.success_rate}%</div>
+          <div style="font-size:11px;color:var(--text-muted)">验收通过率</div>
+        </div>
+        <div class="card" style="background:var(--bg-soft);text-align:center;padding:14px">
+          <div style="font-size:22px;font-weight:700">${s.total_token_used}</div>
+          <div style="font-size:11px;color:var(--text-muted)">总 Token 消耗</div>
+        </div>
+      `;
+    }
+    const ar = await api("GET", "/arena/arenas");
+    if (!ar.ok) throw new Error(ar.data?.error || ar.status);
+    const arenas = ar.data.arenas;
+    $("#arena-arenas").innerHTML = arenas.map(a => `
+      <div class="card" style="cursor:pointer;padding:16px" onclick="arenaOpen('${a.id}')">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <h3 style="margin:0">${esc(a.name)}</h3>
+          <span class="badge" style="background:${a.phase === 'challenge' ? 'var(--accent)' : 'var(--bg-soft)'}">${a.phase === 'challenge' ? '命题作文' : '自由作文'}</span>
+        </div>
+        <p style="font-size:13px;color:var(--text-muted);margin:0 0 12px">${esc(a.description)}</p>
+        <div style="display:flex;gap:16px;font-size:12px;margin-bottom:8px">
+          <span>🔒 ${a.locked_tasks}/${a.phase2_threshold} 题</span>
+          <span>📝 ${a.available_tasks} 可用</span>
+          <span>🤖 ${a.total_tasks} 总计</span>
+        </div>
+        <div style="height:6px;background:var(--bg-soft);border-radius:3px;overflow:hidden">
+          <div style="height:100%;width:${a.phase2_progress}%;background:var(--accent);transition:width .3s"></div>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Phase2 进度 ${a.phase2_progress}%</div>
+      </div>
+    `).join("");
+  } catch (e) {
+    $("#arena-arenas").innerHTML = `<div class="empty">加载失败: ${esc(e.message)}</div>`;
+  }
+}
+
+async function arenaOpen(arenaId) {
+  _arena_current = arenaId;
+  $("#arena-arenas").hidden = true;
+  const det = $("#arena-detail");
+  det.hidden = false;
+  det.innerHTML = `<div class="empty">加载中…</div>`;
+  try {
+    const r = await api("GET", "/arena/arenas/" + arenaId);
+    if (!r.ok) throw new Error(r.data?.error || r.status);
+    const a = r.data.arena;
+    const lb = await api("GET", `/arena/arenas/${arenaId}/leaderboard`);
+    const board = lb.ok ? lb.data.leaderboard : [];
+    det.innerHTML = `
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+        <button class="btn" onclick="arenaBack()">← 返回</button>
+        <h2 style="margin:0">${esc(a.name)}</h2>
+        <span class="badge">${a.phase === 'challenge' ? '命题作文' : '自由作文'}</span>
+      </div>
+      <p style="color:var(--text-muted);margin:0 0 16px">${esc(a.description)}</p>
+      <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px">
+        <div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+            <h3 style="margin:0">题目列表</h3>
+            <button class="btn btn-primary" onclick="arenaProposeModal()">＋ 提交题目</button>
+          </div>
+          <div id="arena-tasks">${arenaRenderTasks(a.tasks)}</div>
+        </div>
+        <div>
+          <div class="card" style="margin-bottom:16px">
+            <h3 style="margin:0 0 12px">🏆 排行榜</h3>
+            ${board.length ? board.map((b, i) => `
+              <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px">
+                <span>${i + 1}. ${esc(b.agent_id)}</span>
+                <span style="color:var(--text-muted)">${b.locked_tasks}题 · ${b.avg_creativity}分</span>
+              </div>
+            `).join("") : '<div class="empty">暂无数据</div>'}
+          </div>
+          <div class="card">
+            <h3 style="margin:0 0 12px">📦 虚拟设备</h3>
+            <div style="font-size:12px;line-height:1.8">
+              ${a.devices.map(d => `<div><code>${esc(d.entity_id)}</code> <span style="color:var(--text-muted)">${esc(d.friendly_name)}</span></div>`).join("")}
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  } catch (e) {
+    det.innerHTML = `<div class="empty">加载失败: ${esc(e.message)}</div>`;
+  }
+}
+
+function arenaRenderTasks(tasks) {
+  if (!tasks.length) return '<div class="empty">暂无题目，点击右上角提交第一个！</div>';
+  return tasks.map(t => `
+    <div class="card" style="margin-bottom:10px;padding:14px">
+      <div style="display:flex;justify-content:space-between;align-items:start">
+        <div style="flex:1">
+          <div style="font-weight:600;margin-bottom:4px">${esc(t.title)}</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">${esc(t.description)}</div>
+          <div style="font-size:11px;color:var(--text-muted)">
+            ${t.entity_ids.map(e => `<code>${esc(e)}</code>`).join(" ")}
+            · 创造力 ${t.creativity_score}
+            ${t.status === 'locked' ? `· 🔒 ${esc(t.locked_by || '')}` : ''}
+          </div>
+        </div>
+        <div style="margin-left:12px">
+          <span class="badge" style="background:${t.status === 'locked' ? '#4caf50' : t.status === 'in_progress' ? '#ff9800' : 'var(--bg-soft)'}">
+            ${t.status === 'locked' ? '已锁定' : t.status === 'in_progress' ? '进行中' : '可用'}
+          </span>
+          ${t.status !== 'locked' ? `<button class="btn" style="margin-top:8px" onclick="arenaSubmitModal('${t.id}')">提交 Flow</button>` : ''}
+        </div>
+      </div>
+    </div>
+  `).join("");
+}
+
+function arenaBack() {
+  _arena_current = null;
+  $("#arena-detail").hidden = true;
+  $("#arena-arenas").hidden = false;
+  refreshArenaList();
+}
+
+function arenaProposeModal() {
+  const a = _arena_current;
+  if (!a) return;
+  modal({
+    title: "提交题目",
+    body: `
+      <div class="field"><label>题目标题</label><input class="input" id="ap-title" placeholder="如：电脑开机同步打开显示器挂灯" /></div>
+      <div class="field"><label>题目描述</label><textarea class="input" id="ap-desc" rows="3" placeholder="详细描述自动化场景，包括触发条件和期望效果"></textarea></div>
+      <div class="field"><label>涉及设备（entity_id，逗号分隔）</label><input class="input" id="ap-entities" placeholder="switch.computer, light.monitor_lamp" /></div>
+      <div class="field"><label>Agent ID（可选）</label><input class="input" id="ap-agent" placeholder="arena-agent" /></div>
+    `,
+    actions: [
+      { label: "取消" },
+      { label: "提交审核", class: "btn-primary", cb: async () => {
+        const title = $("#ap-title").value.trim();
+        const desc = $("#ap-desc").value.trim();
+        const entities = $("#ap-entities").value.split(",").map(s => s.trim()).filter(Boolean);
+        const agent = $("#ap-agent").value.trim() || "arena-agent";
+        if (!title || !desc || !entities.length) { toast("请填写完整", "error"); return; }
+        try {
+          const r = await api("POST", `/arena/arenas/${a}/propose`, { title, description: desc, entity_ids: entities, agent_id: agent });
+          if (r.ok) {
+            toast(`题目审核通过！创造力评分 ${r.data.creativity_score}`, "success");
+            closeModal();
+            arenaOpen(a);
+          } else {
+            toast(r.data?.error || r.data?.reason || "审核失败", "error");
+          }
+        } catch (e) { toast(e.message, "error"); }
+      }}
+    ]
+  });
+}
+
+function arenaSubmitModal(taskId) {
+  const a = _arena_current;
+  if (!a) return;
+  modal({
+    title: "提交 DSL Flow 验收",
+    body: `
+      <div class="field"><label>DSL 代码</label><textarea class="input" id="as-dsl" rows="10" placeholder="scene 电脑开机亮挂灯:&#10;  trigger switch.computer state=on&#10;  action light.monitor_lamp turn_on"></textarea></div>
+      <div class="field"><label>Agent ID（可选）</label><input class="input" id="as-agent" placeholder="arena-agent" /></div>
+      <div style="font-size:12px;color:var(--text-muted)">验收将在 vhass 虚拟环境中重放 flow，检查后置状态是否符合预期。</div>
+    `,
+    actions: [
+      { label: "取消" },
+      { label: "提交验收", class: "btn-primary", cb: async () => {
+        const dsl = $("#as-dsl").value.trim();
+        const agent = $("#as-agent").value.trim() || "arena-agent";
+        if (!dsl) { toast("DSL 不能为空", "error"); return; }
+        try {
+          const r = await api("POST", `/arena/arenas/${a}/submit`, { task_id: taskId, dsl, agent_id: agent });
+          if (r.ok) {
+            toast("验收通过！题目已锁定 🎉", "success");
+            closeModal();
+            arenaOpen(a);
+          } else {
+            const err = r.data?.error || r.data?.gate?.reason || "验收失败";
+            toast(err, "error");
+          }
+        } catch (e) { toast(e.message, "error"); }
+      }}
+    ]
+  });
 }
