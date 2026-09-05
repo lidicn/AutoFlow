@@ -107,18 +107,80 @@ class ExperienceLogger:
         return list(set(real_entities))
 
     def _extract_trigger_action(self, dsl: str) -> List[Dict[str, str]]:
-        """从 DSL 中提取触发-动作对。"""
+        """从 DSL 中提取触发-动作对，支持严格格式和自然语言。"""
         patterns = []
+        if not dsl:
+            return patterns
+
+        # 策略1：严格格式 trigger:/action:
         lines = dsl.split("\n")
         current_trigger = None
         for line in lines:
             line = line.strip()
-            if line.startswith("trigger:") or line.startswith("trigger :"):
-                current_trigger = line.split(":", 1)[1].strip()
-            elif (line.startswith("action:") or line.startswith("action :")) and current_trigger:
-                action = line.split(":", 1)[1].strip()
-                patterns.append({"trigger": current_trigger, "action": action})
-        return patterns
+            if re.match(r'^trigger\s*:', line, re.IGNORECASE):
+                current_trigger = re.split(r'^trigger\s*:', line, 1, re.IGNORECASE)[1].strip()
+            elif re.match(r'^action\s*:', line, re.IGNORECASE) and current_trigger:
+                action = re.split(r'^action\s*:', line, 1, re.IGNORECASE)[1].strip()
+                if action:
+                    patterns.append({"trigger": current_trigger, "action": action})
+
+        if patterns:
+            return patterns
+
+        # 策略2：中文自然语言格式
+        # 匹配 "当X时，Y" / "如果X，Y" / "X触发Y" / "X时Y"
+        dsl_lower = dsl.lower()
+
+        # 提取触发词
+        trigger_patterns = [
+            r'当([^，。；\n]+?)时',
+            r'如果([^，。；\n]+?)[，,]([^。；\n]+)',
+            r'假如([^，。；\n]+?)[，,]([^。；\n]+)',
+            r'一旦([^，。；\n]+?)[，,]([^。；\n]+)',
+            r'([^，。；\n]+?)触发([^，。；\n]+)',
+            r'([^，。；\n]+?)时[,，]?([^。；\n]+)',
+        ]
+
+        for pat in trigger_patterns:
+            matches = re.findall(pat, dsl)
+            for m in matches:
+                if isinstance(m, tuple) and len(m) >= 2:
+                    trigger = m[0].strip()
+                    action = m[1].strip()
+                    if trigger and action and len(trigger) < 50 and len(action) < 50:
+                        patterns.append({"trigger": trigger, "action": action})
+                elif isinstance(m, str):
+                    pass
+
+        if patterns:
+            return patterns
+
+        # 策略3：从实体推断 - 提取 DSL 中的实体，前半部分作为触发，后半部分作为动作
+        entities = self._extract_entities(dsl)
+        if len(entities) >= 2:
+            # 简单配对：前两个实体
+            patterns.append({
+                "trigger": entities[0],
+                "action": entities[1],
+            })
+        elif len(entities) == 1:
+            # 只有一个实体，用 DSL 前半部分作为触发
+            mid = len(dsl) // 2
+            patterns.append({
+                "trigger": dsl[:mid].strip()[:30],
+                "action": entities[0],
+            })
+
+        # 去重
+        seen = set()
+        unique = []
+        for p in patterns:
+            key = f"{p['trigger']}|{p['action']}"
+            if key not in seen:
+                seen.add(key)
+                unique.append(p)
+
+        return unique[:5]  # 最多保留5个模式
 
     def _update_entity_cooccur(self, dsl: str) -> None:
         """更新实体共现统计。"""
@@ -335,16 +397,24 @@ class ExperienceLogger:
 
     def recommend_templates(self, keyword: str = "", top_n: int = 5) -> Dict[str, Any]:
         """根据关键词推荐模板（基于经验数据关联）。"""
-        # 加载模板库
-        templates_file = os.path.join(os.path.dirname(self.base_dir), "templates.json")
+        # 加载模板库（多路径尝试）
         templates = []
-        if os.path.exists(templates_file):
-            try:
-                with open(templates_file, "r", encoding="utf-8") as f:
-                    tdata = json.load(f)
-                    templates = tdata.get("templates", []) if isinstance(tdata, dict) else tdata
-            except Exception:
-                pass
+        tpl_candidates = [
+            os.path.join(os.path.dirname(self.base_dir), "templates.json"),
+            os.path.join(os.path.dirname(os.path.dirname(self.base_dir)), "templates.json"),
+            os.path.join(self.base_dir, "..", "templates.json"),
+        ]
+        for tpl_file in tpl_candidates:
+            tpl_file = os.path.normpath(tpl_file)
+            if os.path.exists(tpl_file):
+                try:
+                    with open(tpl_file, "r", encoding="utf-8") as f:
+                        tdata = json.load(f)
+                        templates = tdata.get("templates", []) if isinstance(tdata, dict) else tdata
+                    if templates:
+                        break
+                except Exception:
+                    continue
 
         # 基于经验数据的热门模式推荐
         pattern_data = self._load_json(self.pattern_file, {"patterns": {}})
