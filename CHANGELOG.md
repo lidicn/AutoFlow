@@ -1,3 +1,6 @@
+## 1.5.6 (2026-09-05)
+- 【Bug 修复】进一步修复 `/api/core/version` 返回 `unknown`：容器内 webui.py 实际路径是 `/app/src/autoflow_gateway/webui.py`，计算出的 `/app/VERSION` 不存在，实际文件在 `/repo/VERSION`。改为多路径尝试（相对路径 + /repo/VERSION + /app/VERSION + cwd/VERSION）。
+
 ## 1.5.5 (2026-09-05)
 - 【Bug 修复 P1】修复 REST propose-dsl 的 `target_tab` 死参数问题：之前未读取该参数，导致 API Key 的 `authorized_tabs` 授权限制完全不生效。现在显式读取 `target_tab`，传入 `_require_api_key` 做越界校验，未授权 tab 返回 403。
 - 【Bug 修复】修复 `/api/core/version` 返回 `unknown`：VERSION 文件路径计算错误（少了一级目录），已修正为项目根目录的 VERSION 文件。
