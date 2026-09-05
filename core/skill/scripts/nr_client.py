@@ -76,7 +76,7 @@ def _log_operation(action: str, details: str):
 # 覆盖权威源位置：NR_CLIENT_AUTHORITY=<绝对路径>
 # 关闭自动同步：NR_CLIENT_DISABLE_AUTOSYNC=1
 
-NR_CLIENT_VERSION = "3.1.0"  # v1.5.0: 增加 --gateway 模式（AutoFlow Pro）
+NR_CLIENT_VERSION = "3.2.0"  # v1.5.8: 增加离线降级 + raw-to-dsl 命令
 
 # 默认权威源位置（可被 NR_CLIENT_AUTHORITY 环境变量或运行时注册表覆盖）。
 # 发行版：权威源 = autoflow-core skill 安装位（安装时由 repo core/ 下载落位）。
@@ -2215,7 +2215,49 @@ def _gateway_cli(args):
 
     gateway_url = gateway_url.rstrip("/")
 
-    def _api(method, path, body=None):
+    def _gw_available():
+        """检查网关是否可用。"""
+        try:
+            req = urllib.request.Request(f"{gateway_url}/api/core/health", method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return json.loads(resp.read().decode("utf-8")).get("ok", False)
+        except Exception:
+            return False
+
+    def _fallback_to_direct(cmd, args):
+        """网关不可用时降级到直连 NR 模式。"""
+        print(f"⚠️  网关不可用，降级到直连 NR 模式（命令: {cmd}）", file=sys.stderr)
+        # 构造直连模式的参数
+        direct_argv = ["nr_client.py"]
+        if cmd == "propose-dsl":
+            # 直连模式没有 propose-dsl，提示用户
+            print("❌ 直连模式不支持 propose-dsl，请确保网关可用", file=sys.stderr)
+            sys.exit(1)
+        elif cmd == "deploy-raw":
+            direct_argv += ["deploy-raw", "--flow-file", args.flow_file]
+            if args.label:
+                direct_argv += ["--label", args.label]
+        elif cmd == "entities":
+            direct_argv += ["entities"]
+        elif cmd == "snapshots":
+            direct_argv += ["snapshots"]
+        elif cmd == "rollback":
+            direct_argv += ["rollback", args.snapshot_id]
+        elif cmd in ("version", "health", "doctor"):
+            print("❌ 直连模式不支持该命令", file=sys.stderr)
+            sys.exit(1)
+        else:
+            print(f"❌ 直连模式不支持命令: {cmd}", file=sys.stderr)
+            sys.exit(1)
+        # 调用直连模式
+        old_argv = sys.argv
+        sys.argv = direct_argv
+        try:
+            _cli()
+        finally:
+            sys.argv = old_argv
+
+    def _api(method, path, body=None, allow_fallback=True):
         url = f"{gateway_url}{path}"
         headers = {"Content-Type": "application/json"}
         if api_key:
@@ -2231,6 +2273,9 @@ def _gateway_cli(args):
             except Exception:
                 return {"ok": False, "error": f"HTTP {e.code}: {e.reason}"}
         except Exception as e:
+            # 网络错误时检查是否降级
+            if allow_fallback and not _gw_available():
+                return {"ok": False, "error": f"网关不可用: {e}", "_fallback": True}
             return {"ok": False, "error": str(e)}
 
     cmd = args.gateway_cmd
@@ -2258,6 +2303,23 @@ def _gateway_cli(args):
         })
         print(json.dumps(r, ensure_ascii=False, indent=2))
 
+    elif cmd == "raw-to-dsl":
+        if not args.flow_file:
+            print("❌ 需要 --flow-file 指定 flow JSON 文件")
+            sys.exit(1)
+        with open(args.flow_file, "r", encoding="utf-8") as f:
+            flow_json = json.load(f)
+        r = _api("POST", "/api/core/raw-to-dsl", {
+            "flow_json": flow_json, "agent_id": agent_id,
+        })
+        if r.get("ok"):
+            print("=== DSL 草稿（仅供参考，请根据实际需求调整）===")
+            print(r.get("dsl_draft", ""))
+            print()
+            print(f"分析: {r.get('analysis', {})}")
+        else:
+            print(json.dumps(r, ensure_ascii=False, indent=2))
+
     elif cmd == "deploy-raw":
         if not args.flow_file:
             print("❌ 需要 --flow-file 指定 flow JSON 文件")
@@ -2268,6 +2330,10 @@ def _gateway_cli(args):
             "flow_json": flow_json, "agent_id": agent_id,
             "label": args.label or "", "target": args.target or "staging",
         })
+        # 网关不可用时降级
+        if r.get("_fallback"):
+            _fallback_to_direct("deploy-raw", args)
+            return
         print(json.dumps(r, ensure_ascii=False, indent=2))
 
     elif cmd == "entities":
@@ -2326,7 +2392,10 @@ def _cli():
         pd.add_argument("--preview", action="store_true", help="仅生成提案，不部署")
         pd.add_argument("--deploy-token", help="部署授权码（自动部署用）")
 
-        dr = gsp.add_parser("deploy-raw", help="⚠️逃生舱：直接提交 raw JSON")
+        r2d = gsp.add_parser("raw-to-dsl", help="将 raw JSON 转换为 DSL 草稿")
+        r2d.add_argument("--flow-file", required=True, help="flow JSON 文件路径")
+
+        dr = gsp.add_parser("deploy-raw", help="⚠️逃生舱：直接提交 raw JSON（网关不可用时自动降级直连）")
         dr.add_argument("--flow-file", required=True, help="flow JSON 文件路径")
         dr.add_argument("--label", help="flow 名称")
         dr.add_argument("--target", default="staging", help="部署目标 (staging/prod)")
