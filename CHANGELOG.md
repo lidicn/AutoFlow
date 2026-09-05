@@ -1,3 +1,8 @@
+## 1.5.5 (2026-09-05)
+- 【Bug 修复 P1】修复 REST propose-dsl 的 `target_tab` 死参数问题：之前未读取该参数，导致 API Key 的 `authorized_tabs` 授权限制完全不生效。现在显式读取 `target_tab`，传入 `_require_api_key` 做越界校验，未授权 tab 返回 403。
+- 【Bug 修复】修复 `/api/core/version` 返回 `unknown`：VERSION 文件路径计算错误（少了一级目录），已修正为项目根目录的 VERSION 文件。
+- 【改进】propose-dsl 响应回显 `target_tab` 和 `authorized_tabs` 字段，便于调用方与审计确认。
+
 ## 1.5.4 (2026-09-05)
 - 【Bug 修复 P0】修复 propose-dsl 返回 500 `name 'json' is not defined`：webui.py 缺少 `import json`，导致 token 统计记录时崩溃。
 - 【Bug 修复 P1】修复 API Key 吊销兼容性：`PUT /api/keys/{id}` 现在支持 `revoked=true` 字段吊销（原设计用 `POST /api/keys/{id}/revoke`，两种方式都支持）。
