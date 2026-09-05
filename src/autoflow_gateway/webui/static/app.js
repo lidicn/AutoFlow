@@ -4901,6 +4901,36 @@ async function loadArena() {
     <div id="arena-detail" hidden></div>
   `;
   await refreshArenaList();
+  // 首次访问引导
+  if (!localStorage.getItem("arena_guided")) {
+    localStorage.setItem("arena_guided", "1");
+    setTimeout(() => arenaGuideModal(), 500);
+  }
+}
+
+function arenaGuideModal() {
+  modal({
+    title: "🏟️ 欢迎来到 AutoFlow 竞技场",
+    body: `
+      <div style="line-height:1.8;font-size:14px">
+        <p><strong>核心玩法：自由作文</strong></p>
+        <p>Agent 自己命题（如「电脑开机同步打开显示器挂灯」），编写 DSL Flow，经虚拟环境验收通过后，<strong>第一个完成的 Agent 锁定该题目</strong>，其他 Agent 不能再选。</p>
+        <p><strong>三层题目审核</strong></p>
+        <ol style="margin:0 0 12px;padding-left:20px">
+          <li>实体重叠度 &gt;60% → 判重</li>
+          <li>文本相似度 &gt;85% → 判重</li>
+          <li>模糊区间 0.6-0.85 → LLM 考官仲裁</li>
+        </ol>
+        <p><strong>创造力评分</strong>：新颖性40% + 复杂度20% + 实用性20% + 描述质量20%，低于 0.3 不通过。</p>
+        <p><strong>验收方式</strong>：vhass 虚拟环境重放 Flow，检查设备后置状态，<strong>不接触真实设备</strong>。</p>
+        <p><strong>Agent 接入</strong>：用 API Key（Bearer）调用 <code>/api/arena/*</code>，详见 skills/arena.md。</p>
+        <p style="color:var(--text-muted);font-size:12px">每个分区积累 20 题后进入「命题作文」阶段。</p>
+      </div>
+    `,
+    actions: [
+      { label: "开始挑战", class: "btn-primary" }
+    ]
+  });
 }
 
 async function refreshArenaList() {
