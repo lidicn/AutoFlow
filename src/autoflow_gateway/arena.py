@@ -363,6 +363,25 @@ class ArenaManager:
                         "reason": f"文本相似度 {sim:.0%} 超过 85%，与题目「{t.get('title')}」重复",
                     }
 
+            # 第三层：LLM 考官（模糊区间 0.6-0.85，由 LLM 仲裁是否真的重复）
+            # 仅对文本相似度落在模糊区间的题目调用 LLM，避免不必要的 token 消耗
+            for t in arena_tasks:
+                sim = _text_similarity(title + " " + description, t.get("title", "") + " " + t.get("description", ""))
+                if 0.6 <= sim <= 0.85:
+                    judge = self._llm_judge_duplicate(
+                        {"title": title, "description": description, "entity_ids": entity_ids},
+                        {"title": t.get("title", ""), "description": t.get("description", ""), "entity_ids": t.get("entity_ids", [])},
+                    )
+                    if judge is not None and judge.get("is_duplicate"):
+                        return {
+                            "ok": False,
+                            "is_duplicate": True,
+                            "duplicate_of": t["id"],
+                            "duplicate_title": t.get("title"),
+                            "reason": f"LLM 考官判定与题目「{t.get('title')}」为同一自动化场景（文本相似度 {sim:.0%}）：{judge.get('reason', '')}",
+                            "llm_judge": judge,
+                        }
+
             # 创造力评分
             score, breakdown = _creativity_score(
                 title, description, entity_ids, arena.get("devices", []), arena_tasks
@@ -521,6 +540,64 @@ class ArenaManager:
             return result
         except Exception as e:
             return {"ok": False, "error": str(e), "stage": "propose_dsl_exception"}
+
+    def _llm_judge_duplicate(self, new_task: Dict, existing_task: Dict) -> Optional[Dict]:
+        """第三层 LLM 考官：判断两个题目是否为同一自动化场景。
+
+        返回 {"is_duplicate": bool, "reason": str}，LLM 不可用时返回 None（fail-open）。
+        仅在文本相似度 0.6-0.85 模糊区间调用，避免不必要的 token 消耗。
+        """
+        try:
+            from .llm_client import chat_sync
+        except Exception:
+            return None  # llm_client 不可用（缺 httpx 等），fail-open
+
+        prompt = f"""你是智能家居自动化场景的考官。请判断以下两个自动化场景是否本质上是同一个场景（触发条件和期望效果相同，只是表述不同）。
+
+【新题目】
+标题：{new_task.get('title', '')}
+描述：{new_task.get('description', '')}
+涉及设备：{', '.join(new_task.get('entity_ids', []))}
+
+【已有题目】
+标题：{existing_task.get('title', '')}
+描述：{existing_task.get('description', '')}
+涉及设备：{', '.join(existing_task.get('entity_ids', []))}
+
+判断标准：
+- 如果两个题目的触发条件（什么事件触发）和期望效果（最终达到什么状态）本质相同，即使措辞不同，也判定为重复。
+- 如果触发条件不同（如一个是"电脑开机"，一个是"人进入书房"），或期望效果不同（如一个是"开灯"，一个是"开空调"），则不重复。
+- 涉及设备重叠但触发/效果不同，不算重复。
+
+请严格只返回 JSON，不要其他文字：
+{{"is_duplicate": true/false, "reason": "简短理由"}}"""
+
+        try:
+            resp = chat_sync(
+                [{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=200,
+            )
+            # 解析 JSON 响应（LLM 可能返回 markdown 代码块）
+            text = resp.strip()
+            if text.startswith("```"):
+                text = text.strip("`")
+                if text.lower().startswith("json"):
+                    text = text[4:]
+                text = text.strip()
+            # 提取第一个 { 到最后一个 }
+            start = text.find("{")
+            end = text.rfind("}")
+            if start >= 0 and end > start:
+                text = text[start:end + 1]
+            result = json.loads(text)
+            return {
+                "is_duplicate": bool(result.get("is_duplicate", False)),
+                "reason": str(result.get("reason", ""))[:200],
+            }
+        except Exception as e:
+            print(f"[arena] LLM 考官调用失败: {e}")
+            return None  # LLM 调用失败，fail-open 不判重
 
     def _infer_postconditions(self, task: Dict, dsl: str) -> List[Dict]:
         """从题目和 DSL 推断期望后置状态。
