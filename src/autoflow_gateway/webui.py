@@ -863,6 +863,45 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         except Exception as e:
             return _js({"ok": False, "error": str(e)}, 500)
 
+    async def experience_similar(request: Request):
+        """查找相似成功案例。"""
+        try:
+            b = await _body(request)
+            dsl = (b.get("dsl") or "").strip()
+            top_n = int(b.get("top_n", 3))
+            logger = _experience_logger()
+            result = logger.find_similar_cases(dsl=dsl, top_n=top_n)
+            return _js(result)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def experience_suggest_fix(request: Request):
+        """根据错误信息提供修复建议。"""
+        try:
+            b = await _body(request)
+            error_msg = (b.get("error") or "").strip()
+            stage = (b.get("stage") or "").strip()
+            dsl = (b.get("dsl") or "").strip()
+            logger = _experience_logger()
+            result = logger.suggest_fix(error_msg=error_msg, stage=stage, dsl=dsl)
+            return _js(result)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def experience_recommend_entities(request: Request):
+        """实体推荐。"""
+        try:
+            qp = request.query_params
+            logger = _experience_logger()
+            result = logger.recommend_entities(
+                keyword=qp.get("keyword", ""),
+                domain=qp.get("domain", ""),
+                top_n=int(qp.get("top_n", 10)),
+            )
+            return _js(result)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
     async def experience_recommend(request: Request):
         """模板推荐。"""
         try:
@@ -985,6 +1024,21 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                     )
                 except Exception:
                     pass
+            # 智能推荐（v1.6.3）
+            try:
+                exp_logger = _experience_logger()
+                if result.get("ok"):
+                    similar = exp_logger.find_similar_cases(dsl=dsl, top_n=2)
+                    if similar.get("similar_cases"):
+                        result["_suggestions"] = {"similar_cases": similar["similar_cases"]}
+                else:
+                    err_msg = result.get("error", "") or result.get("gate", {}).get("reason", "")
+                    fix = exp_logger.suggest_fix(error_msg=err_msg, stage=result.get("stage", ""), dsl=dsl)
+                    result["_suggestions"] = {"fix_suggestions": fix.get("suggestions", []),
+                                              "error_type": fix.get("error_type", ""),
+                                              "similar_errors": fix.get("similar_errors", [])}
+            except Exception:
+                pass
             return _js(result)
         except Exception as e:
             # 异常也记录
@@ -3219,6 +3273,9 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/experience/best-practices", experience_best_practices, methods=["GET"]),
         Route("/api/experience/agent-comparison", experience_agent_comparison, methods=["GET"]),
         Route("/api/experience/recommend", experience_recommend, methods=["GET"]),
+        Route("/api/experience/similar", experience_similar, methods=["POST"]),
+        Route("/api/experience/suggest-fix", experience_suggest_fix, methods=["POST"]),
+        Route("/api/experience/recommend-entities", experience_recommend_entities, methods=["GET"]),
         # 错误知识库（v1.5.7）
         Route("/api/errors", error_knowledge_list, methods=["GET"]),
         Route("/api/errors/stats", error_knowledge_stats, methods=["GET"]),

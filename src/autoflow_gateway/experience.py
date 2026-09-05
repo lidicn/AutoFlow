@@ -395,6 +395,143 @@ class ExperienceLogger:
             "recommendations": recommendations,
         }
 
+    def find_similar_cases(self, dsl: str, top_n: int = 3) -> Dict[str, Any]:
+        """查找相似的成功案例。"""
+        # 从操作日志中找成功的 propose-dsl 案例
+        logs_result = self.get_logs(days=30, operation="propose-dsl", limit=500)
+        success_logs = [l for l in logs_result["logs"] if l.get("success")]
+
+        if not success_logs or not dsl:
+            return {"ok": True, "similar_cases": [], "total": 0}
+
+        # 简单相似度：提取 DSL 中的关键词，计算重叠度
+        dsl_entities = set(self._extract_entities(dsl))
+        dsl_keywords = set(re.findall(r'[a-zA-Z一-龥]+', dsl.lower()))
+
+        scored = []
+        for log in success_logs:
+            log_dsl = log.get("input", {}).get("dsl", "")
+            if not log_dsl or log_dsl == dsl:
+                continue
+            log_entities = set(self._extract_entities(log_dsl))
+            log_keywords = set(re.findall(r'[a-zA-Z一-龥]+', log_dsl.lower()))
+
+            # 计算相似度：实体重叠 + 关键词重叠
+            entity_overlap = len(dsl_entities & log_entities) / max(len(dsl_entities | log_entities), 1)
+            keyword_overlap = len(dsl_keywords & log_keywords) / max(len(dsl_keywords | log_keywords), 1)
+            similarity = entity_overlap * 0.6 + keyword_overlap * 0.4
+
+            if similarity > 0.1:  # 最低相似度阈值
+                scored.append({
+                    "dsl": log_dsl[:300],
+                    "similarity": round(similarity * 100, 1),
+                    "agent_id": log.get("agent_id", ""),
+                    "timestamp": log.get("timestamp", ""),
+                    "proposal_id": log.get("output", {}).get("proposal_id", ""),
+                })
+
+        scored = sorted(scored, key=lambda x: x["similarity"], reverse=True)[:top_n]
+        return {"ok": True, "similar_cases": scored, "total": len(scored)}
+
+    def suggest_fix(self, error_msg: str, stage: str = "", dsl: str = "") -> Dict[str, Any]:
+        """根据错误信息提供修复建议。"""
+        # 从错误知识库中查找相似错误
+        error_file = os.path.join(os.path.dirname(self.base_dir), "error_knowledge.json")
+        similar_errors = []
+        if os.path.exists(error_file):
+            try:
+                with open(error_file, "r", encoding="utf-8") as f:
+                    ek_data = json.load(f)
+                errors = ek_data.get("errors", [])
+                error_keywords = set(re.findall(r'[a-zA-Z一-龥]+', error_msg.lower()))
+                for e in errors[-100:]:  # 最近100条
+                    e_msg = e.get("error", "")
+                    e_keywords = set(re.findall(r'[a-zA-Z一-龥]+', e_msg.lower()))
+                    overlap = len(error_keywords & e_keywords) / max(len(error_keywords | e_keywords), 1)
+                    if overlap > 0.2:
+                        similar_errors.append({
+                            "error": e_msg[:200],
+                            "dsl": e.get("dsl", "")[:200],
+                            "error_type": e.get("error_type", ""),
+                            "similarity": round(overlap * 100, 1),
+                        })
+            except Exception:
+                pass
+
+        # 基于错误类型的通用修复建议
+        from .error_knowledge import classify_error
+        error_type = classify_error(error_msg, stage)
+        fix_suggestions = {
+            "unknown_entity": [
+                "使用 /api/core/resolve-entity 接口，用自然语言查询正确的 entity_id",
+                "检查 DSL 中的实体名称是否拼写正确",
+                "使用 /api/core/entities 接口查看可用实体列表",
+            ],
+            "syntax_error": [
+                "检查 DSL 语法：trigger: 和 action: 关键字是否正确",
+                "确保每行一个 action，使用两个空格缩进",
+                "参考 SKILL.md 中的 DSL 语法速查表",
+            ],
+            "lint_error": [
+                "检查节点连接是否完整（每个 trigger 至少有一个 action）",
+                "检查 action 参数格式是否正确",
+                "查看完整的 lint 警告信息，逐条修复",
+            ],
+            "gate_failed": [
+                "检查 API Key 的 authorized_tabs 是否包含目标 tab",
+                "确认操作的实体在授权范围内",
+                "查看 gate 字段中的具体拦截原因",
+            ],
+            "e2e_failed": [
+                "检查 expected_postconditions 是否正确描述了期望状态",
+                "确认 HA 中实体状态变化需要时间，适当增加等待",
+                "检查实体是否真实存在且可操作",
+            ],
+            "deploy_failed": [
+                "检查 Node-RED 是否在线且可访问",
+                "检查 flow JSON 格式是否正确",
+                "查看 NR 日志获取详细错误信息",
+            ],
+            "other": [
+                "查看完整错误信息，定位具体失败阶段",
+                "检查网关日志获取更多上下文",
+                "尝试简化 DSL，逐步定位问题",
+            ],
+        }
+
+        return {
+            "ok": True,
+            "error_type": error_type,
+            "suggestions": fix_suggestions.get(error_type, fix_suggestions["other"]),
+            "similar_errors": similar_errors[:3],
+            "note": "修复建议基于历史错误模式，仅供参考",
+        }
+
+    def recommend_entities(self, keyword: str = "", domain: str = "", top_n: int = 10) -> Dict[str, Any]:
+        """根据关键词推荐实体（基于经验数据的使用频率）。"""
+        entity_data = self._load_json(self.entity_file, {"entity_count": {}})
+        entity_count = entity_data.get("entity_count", {})
+
+        # 按使用频率排序
+        entities = sorted(entity_count.items(), key=lambda x: x[1], reverse=True)
+
+        # 过滤
+        if keyword:
+            kw = keyword.lower()
+            entities = [(e, c) for e, c in entities if kw in e.lower()]
+        if domain:
+            entities = [(e, c) for e, c in entities if e.startswith(domain + ".")]
+
+        entities = entities[:top_n]
+        return {
+            "ok": True,
+            "keyword": keyword,
+            "domain": domain,
+            "entities": [{"entity_id": e, "usage_count": c} for e, c in entities],
+            "total": len(entities),
+        }
+
+
     def get_summary(self, days: int = 7) -> Dict[str, Any]:
         """获取经验数据汇总。"""
         logs_result = self.get_logs(days=days, limit=10000)
