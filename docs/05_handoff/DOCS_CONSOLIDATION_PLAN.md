@@ -13,7 +13,7 @@
 | ① 输出目录 | ✅ `E:\NAS\autoflow\docs`，建 `01_product/02_architecture/03_dev/04_test/05_handoff`，写 `README.md` 唯一索引 |
 | ② ARCHITECTURE.md | ✅ 以 E 版为骨架、合并 D 版结构章节，**并按实际源码重写**（39 模块 / mode 已改 `normal·expert·developer` / 剔除 Windows nssm 服务描述）。过期事实单列 §0.1 |
 | ③ 测试报告 | ✅ 提炼 → 冷存 → 清理三步完成。台账 `04_test/findings-ledger.md`（已闭环 16 + 未闭环 19） |
-| ④ share 映射 | ✅ `net use Z: \\100.112.138.64\share /persistent:yes` 成功；内容不复制进仓库 |
+| ④ share 映射 | ✅ `net use Z: \\ <SHARE_IP>\share /persistent:yes` 成功；内容不复制进仓库 |
 | ⑤ 旧树清理 | ✅ `_TRASH_*`（42M）隔离到 `AutoFlow_archive/2026-09-02/_TO_DELETE/`（**可恢复，未真删**） |
 
 ### 执行中修正的两处原方案错误
@@ -40,7 +40,7 @@
 | `D:\Documents\HAOS\AutoFlow\handoff` | 2026-08 历史工单/交接卡 17 份 | 17 | — | 归档（结论已并入 dw 交接单） |
 | `D:\Documents\HAOS\AutoFlow`（根） | **非 git 仓**；含 `_TRASH2_2026-08-05` 整棵重复树、`.workbuddy/nr_local/node_modules`、另一项目 `smarthome-assistant` | 187 | **374** | ❌ 排除（90%+ 是噪音/重复） |
 | `D:\Documents\HAOS\workspace` | **多项目混杂**：`Poster-Wall`（另一项目）、`AutoTest`、`AutoFlow_Test`、`AutoFlowTestv2`（≈前者的副本）、`AutoFlowTestv3`、`Tester` | 162 | 34 | 提炼后并入，原始冷存 |
-| `\\100.112.138.64\share` | 团队协作区：`AutoFlowTestv2\tests\TEST_TICKET_NNN`、`autoflow_devteam\handoff`、`reviews`、`TASKS.md` | 可读（精确 Read 成功；顶层枚举超时） | — | 见 §5，不复制入库 |
+| `\\<SHARE_IP>\share` | 团队协作区：`AutoFlowTestv2\tests\TEST_TICKET_NNN`、`autoflow_devteam\handoff`、`reviews`、`TASKS.md` | 可读（精确 Read 成功；顶层枚举超时） | — | 见 §5，不复制入库 |
 
 **噪音构成**：`node_modules` 下第三方包的 README/CHANGELOG（408 份）、`_TRASH2_2026-08-05`（整棵重复树）、
 `.pytest_cache`、`AutoFlow_Test` 与 `AutoFlowTestv2` 的重复副本。**这些不是文档，排除在整理范围外。**
@@ -126,7 +126,7 @@ E:\NAS\autoflow\docs\
 
 **可以映射，但不建议把内容复制进 docs/。**
 
-- **映射（推荐，解决工具限制）**：`net use Z: \\100.112.138.64\share /persistent:yes`
+- **映射（推荐，解决工具限制）**：`net use Z: \\ <SHARE_IP>\share /persistent:yes`
   → 映射成盘符后，Bash 也能访问（当前 Bash 走 SMB 会挂死 3 分钟+，只有 Read/Glob 能用）。
 - **不复制**：share 是**活的协作区**（wb2 的 `TEST_TICKET_NNN` 工单在此持续产出）。
   复制进 docs/ = 制造第二份立刻过期的副本，正是文档散落的病因。

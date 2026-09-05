@@ -233,18 +233,26 @@ class TestConnectionsAPI(EnvSandbox):
     def setUp(self):
         super().setUp()
         self.gw = Gateway(self.cfg)
+        # 用旧令牌兼容通道：设 token + both 模式 → 本机无需账号密码即可访问 /api/settings
+        os.environ["AF_WEBUI_TOKEN"] = "test-connections-token"
+        os.environ["AF_WEBUI_TOKEN_MODE"] = "both"
         self.client = TestClient(build_webui_asgi(self.cfg, gateway=self.gw))
         self.client.__enter__()
 
     def tearDown(self):
         self.client.__exit__(None, None, None)
+        os.environ.pop("AF_WEBUI_TOKEN", None)
+        os.environ.pop("AF_WEBUI_TOKEN_MODE", None)
         super().tearDown()
 
     def test_get_lists_groups(self):
         r = self.client.get("/api/settings/connections")
         self.assertEqual(r.status_code, 200)
         ids = [g["id"] for g in r.json()["groups"]]
-        self.assertEqual(ids, ["ha", "nr", "bark"])
+        # memory 组为新增连接类型，允许扩展
+        self.assertIn("ha", ids)
+        self.assertIn("nr", ids)
+        self.assertIn("bark", ids)
 
     def test_put_saves_and_masks(self):
         r = self.client.put("/api/settings/connections",

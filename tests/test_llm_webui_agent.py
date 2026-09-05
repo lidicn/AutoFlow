@@ -143,6 +143,12 @@ def env():
     gw = Gateway(cfg)
     app = build_webui_asgi(cfg, gateway=gw)
     client = TestClient(app)
+    # 注册测试账号并获取会话（password_only 模式不认旧令牌）
+    client.post("/api/auth/register", json={"username": "testuser", "password": "testpass123"})
+    r = client.post("/api/auth/login", json={"username": "testuser", "password": "testpass123"})
+    assert r.status_code == 200, f"登录失败: {r.text}"
+    # 写请求需要 CSRF 同源头（X-Requested-With: autoflow）
+    client.headers["X-Requested-With"] = "autoflow"
     client.__enter__()
     yield client, gw, cfg
     client.__exit__(None, None, None)

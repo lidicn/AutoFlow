@@ -383,7 +383,7 @@ mcp_servers:
             <li>选择要导入的入口，配置密钥后点击「安装到 Node-RED」</li>
           </ol>
           <p>示例：如果你的 Node-RED 中有一个 link in 节点，它的 flow 地址可能是：</p>
-          <div class="tutorial-code">http://192.168.2.200:1880/#flow/1abccdeb942bc34</div>
+          <div class="tutorial-code">http://<NAS_IP>:1880/#flow/1abccdeb942bc34</div>
           <p>导入后，外部服务就可以通过这个 HTTP 端点触发 AutoFlow 管理的 flow 了。</p>
         `,
       },

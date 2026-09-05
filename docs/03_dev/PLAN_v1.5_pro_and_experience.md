@@ -55,9 +55,9 @@
 **nr_client.py 增加 `--gateway` 模式**：
 ```bash
 # 网关模式
-python nr_client.py --gateway http://192.168.2.200:8000 propose-dsl "人体传感器触发开灯"
-python nr_client.py --gateway http://192.168.2.200:8000 deploy-proposal <proposal_id>
-python nr_client.py --gateway http://192.168.2.200:8000 rollback <snapshot_id>
+python nr_client.py --gateway http://<NAS_IP>:8000 propose-dsl "人体传感器触发开灯"
+python nr_client.py --gateway http://<NAS_IP>:8000 deploy-proposal <proposal_id>
+python nr_client.py --gateway http://<NAS_IP>:8000 rollback <snapshot_id>
 
 # 直连模式（现有，保持不变）
 python nr_client.py deploy --flow '{...}'

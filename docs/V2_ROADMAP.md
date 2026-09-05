@@ -68,10 +68,10 @@ Phase 4: 竞技场模式（长期）
 | 0.2 | 初始化 Git 仓库 | PM | ✅ 完成 |
 | 0.3 | 创建 docker-compose.yml（端口 8002） | backend-dev | ✅ 完成 |
 | 0.4 | 配置 .env（HA/NR 连接） | backend-dev | ✅ 完成 |
-| 0.5 | 部署到 NAS Docker | backend-dev | ⏳ 待执行 |
-| 0.6 | 验证 WebUI 可访问（:8002） | tester | ⏳ 待执行 |
-| 0.7 | 验证 MCP 可调用（:8002/mcp） | tester | ⏳ 待执行 |
-| 0.8 | 配置 Kanban 看板 | PM | ⏳ 待执行 |
+| 0.5 | 部署到 NAS Docker | backend-dev | ✅ 完成（2026-09-05 验证 curl 200） |
+| 0.6 | 验证 WebUI 可访问（:8002） | tester | ✅ 完成（2026-09-05 页面加载正常） |
+| 0.7 | 验证 MCP 可调用（:8002/mcp） | tester | ✅ 完成（2026-09-05 返回结构化 JSON） |
+| 0.8 | 配置 Kanban 看板 | PM | ✅ 完成（2026-09-05 docs/03_dev/KANBAN.md） |
 | 0.9 | 微信通知通道测试 | PM | ⏳ 待执行 |
 
 ---

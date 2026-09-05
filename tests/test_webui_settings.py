@@ -37,15 +37,24 @@ pytestmark = pytest.mark.skipif(not _OK, reason=f"需要 starlette+mcp：{_ERR}"
 
 @pytest.fixture
 def env():
+    # token_only 模式：TestClient（loopback）免登录跑写端点，与现网 password_only 行为解耦
+    _prev = os.environ.get("AF_WEBUI_TOKEN_MODE")
+    os.environ["AF_WEBUI_TOKEN_MODE"] = "token_only"
     tmp = tempfile.mkdtemp(prefix="af_sh_")
     cfg = GatewayConfig(data_dir=tmp, env="staging")
     gw = Gateway(cfg)
     app = build_webui_asgi(cfg, gateway=gw)
     client = TestClient(app)
     client.__enter__()
-    yield client, gw, cfg
-    client.__exit__(None, None, None)
-    shutil.rmtree(tmp, ignore_errors=True)
+    try:
+        yield client, gw, cfg
+    finally:
+        client.__exit__(None, None, None)
+        shutil.rmtree(tmp, ignore_errors=True)
+        if _prev is None:
+            os.environ.pop("AF_WEBUI_TOKEN_MODE", None)
+        else:
+            os.environ["AF_WEBUI_TOKEN_MODE"] = _prev
 
 
 def test_set_selfheal_budget_persists_and_reads_back(env):

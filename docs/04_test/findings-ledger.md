@@ -3,7 +3,7 @@
 > 提炼时间：2026-09-02　提炼人：wb1（子代理扫描 + 人工复核）
 > 来源：约 80–100 份测试/审计报告，散落在 `D:\Documents\HAOS\AutoFlow\docs`、`handoff`、
 > `D:\Documents\HAOS\workspace\{AutoFlow_Test, AutoFlowTestv2}`、以及团队 share
-> （`\\100.112.138.64\share\AutoFlowTestv2\tests`，已映射为 `Z:`）。
+> （`\\ <SHARE_IP>\share\AutoFlowTestv2\tests`，已映射为 `Z:`）。
 >
 > **本文是那批报告的替代品。** 原始报告已冷存至
 > `D:\Documents\HAOS\AutoFlow_archive\2026-09-02\`（不进 git），见 §C。

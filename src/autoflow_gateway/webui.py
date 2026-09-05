@@ -849,7 +849,9 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             dsl = (b.get("dsl") or "").strip()
             if not dsl:
                 return _js({"ok": False, "error": "dsl 不能为空"}, 400)
-            agent_id = (b.get("agent_id") or "pro-agent").strip()
+            # M2 修复：agent_id 必须从已认证 API Key 派生，禁止 body 覆盖
+            # 任何持 key 者可冒充任意 agent_id 污染审计日志、错误知识库、telemetry
+            agent_id = agent_info["agent_id"]
             expected = b.get("expected_postconditions") or []
             resolved = b.get("resolved_entities") or []
             deploy_token = (b.get("deploy_token") or "").strip() or None
@@ -909,7 +911,8 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             pid = (b.get("proposal_id") or b.get("id") or "").strip()
             if not pid:
                 return _js({"ok": False, "error": "proposal_id 不能为空"}, 400)
-            agent_id = (b.get("agent_id") or "pro-agent").strip()
+            # M2 修复：agent_id 必须从已认证 API Key 派生，禁止 body 覆盖
+            agent_id = agent_info["agent_id"]
             target = (b.get("target") or "prod").strip()
             target_tab = (b.get("target_tab") or "").strip() or None
             deploy_token = (b.get("deploy_token") or "").strip() or None
@@ -3036,6 +3039,59 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                 errors.append({"id": n["id"], "error": str(e)})
         return _js({"ok": True, "flow_id": flow_id, "triggered": triggered, "errors": errors})
 
+    async def flow_snapshots_endpoint(request: Request):
+        """列出与指定 flow_id 相关的快照（按时间倒序）。"""
+        agent_info, err = _require_api_key(request, required_perm="read")
+        if err:
+            return err
+        flow_id = request.path_params.get("flow_id")
+        try:
+            from .gateway import list_flow_snapshots
+            all_snaps = list_flow_snapshots()
+            # 过滤与该 flow_id 相关的快照：快照内 flow.id == flow_id，
+            # 或 snapshot_id / label 中包含 flow_id（操作类快照 label 常带 flow label）
+            related = [s for s in all_snaps
+                       if s.get("flow_id") == flow_id
+                       or flow_id in (s.get("snapshot_id") or "")
+                       or flow_id in (s.get("label") or "")]
+            return _js({"ok": True, "flow_id": flow_id,
+                        "snapshots": related[:50], "total": len(related)})
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def flow_rollback_endpoint(request: Request):
+        """一键回滚：自动备份当前状态，恢复到指定快照。"""
+        agent_info, err = _require_api_key(request, required_perm="modify")
+        if err:
+            return err
+        flow_id = request.path_params.get("flow_id")
+        try:
+            b = await _body(request)
+            snapshot_id = (b.get("snapshot_id") or "").strip()
+            if not snapshot_id:
+                return _js({"ok": False, "error": "snapshot_id 不能为空"}, 400)
+            from .gateway import rollback_flow_by_snapshot
+            result = rollback_flow_by_snapshot(
+                snapshot_id, nr_client=gw.nr,
+                agent_id=agent_info.get("agent_id", "webui") if agent_info else "webui",
+            )
+            # 追加审计日志（API Key 身份或 WebUI 会话身份）
+            try:
+                _who = agent_info.get("agent_id", "") if agent_info else ""
+                if not _who:
+                    _af = request.scope.get("af_auth") or {}
+                    _who = _af.get("username", "")
+                auth.audit("flow_rollback", username=_who,
+                           ip=_client_host(request.scope), ok=result.get("ok"),
+                           note=f"flow={flow_id} snap={snapshot_id} "
+                                f"{'成功' if result.get('ok') else '失败'}"
+                                f"{(' · ' + result.get('error')) if result.get('error') else ''}")
+            except Exception:
+                pass
+            return _js(result)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
     # PWA：manifest / Service Worker 挂在根路径（SW 必须根路径才能管控全站 scope）
     def _serve_static_root(name, media):
         p = os.path.join(static_dir, name)
@@ -3173,6 +3229,8 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/deployed", list_deployed, methods=["GET"]),
         Route("/api/deployed/{id}/undeploy", undeploy_flow, methods=["POST"]),
         Route("/api/flows/{flow_id}/trigger", trigger_flow_endpoint, methods=["POST"]),
+        Route("/api/flows/{flow_id}/snapshots", flow_snapshots_endpoint, methods=["GET"]),
+        Route("/api/flows/{flow_id}/rollback", flow_rollback_endpoint, methods=["POST"]),
         # （C2/C4）白盒部署面板与人工抽查端点已剥离，能力迁 archive/agent-loop-migration/
 
         # 笔记
@@ -3297,8 +3355,8 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         #   远程无认证访问一律 403，防止 Docker 0.0.0.0 把控制面裸奔到公网。
         # password_only 模式下首次注册必须允许远程访问（用户从 LAN 浏览器初始化）；
         # 未命中白名单的非公开路径返回 401，由前端弹出注册向导。
-        no_auth_possible = (auth.auth_mode == "token_only") or (
-            (not auth.has_users()) and auth.auth_mode != "password_only"
+        no_auth_possible = (auth.auth_mode == "token_only") or (\
+            (not auth.has_users()) and auth.auth_mode != "password_only"\
         )
         if no_auth_possible:
             if not _is_loopback(scope):

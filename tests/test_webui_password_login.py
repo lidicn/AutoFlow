@@ -175,27 +175,27 @@ class TestPasswordLogin(TmpCfgMixin, unittest.TestCase):
         self.assertEqual(r2.status_code, 200)
 
     def test_legacy_token_compat_both_mode(self):
-        c = self.make_client(mode="both", token="legacy-shared-token")
+        c = self.make_client(mode="both", token="legacy-token")
         self.register_owner(c)
         # 旧令牌（?token=）在 both 模式仍可用，且不受 CSRF 头约束
-        r = c.get("/api/pending?token=legacy-shared-token")
+        r = c.get("/api/pending?token=legacy-token")
         self.assertEqual(r.status_code, 200)
         # password_only 模式默认拒绝旧令牌（用无会话 Cookie 的新客户端验证）。
         # 注意：所有客户端共享同一 data_dir，owner 已由 c 建好，故 c3 命中
         # 「已初始化 + 回环」分支 → 401（而非 S-4 的 403）。
-        c3 = self.make_client(mode="password_only", token="legacy-shared-token")
-        self.assertEqual(c3.get("/api/pending?token=legacy-shared-token").status_code, 401)
+        c3 = self.make_client(mode="password_only", token="legacy-token")
+        self.assertEqual(c3.get("/api/pending?token=legacy-token").status_code, 401)
 
     def test_token_only_rejects_session(self):
         # token_only 是回滚模式：先用密码模式建好账号，再切到 token_only 客户端
-        c0 = self.make_client(mode="password_only", token="legacy-shared-token")
+        c0 = self.make_client(mode="password_only", token="legacy-token")
         pw = self.register_owner(c0)
-        c = self.make_client(mode="token_only", token="legacy-shared-token")
+        c = self.make_client(mode="token_only", token="legacy-token")
         # token_only：密码登录不受理（密码子系统已关闭）
         r_sess = c.post("/api/auth/login", json={"username": "owner", "password": pw})
         self.assertEqual(r_sess.status_code, 401)
         # 旧令牌仍受理
-        r_tok = c.get("/api/pending?token=legacy-shared-token")
+        r_tok = c.get("/api/pending?token=legacy-token")
         self.assertEqual(r_tok.status_code, 200)
 
     def test_failed_login_lockout(self):

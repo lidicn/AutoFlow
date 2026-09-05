@@ -317,7 +317,7 @@ class SnapshotManager:
 
     def diff_snapshots(self, token_id: str, snapshot_id_1: str,
                          snapshot_id_2: str) -> Dict[str, Any]:
-        """对比两个快照的差异。"""
+        """对比两个快照的差异，返回节点级和字段级差异详情。"""
         snap1 = self.get_snapshot(token_id, snapshot_id_1)
         snap2 = self.get_snapshot(token_id, snapshot_id_2)
         if snap1 is None or snap2 is None:
@@ -333,18 +333,44 @@ class SnapshotManager:
             if nid in nodes2 and nodes1[nid] != nodes2[nid]:
                 changed.append(nid)
 
+        # 构建详细 diff 数据，包含完整节点信息
+        added_nodes = [nodes2[nid] for nid in added[:50]]
+        removed_nodes = [nodes1[nid] for nid in removed[:50]]
+        changed_details = []
+        for nid in changed[:50]:
+            n1 = nodes1[nid]
+            n2 = nodes2[nid]
+            # 计算字段级差异
+            all_keys = set(list(n1.keys()) + list(n2.keys()))
+            field_diffs = []
+            for k in all_keys:
+                v1 = n1.get(k)
+                v2 = n2.get(k)
+                if v1 != v2:
+                    field_diffs.append({"field": k, "old": v1, "new": v2})
+            changed_details.append({
+                "node_id": nid,
+                "type": n1.get("type", ""),
+                "name": n1.get("name", ""),
+                "field_diffs": field_diffs
+            })
+
         return {
             "ok": True,
             "snapshot_1": snapshot_id_1,
             "snapshot_2": snapshot_id_2,
+            "snap1_label": snap1.get("label", ""),
+            "snap2_label": snap2.get("label", ""),
+            "snap1_time": snap1.get("created_at", ""),
+            "snap2_time": snap2.get("created_at", ""),
             "node_count_1": len(nodes1),
             "node_count_2": len(nodes2),
             "added_count": len(added),
             "removed_count": len(removed),
             "changed_count": len(changed),
-            "added": added[:50],  # 最多返回 50 个
-            "removed": removed[:50],
-            "changed": changed[:50],
+            "added_nodes": added_nodes,
+            "removed_nodes": removed_nodes,
+            "changed_details": changed_details,
         }
 
     def cleanup_old_snapshots(self, token_id: str, *, retain_days: int = 30) -> int:

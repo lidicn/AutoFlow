@@ -7816,6 +7816,18 @@ class Gateway:
         if _unresolved:
             return {"ok": False, "stage": "ha_server_inject", "flow_id": flow_id,
                     "error": self._ha_server_unresolved_msg(_unresolved)}
+        # P0-2: R40 SSRF 门禁（内网 IP 硬拦）—— modify_flow 此前完全漏掉 lint，
+        # 是 approve/commit_scene 外的第三条绕过路径。dsl_recompile 分支尤其危险：
+        # 编译器可产出含内网 IP 的 http request URL（如硬编码 NAS 地址）。
+        _r40_issues = [i for i in lint_flow(target)
+                       if i.get("level") == "error" and i.get("rule") == "R40"]
+        if _r40_issues:
+            return {
+                "ok": False, "stage": "ssrf_block",
+                "error": (f"内网 IP SSRF 风险（R40 error）：{len(_r40_issues)} 项，"
+                          f"已阻止修改。请先修复内网地址：{_r40_issues[0].get('message', '')}"),
+                "issues": _r40_issues,
+            }
         # 【WB84·P2-F-DIRECT】直写路径审计化：落盘前留预快照 + 写 apply 轨迹，
         # 使 modify_flow(node_patches) 与 apply(mode=A) 一致可回滚（apply_rollback(trace_id)
         # 可还原），消除两条写路径安全保证分叉。best-effort：快照/轨迹失败不影响部署主流程。
@@ -8433,6 +8445,18 @@ class Gateway:
             if op.operation in ("create_flow", "update_flow"):
                 flow = op.payload["flow"]
                 fid = op.payload["flow_id"]
+                # P0-2: 审批前重做 R40 SSRF 门禁（pending op 创建时未做 lint，
+                # 防止 approve 成为绕过路径）
+                _r40_block_rules = {"R40"}
+                _r40_issues = [i for i in lint_flow(flow)
+                               if i.get("level") == "error" and i.get("rule") in _r40_block_rules]
+                if _r40_issues:
+                    return {
+                        "ok": False, "stage": "ssrf_block",
+                        "error": (f"内网 IP SSRF 风险（R40 error）：{len(_r40_issues)} 项，"
+                                  f"已阻止部署。请先修复内网地址：{_r40_issues[0].get('message', '')}"),
+                        "issues": _r40_issues,
+                    }
                 # create-or-update：全新场景 POST /flow 创建；已存在 PUT /flow/:id 更新
                 res = self.nr.create_or_update_flow(fid, flow, force=True)
                 real_fid = res.get("id") or fid
@@ -9169,4 +9193,151 @@ def _read_apply_trace(trace_id: str) -> Optional[Dict]:
             return json.load(f)
     except Exception:
         return None
+
+
+def list_flow_snapshots() -> List[Dict[str, Any]]:
+    """列出所有 flow 快照，按时间倒序。
+
+    返回 [{snapshot_id, path, ts, agent_id, kind, label, node_count}, ...]
+    snapshot_id = 文件名（不含 .json 后缀），用于后续回滚。
+    """
+    snaps_dir = _snapshot_dir()
+    out: List[Dict[str, Any]] = []
+    try:
+        if not os.path.isdir(snaps_dir):
+            return out
+        for day_dir in sorted(os.listdir(snaps_dir), reverse=True):
+            full_dir = os.path.join(snaps_dir, day_dir)
+            if not os.path.isdir(full_dir):
+                continue
+            for fname in os.listdir(full_dir):
+                if not fname.endswith(".json"):
+                    continue
+                fpath = os.path.join(full_dir, fname)
+                snap_id = fname[:-5]  # 去掉 .json
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    flow = data.get("flow") or {}
+                    nodes = flow.get("nodes") or []
+                    out.append({
+                        "snapshot_id": snap_id,
+                        "path": fpath,
+                        "ts": data.get("ts", ""),
+                        "agent_id": data.get("agent_id", ""),
+                        "kind": data.get("kind", ""),
+                        "label": data.get("label", ""),
+                        "flow_id": flow.get("id", ""),
+                        "node_count": len(nodes),
+                    })
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    out.sort(key=lambda x: x.get("ts", ""), reverse=True)
+    return out
+
+
+def rollback_flow_by_snapshot(snap_id: str, *, nr_client=None, agent_id: str = "webui",
+                               allow_prod: bool = False) -> Dict[str, Any]:
+    """根据快照 ID 回滚指定 flow 到快照时的状态。
+
+    流程：
+    1. 定位快照文件（从快照名反查 path）
+    2. 自动创建当前状态备份快照（防止回滚错了还能再回滚）
+    3. 用快照中的 flow 覆盖 NR 上的对应 flow
+    4. 写审计日志
+
+    返回 {ok, flow_id, snapshot_id, node_count_before, node_count_after, error?}
+    """
+    result: Dict[str, Any] = {"ok": False}
+    snaps_dir = _snapshot_dir()
+    snap_path = None
+
+    # 查找快照文件
+    for day_dir in os.listdir(snaps_dir) if os.path.isdir(snaps_dir) else []:
+        full_dir = os.path.join(snaps_dir, day_dir)
+        if not os.path.isdir(full_dir):
+            continue
+        candidate = os.path.join(full_dir, f"{snap_id}.json")
+        if os.path.isfile(candidate):
+            snap_path = candidate
+            break
+
+    if not snap_path or not os.path.isfile(snap_path):
+        return {**result, "error": f"快照 {snap_id} 不存在"}
+
+    try:
+        with open(snap_path, "r", encoding="utf-8") as f:
+            snap_data = json.load(f)
+    except Exception as e:
+        return {**result, "error": f"读取快照失败: {e}"}
+
+    flow = snap_data.get("flow") or {}
+    flow_id = flow.get("id")
+    if not flow_id:
+        return {**result, "error": "快照中无 flow.id，无法回滚"}
+
+    label = flow.get("label") or flow_id
+    result.update(snapshot_id=snap_id, flow_id=flow_id, label=label)
+
+    if not nr_client:
+        return {**result, "error": "nr_client 未传入，无法执行回滚"}
+
+    # Step 1: 自动备份当前状态
+    try:
+        current = nr_client.get_flow(flow_id)
+        node_count_before = len(current.get("nodes") or [])
+        result["node_count_before"] = node_count_before
+    except Exception as e:
+        node_count_before = 0
+        result["node_count_before"] = 0
+        result["_backup_error"] = str(e)
+
+    # 创建备份快照（用增量方式记录当前状态）
+    backup_info = snapshot_flow(
+        agent_id="rollback_backup",
+        kind="rollback_pre",
+        label=f"回滚前备份({snap_id})",
+        flow=current if node_count_before > 0 else flow,
+        extra={"original_snapshot_id": snap_id, "rollback_flow_id": flow_id},
+    )
+    if backup_info:
+        result["backup_snapshot_path"] = backup_info
+
+    # Step 2: 执行回滚
+    try:
+        target = dict(flow)
+        target["id"] = flow_id
+        res = nr_client.create_or_update_flow(flow_id, target, force=True, allow_prod=allow_prod)
+        node_count_after = len(flow.get("nodes") or [])
+        result.update(
+            ok=True,
+            restored=True,
+            node_count_after=node_count_after,
+            result=res if isinstance(res, dict) else {"raw": str(res)},
+            note=f"已把 {flow_id} 回滚到快照 {snap_id}（{label}）",
+        )
+    except Exception as e:
+        result["error"] = f"回滚执行失败: {e}"
+
+    # Step 3: 审计日志
+    try:
+        _write_apply_trace({
+            "trace_id": f"rb_{snap_id}",
+            "flow_id": flow_id,
+            "mode": "FLOW_ROLLBACK",
+            "ok": result.get("ok"),
+            "applied": result.get("ok"),
+            "pending": False,
+            "agent_id": agent_id,
+            "stage": "restored" if result.get("ok") else "failed",
+            "snapshot_path": snap_path,
+            "label": label,
+            "reason": f"flow 一键回滚到快照 {snap_id}",
+        })
+    except Exception:
+        pass
+
+    return result
 

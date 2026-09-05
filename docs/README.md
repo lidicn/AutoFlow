@@ -3,7 +3,7 @@
 > **本目录是 AutoFlow 文档的唯一入口。** 2026-09-02 从 5 处散落位置整理归一。
 > 整理前的问题：文档散落在 `E:\NAS\autoflow\docs`、`D:\Documents\HAOS\AutoFlow\docs`、
 > `D:\Documents\HAOS\AutoFlow\handoff`、`D:\Documents\HAOS\workspace`、
-> `\\100.112.138.64\share`，且同一份 `ARCHITECTURE.md` 有两个冲突版本。
+> `\\<SHARE_IP>\share`，且同一份 `ARCHITECTURE.md` 有两个冲突版本。
 
 ## 分类原则
 
@@ -62,12 +62,12 @@ docs/
 | 位置 | 内容 |
 |---|---|
 | `D:\Documents\HAOS\AutoFlow_archive\2026-09-02\` | **冷存区**（仓库外）：原始测试报告 57 份 + 历史交接卡 17 项 + 两个测试工作区 + `AutoTest/` 缺陷目录 + `_TO_DELETE/` 隔离区。提炼后的结论已在 `04_test/findings-ledger.md`，原文留档备查 |
-| `Z:\`（= `\\100.112.138.64\share`，已 `net use` 映射） | **活协作区**：wb2 的 `AutoFlowTestv2\tests\TEST_TICKET_NNN` 工单持续产出（已到 012）、`autoflow_devteam\handoff`、`reviews`、`TASKS.md`。**内容不复制进仓库** —— 复制即制造第二份立刻过期的副本 |
+| `Z:\`（= `\\<SHARE_IP>\share`，已 `net use` 映射） | **活协作区**：wb2 的 `AutoFlowTestv2\tests\TEST_TICKET_NNN` 工单持续产出（已到 012）、`autoflow_devteam\handoff`、`reviews`、`TASKS.md`。**内容不复制进仓库** —— 复制即制造第二份立刻过期的副本 |
 | `D:\Documents\HAOS\workspace\` | 已清出 AutoFlow 内容，只剩**其他项目**（`Poster-Wall`、`MemoryAgent_Test`、`Smarthome_*`、`Tester`）—— 这些不是 AutoFlow 的，别动 |
 
 ### 关于 Z: 盘
 
-- 映射命令：`net use Z: \\100.112.138.64\share /persistent:yes`
+- 映射命令：`net use Z: \\<SHARE_IP>\share /persistent:yes`
 - **为什么需要映射**：Bash 走 SMB UNC 路径会挂死 3 分钟以上，映射成盘符后 Bash 可直接访问。
 - 未映射时，只有 `Read` 和带 `path` 参数的 `Glob` 能用；`Glob` 跨盘符不传 `path` 会**静默返回空**。
 

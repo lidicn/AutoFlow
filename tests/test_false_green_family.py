@@ -59,6 +59,10 @@ def _mk_shim(seed_states):
                     "entity_id": eid, "state": st,
                     "attributes": {"friendly_name": eid}, "area": "房间"})
             return store
+
+        def _seed_read_value_entities_from_ha(self, flow, store):
+            """No-op stub: shim has no real HA, skip seeding."""
+            pass
     return _Shim()
 
 

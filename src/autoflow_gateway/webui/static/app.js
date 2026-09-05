@@ -2053,11 +2053,13 @@ async function loadDeployed() {
         ${d.stale ? `<div class="desc" style="color:#c0392b">⚠ 注册表↔NR 分叉：注册表记此 flow 已部署，但 Node-RED 实例里已无该 flow_id（可能已被手动删除、重命名或切换了 NR 实例）。撤回将仅清理注册表记录，不会触碰 NR。</div>` : ""}
         <div class="actions">
           <button class="btn sm" data-trg="${esc(d.flow_id)}">▶ 触发</button>
+          <button class="btn sm" data-rb="${esc(d.flow_id)}">↩ 回滚</button>
           <button class="btn sm danger" data-und="${esc(d.flow_id)}">撤回</button>
         </div>
       </div>`).join("");
     $$("[data-und]").forEach((b) => (b.onclick = () => undeployProposal(b.dataset.und)));
     $$("[data-trg]").forEach((b) => (b.onclick = () => triggerFlow(b.dataset.trg)));
+    $$("[data-rb]").forEach((b) => (b.onclick = () => openRollbackDialog(b.dataset.rb)));
   } catch (e) { $("#d-list").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
 async function undeployProposal(id) {
@@ -2092,6 +2094,60 @@ async function triggerFlow(id) {
   const errs = (d.errors || []).length;
   if (d.warning) { toast("已触发，但 " + d.warning); return; }
   toast(`已触发 ${n} 个 inject 节点${errs ? `，失败 ${errs}` : ""}。可到「诊断」查看 debug 输出`);
+}
+
+async function openRollbackDialog(flowId) {
+  // 先加载快照列表
+  let r;
+  try {
+    r = await api("GET", `/flows/${flowId}/snapshots`);
+  } catch (e) {
+    toast("获取快照失败：" + e.message);
+    return;
+  }
+  if (!r.ok) { toast("获取快照失败：" + (r.data?.error || r.status)); return; }
+  const snaps = r.data?.snapshots || [];
+  if (!snaps.length) {
+    toast("该 flow 暂无可用快照，无法回滚");
+    return;
+  }
+
+  // 构建快照选择列表（排除备份快照）
+  const options = snaps
+    .filter(s => !s.label || s.label.indexOf("备份") < 0)
+    .map(s => `<option value="${esc(s.snapshot_id)}">${esc(s.label || s.snapshot_id)} · ${esc((s.ts || "").slice(0, 16))} · ${s.node_count || 0}节点</option>`)
+    .join("");
+  if (!options) { toast("无有效快照可回滚"); return; }
+
+  // 二次确认对话框
+  const sel = prompt(
+    `请选择要回滚到的快照版本：\n\n${snaps.map(s => `[${s.snapshot_id}] ${s.label || s.snapshot_id} (${s.ts}) · ${s.node_count}节点`).join("\n")}\n\n输入 snapshot_id 或编号(0-${snaps.length - 1})：`
+  );
+  if (!sel) return;
+  const idx = parseInt(sel, 10);
+  const snapId = !isNaN(idx) && snaps[idx] ? snaps[idx].snapshot_id : (sel.trim() || "");
+  if (!snapId || !snaps.some(s => s.snapshot_id === snapId)) {
+    toast("无效的快照选择");
+    return;
+  }
+  if (!confirm(
+    `确定回滚到快照「${snapId}」？\n` +
+    `目标 flow: ${flowId}\n` +
+    `快照内容: ${snaps.find(s => s.snapshot_id === snapId)?.label || snapId} (${snaps.find(s => s.snapshot_id === snapId)?.ts || "未知时间"})\n\n` +
+    `回滚前会自动创建当前状态备份，恢复后可用「↩ 回滚」进一步操作。\n\n此操作不可撤销！`
+  )) return;
+
+  try {
+    const rb = await api("POST", `/flows/${flowId}/rollback`, { snapshot_id: snapId });
+    if (rb.ok) {
+      toast(`回滚成功：已恢复到 ${snaps.find(s => s.snapshot_id === snapId)?.label || snapId} 状态`);
+      loadDeployed();
+    } else {
+      toast("回滚失败：" + (rb.data?.error || rb.status));
+    }
+  } catch (e) {
+    toast("回滚出错：" + e.message);
+  }
 }
 
 // ── 笔记 ──
@@ -3338,7 +3394,7 @@ async function doImportSubflow() {
 // 只读自省用户 tab，注册薄桥接（link_out），不改动用户 NR 流。多参数 TTS 队列支持逐行增删编辑。
 function showImportLinkApiFromTab() {
   modal("从 tab 链接导入 Link API", `
-    <p class="desc">把 Node-RED 编辑器里的 tab 链接（如 <code>http://192.168.2.200:1990/#flow/e70a201b5f004927</code>）粘贴进来。
+    <p class="desc">把 Node-RED 编辑器里的 tab 链接（如 <code>http://<NAS_IP>:1990/#flow/e70a201b5f004927</code>）粘贴进来。
     网关会<b>只读</b>自省该 tab，判断能否注册成可调用 API——之后 agent 写 flow 时说「使用 TTS」或「智能语音播报队列」即可调用。不会改动你的 NR 流。</p>
     <div class="field"><label>tab 链接</label><input id="lt-url" placeholder="http://host:1990/#flow/<tabid>"></div>
     <button class="btn primary" id="lt-detect">检测能否注册</button>

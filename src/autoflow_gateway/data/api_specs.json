@@ -1,5 +1,193 @@
 [
   {
+    "name": "llm_doubao_chat",
+    "title": "豆包大模型对话",
+    "kind": "http_api",
+    "url": "http://<NAS_IP>:1880/llm/chat",
+    "method": "POST",
+    "extract": "payload.reply",
+    "entry_link_id": "",
+    "nr_downstream_link_id": "",
+    "nr_assemble": "",
+    "params": {
+      "user_msg": {
+        "name": "user_msg",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "用户消息内容"
+      },
+      "user": {
+        "name": "user",
+        "required": false,
+        "default": "大佬",
+        "type": "str",
+        "enum": null,
+        "desc": "对话人设：大佬/凯文/爱美丽"
+      },
+      "scenario": {
+        "name": "scenario",
+        "required": false,
+        "default": "书房",
+        "type": "str",
+        "enum": null,
+        "desc": "场景标签，影响记忆隔离与语气（中枢按 人设+场景 存对话历史）"
+      },
+      "model": {
+        "name": "model",
+        "required": false,
+        "default": "doubao",
+        "type": "str",
+        "enum": null,
+        "desc": "模型名"
+      }
+    },
+    "description": "调用豆包中枢生成中文回复（闲聊/提醒/总结/文生图描述等）。网关自动拼装请求体、调用、提取 reply，agent 完全不接触 URL/鉴权/JSON 解析。返回 reply 字段（msg.payload.reply）供后续 提取/调用子流程 复用。",
+    "notes": "底层走家中豆包中枢（NR d5a38c4777f84f35，已自带按 人设+场景 的对话记忆）。调用后 reply 在 msg.payload.reply，例：提取: 回复 = payload.reply → 调用子流程: demo_notify(text=`回复`)。kind=http_api 由编译器内联为 change(设参)→http request→(reply 落在 msg.payload)，无需 NR 子流程定义。",
+    "nr_tab": false,
+    "nr_headers": {},
+    "nr_body_template": "",
+    "nr_out_links": [],
+    "nr_debug": true,
+    "self_use": true
+  },
+  {
+    "name": "llm_doubao_say",
+    "title": "豆包对话并语音播报",
+    "kind": "link_out",
+    "url": "http://<NAS_IP>:1880/llm/chat",
+    "method": "POST",
+    "extract": "payload.reply",
+    "entry_link_id": "af_apisay_in",
+    "nr_downstream_link_id": "b595563939283231",
+    "nr_assemble": "{\"text\": payload.reply, \"room\": payload.scenario, \"level\": \"一般\"}",
+    "params": {
+      "user_msg": {
+        "name": "user_msg",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "用户消息内容"
+      },
+      "user": {
+        "name": "user",
+        "required": false,
+        "default": "大佬",
+        "type": "str",
+        "enum": null,
+        "desc": "对话人设：大佬/凯文/爱美丽"
+      },
+      "scenario": {
+        "name": "scenario",
+        "required": false,
+        "default": "书房",
+        "type": "str",
+        "enum": null,
+        "desc": "场景标签（同时作为 TTS 播报房间）"
+      },
+      "model": {
+        "name": "model",
+        "required": false,
+        "default": "doubao",
+        "type": "str",
+        "enum": null,
+        "desc": "模型名"
+      }
+    },
+    "description": "调用豆包对话并把回复自动语音播报（fire-and-forget）。底层 flow 位于「AutoFlow API」tab，经 link out 进 TTS 队列。agent 无需接触 URL/鉴权，一行即可「聊天+播报」。",
+    "notes": "与 llm_doubao_chat 区别：say 是 fire-and-forget（自动播报、不回传 reply）；chat 是 request-response（回传 reply 供 提取/链式调用）。两者都走家中豆包中枢。entry_link_id=af_apisay_in 指向「AutoFlow API」tab 内的 llm_doubao_say 入口；该入口及后端 http/组装/link out 链由 api_specs.build_nr_tab_flows 从本 spec 自动生成，不再手搓（避免 网关注册 与 NR flow 两处不一致）。",
+    "nr_tab": false,
+    "nr_headers": {},
+    "nr_body_template": "",
+    "nr_out_links": [],
+    "nr_debug": true,
+    "self_use": true
+  },
+  {
+    "name": "llm_doubao_image",
+    "title": "豆包文生图",
+    "kind": "http_api",
+    "url": "http://<NAS_IP>:1880/llm/image",
+    "method": "POST",
+    "extract": "payload.image_url",
+    "entry_link_id": "",
+    "nr_downstream_link_id": "",
+    "nr_assemble": "",
+    "params": {
+      "prompt": {
+        "name": "prompt",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "图片描述（如 '一只赛博朋克风格的猫'）"
+      },
+      "model": {
+        "name": "model",
+        "required": false,
+        "default": "doubao",
+        "type": "str",
+        "enum": null,
+        "desc": "模型名"
+      }
+    },
+    "description": "调用豆包中枢生成图片（文生图），返回图片 URL（msg.payload.image_url）。网关自动拼装请求体、调用、提取 image_url，agent 不接触 URL/鉴权。例：调用子流程: llm_doubao_image(prompt=`一只猫`) → 提取: 图片链接 = payload.reply。",
+    "notes": "底层走家中豆包中枢（NR d5a38c4777f84f35）的 /llm/image 端点。响应体 {image_url} 规整进 msg.payload.image_url。kind=http_api 由编译器内联为 change(设参)→http request→(image_url 落在 msg.payload.image_url)，无需 NR 子流程定义。",
+    "nr_tab": false,
+    "nr_headers": {},
+    "nr_body_template": "",
+    "nr_out_links": [],
+    "nr_debug": true,
+    "self_use": true
+  },
+  {
+    "name": "llm_doubao_vision",
+    "title": "豆包视觉理解",
+    "kind": "http_api",
+    "url": "http://<NAS_IP>:1880/llm/vision",
+    "method": "POST",
+    "extract": "payload.reply",
+    "entry_link_id": "",
+    "nr_downstream_link_id": "",
+    "nr_assemble": "",
+    "params": {
+      "prompt": {
+        "name": "prompt",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "针对图片的提问/指令（如 '描述这张图'、'图里有几只猫'）"
+      },
+      "image": {
+        "name": "image",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "图片来源：http(s) URL，或 base64 字符串（中枢自动加 data:image/jpeg;base64, 前缀）"
+      },
+      "model": {
+        "name": "model",
+        "required": false,
+        "default": "doubao",
+        "type": "str",
+        "enum": null,
+        "desc": "视觉模型名（中枢缺省 'doubao'）"
+      }
+    },
+    "description": "调用豆包中枢做视觉理解（图生文），返回文字描述（msg.payload.reply）。网关自动拼装 {prompt, image, model} 请求体并提取 reply，agent 不接触 URL/鉴权。例：调用子流程: llm_doubao_vision(prompt=`描述这张图`, image=`https://...`) → 提取: 回复 = payload.reply。",
+    "notes": "底层走家中豆包中枢（NR d5a38c4777f84f35）的 /llm/vision 端点。中枢编排：body.prompt（缺省 '描述这张图片'）、body.image（URL 或 base64）、body.model（缺省 'doubao'）→ POST doubao2api 视觉接口，响应体 {reply}；网关把 reply 规整进 msg.payload.reply。kind=http_api 由编译器内联为 change(设参)→http request→(reply 落在 msg.payload.reply)，无需 NR 子流程。",
+    "nr_tab": false,
+    "nr_headers": {},
+    "nr_body_template": "",
+    "nr_out_links": [],
+    "nr_debug": true,
+    "self_use": true
+  },
+  {
     "name": "llm_caiyun_weather",
     "title": "彩云天气",
     "kind": "link_out",

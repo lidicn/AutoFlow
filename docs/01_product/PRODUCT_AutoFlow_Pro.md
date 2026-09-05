@@ -281,13 +281,13 @@ curl -fsSL https://raw.githubusercontent.com/lidicn/AutoFlow/main/core/install-p
 配置文件：`~/.autoflow-pro/config.json`
 ```json
 {
-  "gateway_url": "http://192.168.2.200:8000",
-  "api_key": "af_pro_xxxxxx",
+  "gateway_url": "http://<NAS_IP>:8000",
+  "api_key": "<AF_PRO_KEY>",
   "agent_id": "my-agent",
   "default_mode": "dsl",
   "auto_deploy": true,
   "offline_fallback": true,
-  "nr_direct_url": "http://192.168.2.200:1880"
+  "nr_direct_url": "http://<NAS_IP>:1880"
 }
 ```
 

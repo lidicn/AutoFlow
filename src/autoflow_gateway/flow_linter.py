@@ -1919,11 +1919,14 @@ def _scan_dangerous_patterns(code: str) -> List[str]:
 
 
 def _ssrf_host_warn(url: str) -> List[str]:
-    """WB87 R2：http request host 内网/回环/链路本地/模板注入告警（warning，不阻断）。
+    """WB87 R2：http request host 内网/回环/链路本地/模板注入检测。
 
     与 dsl_engine._validate_request_host（compile 期硬拦 链路本地/回环/元数据/模板宿主）互补：
     此处对 RFC1918 私网段发 warning（网关合法控 LAN，仅告警供人审），并对 raw/native 流
     做纵深防御。公网域名/IP 不告警，避免误伤 example.com 等合法调用。
+
+    P0-2 修复：所有内网IP（回环/链路本地/私有）均升级为 error，阻断部署。
+    返回格式：[{\"level\": \"error\"|\"warning\", \"message\": \"...\"}, ...]
     """
     if not isinstance(url, str) or not url.strip():
         return []
@@ -1936,26 +1939,40 @@ def _ssrf_host_warn(url: str) -> List[str]:
         return []
     # 动态表达式 / 模板注入宿主（运行时由变量拼出）
     if re.search(r"[\$`]|{{|\${", host):
-        return ["host 含动态表达式（SSRF/模板注入风险，运行时由 flow 变量拼出并解析）"]
+        return [{"level": "error", "message": "host 含动态表达式（SSRF/模板注入风险，运行时由 flow 变量拼出并解析）"}]
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
         return []  # 域名（元数据域名已由 _DANGEROUS_CODE_PATTERNS 覆盖）
     if ip.is_loopback:
-        return [f"host 命中回环地址（SSRF 风险，可访问本机服务）：{host}"]
+        return [{"level": "error", "message": f"host 命中回环地址（SSRF 风险，可访问本机服务）：{host}"}]
     if ip.is_link_local:
-        return [f"host 命中链路本地地址（云元数据 SSRF 风险）：{host}"]
+        return [{"level": "error", "message": f"host 命中链路本地地址（云元数据 SSRF 风险）：{host}"}]
     if ip.is_private:
-        return [f"host 命中私网/RFC1918 地址（SSRF 风险，可访问内网设备如路由器/NAS/HA）：{host}"]
+        return [{"level": "error", "message": f"host 命中私网/RFC1918 地址（SSRF 风险，可访问内网设备如路由器/NAS/HA）：{host}"}]
     return []
 
 
-def _r40_warning(nid: str, ntype: str, hits: List[str]) -> Dict[str, str]:
+def _r40_warning(nid: str, ntype: str, hits: List[Dict[str, str]]) -> Dict[str, str]:
+    """构造 R40 issue，根据 hits 中的最高级别决定返回级别。
+    
+    P0-2: 支持 hits 中包含 level 字段，自动提升 issue 级别。
+    """
+    # 如果有 error 级别的 hits，则整体升级为 error
+    has_error = any(h.get("level") == "error" for h in hits if isinstance(h, dict))
+    level = "error" if has_error else "warning"
+    # 提取消息文本
+    messages = []
+    for h in hits:
+        if isinstance(h, dict):
+            messages.append(h.get("message", str(h)))
+        else:
+            messages.append(str(h))
     return {
-        "level": "warning", "rule": "R40", "node_id": nid,
+        "level": level, "rule": "R40", "node_id": nid,
         "node_type": ntype,
         "message": (
-            f"`{ntype}` 节点的代码含**潜在危险调用**：{'；'.join(hits)}。"
+            f"`{ntype}` 节点的代码含**潜在危险调用**：{'；'.join(messages)}。"
             f"这类节点在 NR 运行时拥有 Node.js 进程权限，可被执行系统命令/读文件/SSRF/"
             f"MQTT 投毒，危害 NR 服务器安全。若这是你预期的合法自动化（如调用本地脚本），"
             f"可忽略本条警告；否则请改用更安全的替代（如 api-call-service 调用 HA 服务、"

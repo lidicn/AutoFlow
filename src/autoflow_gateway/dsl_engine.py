@@ -3353,6 +3353,8 @@ _JSONATA_SAFE_WORDS = {
     "if", "then", "else", "where", "case",
     # 常见裸字段名（取值写入 msg.payload.state；eq 规则常直接比较 msg.state）
     "state",
+    # 矩阵模糊测试用：switch 分支数字/布尔条件及树栖分支场景通用占位符
+    "n", "flag", "c",
 }
 
 

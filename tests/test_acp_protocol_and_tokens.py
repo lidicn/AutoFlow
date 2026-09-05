@@ -229,6 +229,8 @@ def _webui_app(monkeypatch, tmpdir):
     monkeypatch.setattr(webui_mod, "_bootstrap_webui_token", lambda c: None)
     monkeypatch.setattr(webui_mod, "_resolve_webui_token", lambda c: None)
     monkeypatch.setattr(webui_mod, "_is_loopback", lambda scope: True)
+    # token_only 模式：无用户时本机（loopback）自动放行，ACP 签发端点在本机可达
+    monkeypatch.setenv("AF_WEBUI_TOKEN_MODE", "token_only")
     return webui_mod.build_webui_asgi(cfg)
 
 

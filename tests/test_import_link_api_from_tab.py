@@ -99,7 +99,7 @@ class TestImportLinkApiFromTab(unittest.TestCase):
     def test_import_from_url_draft(self):
         r = self.client.post(
             "/api/link-apis/import-from-url",
-            json={"url": f"http://192.168.2.200:1990/#flow/{TAB_ID}"})
+            json={"url": f"http://<NAS_IP>:1990/#flow/{TAB_ID}"})
         self.assertEqual(r.status_code, 200, r.text)
         d = r.json()
         self.assertTrue(d["ok"])

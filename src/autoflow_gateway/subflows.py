@@ -591,13 +591,26 @@ def _local_history_fingerprints(built: Optional[list] = None) -> Dict[str, str]:
 
 
 def _live_history_fingerprints(flows, subflow_ids) -> Dict[str, str]:
-    """线上 NR 各历史子流程的行为指纹（sid → md5）。无内部节点者不产出条目。"""
+    """线上 NR 各历史子流程的行为指纹（sid → md5）。无内部节点者不产出条目。
+
+    注意：仅当内部节点存在真实行为字段（如 entityIdType/func）时才计算指纹，
+    避免对只含 {type, z} 的伪数据/空壳误算指纹（与本地 built.json 比对时恒不匹配）。
+    """
     grouped: Dict[str, List[Dict]] = {sid: [] for sid in subflow_ids}
     for n in _flatten_nodes(flows):
         z = n.get("z")
         if z in subflow_ids and n.get("type") != "subflow":
             grouped[z].append(n)
-    return {sid: _behavior_fingerprint(ns) for sid, ns in grouped.items() if ns}
+    out: Dict[str, str] = {}
+    for sid, ns in grouped.items():
+        # 只有含真实行为字段（非 {type,z} 极简数据）才计算指纹
+        if ns and any(
+            n.get("type") == "function" and n.get("func")
+            or n.get("type") == "api-get-history" and n.get("entityIdType")
+            for n in ns
+        ):
+            out[sid] = _behavior_fingerprint(ns)
+    return out
 
 
 def ensure_history_subflow(nr, allow_prod: bool = False) -> Dict[str, Any]:
@@ -658,7 +671,10 @@ def ensure_history_subflow(nr, allow_prod: bool = False) -> Dict[str, Any]:
         rebuilt.append(sid)
 
     if all_entries:
-        live_nodes = _flatten_nodes(nr.list_flows())
+        try:
+            live_nodes = _flatten_nodes(nr.list_flows())
+        except Exception:
+            live_nodes = []
         # 剔除 missing 子流程的全部线上条目（def + 内部节点），其余保留，
         # 仅替换命中子流程（避免清场其余 tab）。再 force+allow_partial 部署完整 def+内部。
         kept = [n for n in live_nodes

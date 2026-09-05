@@ -1,7 +1,7 @@
 # AutoFlow 核心版使用反馈
 
 **日期**：2026-09-02
-**测试环境**：Node-RED 192.168.2.200:1880（生产实例）
+**测试环境**：Node-RED <NAS_IP>:1880（生产实例）
 **测试任务**：TV Cam 智能保活 flow 编写与部署
 
 ---
@@ -96,7 +96,7 @@ Content-Type: application/json
 ```
 每2分钟触发 (inject, repeat=120s)
     ↓
-HTTP 健康检查 (GET http://192.168.2.238:8080/api/health)
+HTTP 健康检查 (GET http://<CAM_IP>:8080/api/health)
     ↓
 判断是否需要拉起 (function: 检查 statusCode + payload)
     ↓
@@ -224,7 +224,7 @@ App 内定期发送广播保持 ADB 唤醒，但普通第三方 App 无法控制
 
 ## 七、相关链接
 
-- Node-RED：http://192.168.2.200:1880
-- 保活 flow：http://192.168.2.200:1880/#flow/1e2e8cfcb942bc34
-- TV Cam 健康检查：http://192.168.2.238:8080/api/health
+- Node-RED：http://<NAS_IP>:1880
+- 保活 flow：http://<NAS_IP>:1880/#flow/1e2e8cfcb942bc34
+- TV Cam 健康检查：http://<CAM_IP>:8080/api/health
 - autoflow core：https://github.com/lidicn/AutoFlow/tree/master/core

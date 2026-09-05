@@ -19,7 +19,7 @@
 
 ## 测试环境
 
-- 测试机：\\100.112.138.64\share\AutoFlowTestv2
+- 测试机：\\ <SHARE_IP>\share\AutoFlowTestv2
 - AutoFlow 版本：需在线更新到 v1.3.3
 - Node-RED：需可访问
 - 测试前务必备份 Node-RED flows

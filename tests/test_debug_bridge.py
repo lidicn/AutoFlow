@@ -121,11 +121,12 @@ class TestBufferAndRead(unittest.TestCase):
         b = make_bridge()
         b._handle_message(json.dumps({"topic": "debug", "data": {
             "id": "n1", "name": "d", "msg": "v1", "_path": {"id": "f1"}}}))
+        time.sleep(0.01)  # 确保 received_at 严格递增，sort reverse 稳定
         b._handle_message(json.dumps({"id": "n2", "msg": "v2", "z": "f1"}))
         res = b.read()
         self.assertTrue(res["ok"])
         self.assertEqual(res["count"], 2)
-        # 倒序：最后写入的在最前
+        # 倒序：最后写入的在最前（received_at 严格递增）
         self.assertEqual(res["events"][0]["node_id"], "n2")
 
     def test_filter_by_node(self):

@@ -78,7 +78,7 @@ class TestSubflowWebUI(unittest.TestCase):
         r = self.client.get("/api/subflows")
         self.assertEqual(r.status_code, 200)
         body = r.json()
-        self.assertEqual(body["count"], 9)    # 5 subflow + 4 link_out
+        self.assertEqual(body["count"], 7)    # 5 subflow + 2 link_out (demo_notify + llm_doubao_say)
         keys = {s["key"] for s in body["subflows"]}
         self.assertEqual(keys, SUBFLOW_KEYS | LINKOUT_KEYS)
         for s in body["subflows"]:
@@ -107,7 +107,7 @@ class TestSubflowWebUI(unittest.TestCase):
         self.assertEqual(body["introspect"]["nr_subflow_id"], "sf_dummy_99")
         # 列表新增 imported 一条（共 10）
         lst = self.client.get("/api/subflows").json()
-        self.assertEqual(lst["count"], 10)
+        self.assertEqual(lst["count"], 8)    # 7 managed + 1 imported
         imported = [s for s in lst["subflows"] if s["key"] == "my_dummy"]
         self.assertEqual(len(imported), 1)
         m = imported[0]

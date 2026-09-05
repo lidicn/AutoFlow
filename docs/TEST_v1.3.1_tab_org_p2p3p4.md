@@ -20,7 +20,7 @@
 
 ## 测试环境
 
-- 测试机：\\100.112.138.64\share\AutoFlowTestv2
+- 测试机：\\ <SHARE_IP>\share\AutoFlowTestv2
 - AutoFlow 版本：v1.3.1（需先在线更新到最新版）
 - Node-RED：需可访问
 - Home Assistant：需可访问

@@ -56,12 +56,12 @@ class TestWebUI(TmpCfgMixin, unittest.TestCase):
             "AF_WEBUI_OPEN_REGISTER": os.environ.get("AF_WEBUI_OPEN_REGISTER"),
         }
         os.environ["AF_WEBUI_TOKEN_MODE"] = "both"
-        os.environ["AF_WEBUI_TOKEN"] = "test-webui-shared-token"
+        os.environ["AF_WEBUI_TOKEN"] = "test-webui-tok"
         os.environ["AF_WEBUI_OPEN_REGISTER"] = "1"
         self.gw = Gateway(self.cfg)
         self.app = build_webui_asgi(self.cfg, gateway=self.gw)
         self.client = TestClient(self.app)
-        self.client.headers["Authorization"] = "Bearer test-webui-shared-token"
+        self.client.headers["Authorization"] = "Bearer test-webui-tok"
         self.client.__enter__()
 
     def tearDown(self):

@@ -37,7 +37,7 @@ def _flows(tab_id, entry_type, internal_extra=None):
 class TestParseTabUrl(unittest.TestCase):
     def test_full_editor_url(self):
         self.assertEqual(
-            _parse_tab_url("http://192.168.2.200:1990/#flow/e70a201b5f004927"),
+            _parse_tab_url("http://<NAS_IP>:1990/#flow/e70a201b5f004927"),
             "e70a201b5f004927")
 
     def test_bare_hash(self):

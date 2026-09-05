@@ -10,12 +10,12 @@ services:
     container_name: autoflow-v2
     restart: unless-stopped
     ports:
-      - "8002:8000"  # MCP + WebUI（实验版，与主版 8000 隔离）
+      - "8002:8000"  # MCP + WebUI（实验版，与主版 8000 隔离；绑定到 LAN IP 通过 HASS_SERVER/NR_URL 环境变量控制）
     environment:
       - AUTOFLLOW_ENV=staging
-      - HASS_SERVER=http://192.168.2.200:8123
+      - HASS_SERVER=${HASS_SERVER:-http://localhost:8123}
       - HASS_TOKEN=${HASS_TOKEN}
-      - NR_URL=http://192.168.2.200:1880
+      - NR_URL=${NR_URL:-http://localhost:1880}
       - NR_USER=${NR_USER}
       - NR_PASS=${NR_PASS}
       - AF_MCP_HOST=0.0.0.0
@@ -30,7 +30,7 @@ services:
     networks:
       - autoflow-v2-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/core/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
