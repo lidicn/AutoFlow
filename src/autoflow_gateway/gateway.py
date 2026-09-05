@@ -5667,6 +5667,7 @@ class Gateway:
                 "ok": False, "stage": "schema_block",
                 "error": "flow 含致命 schema 错误，已拒绝落提案",
                 "schema_blocking": _schema_blocking,
+                "would_block_on_schema": True,
                 "lint_error_count": sum(1 for v in lint_issues if v["level"] == "error"),
                 "lint_warning_count": sum(1 for v in lint_issues if v["level"] == "warning"),
                 "would_block_rules": sorted({b.get("rule") for b in _blocking}),
@@ -8086,6 +8087,9 @@ class Gateway:
                     except Exception:
                         parse_failed = True
                         continue          # 非 JSON / 被截断 → 跳过，不猜
+                    if isinstance(payload, dict) and payload.get("__truncated__"):
+                        parse_failed = True
+                        continue          # 被截断的 JSON（含 __truncated__ 标记）→ 跳过
                 elif not isinstance(payload, dict):
                     continue
                 if isinstance(payload, dict) and payload.get("entity_id"):
