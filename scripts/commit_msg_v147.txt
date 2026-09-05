@@ -1,0 +1,13 @@
+fix(v1.4.7): 在线更新 remote 恢复逻辑 + fetch 超时 + 更多镜像
+
+【关键修复】在线更新 remote 恢复逻辑：
+- 之前 fetch 失败时 remote 可能没有被恢复，导致 origin 永久指向失效镜像
+- 改用 try-finally 确保无论 fetch 成功还是失败，都恢复原 remote
+
+【健壮性改进】
+- fetch 增加 60 秒超时，避免网络问题时无限等待
+- fetch 失败时显示 git 详细错误信息（stderr 前 200 字符）
+
+【镜像扩展】
+- 镜像选项从 3 个增加到 6 个：新增 kkgithub、gitmirror
+- 增加「自定义镜像」输入框，用户可输入任意镜像 URL

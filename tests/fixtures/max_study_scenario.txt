@@ -1,0 +1,53 @@
+═════════════════════════════════════════════════════
+【给黑箱的自然语言提示词】（直接丢给 AutoFlow 黑箱测试）
+═════════════════════════════════════════════════════
+书房有人时，如果在晚上 18:00 到 23:00 之间、并且书房主灯当前是关的，
+就打开书房主灯（亮度 60%、色温 4000K），然后用轻松自然的语气说一句
+"欢迎回书房，已为你打开护眼灯"；等 5 秒后，调用豆包大模型生成一句
+提醒该休息的话，再播报出来。如果灯本来就是开着的，就只说一句
+"书房灯已亮着，无需重复开启"。
+接着读取书房温度和湿度，如果温度高于 28 度就说"室温偏高，建议开启空调"，
+否则说"室温舒适，无需开空调"。
+同时查询一下书房主灯过去 24 小时的开灯历史记录，统计开灯次数。
+最后并行做两件事：播报"正在同步书房设备状态"和"已为你播报环境数据"。
+（注：把上面这些设备名换成你设备目录里真实存在的实体，例如"书房主灯"
+对应 light.study_main、"书房人体感应"对应 binary_sensor.study_motion、
+"书房温度/湿度"对应 sensor.study_temperature / sensor.study_humidity）
+
+═════════════════════════════════════════════════════
+【黑箱应产出的参考 DSL】（可直接贴到 autoflow_propose_dsl 验证）
+═════════════════════════════════════════════════════
+场景: 书房全场景智能中枢
+触发: binary_sensor.study_motion 有人
+时间段: 18:00-23:00
+查询: light.study_main 关
+    动作: light.turn_on(light.study_main, brightness=60, kelvin=4000)
+    调用子流程: demo_notify(text=欢迎回书房，已为你打开护眼灯, room=书房, level=一般)
+    延时: 5
+    构建: {"model":"doubao","messages":[{"role":"user","content":"用轻松语气提醒用户该休息了"}]}
+    请求: POST http://<NAS_IP>:9090/v1/chat/completions Content-Type=application/json
+    提取: 提醒 = payload.choices[0].message.content
+    调用子流程: demo_notify(text=`提醒`, room=书房, level=一般)
+否则:
+    调用子流程: demo_notify(text=书房灯已亮着，无需重复开启, room=书房, level=一般)
+取值: sensor.study_temperature 温度
+取值: sensor.study_humidity 湿度
+提取: 温度数值 = $number(温度)
+分支: 温度数值 > 28
+    调用子流程: demo_notify(text=室温偏高，建议开启空调, room=书房, level=一般)
+否则:
+    调用子流程: demo_notify(text=室温舒适，无需开空调, room=书房, level=一般)
+历史: light.study_main relative=24h
+提取: 昨夜开灯次数 = $count(history)
+并行:
+    调用子流程: demo_notify(text=正在同步书房设备状态, room=书房, level=一般)
+    调用子流程: demo_notify(text=已为你播报环境数据, room=书房, level=一般)
+变量: 提醒语气 = 轻松
+预期:
+    light.study_main = on
+
+═════════════════════════════════════════════════════
+【已验证】上面 DSL 离线编译 = 29 节点 / 0 lint error；
+run_staging_gate 分支感知重放 = 放行，仅命中分支的 light.turn_on 被重放，
+3 条 tts 按分支路由记录，light 终态 = on。
+═════════════════════════════════════════════════════

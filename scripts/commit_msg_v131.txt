@@ -1,0 +1,27 @@
+feat: v1.3.1 Tab 组织模式 P2/P3/P4
+
+## P2 模式切换+一键迁移
+- 新增 per_flow ↔ single_tab 双向迁移功能
+- 迁移过程：重新分配坐标 → 生成边界comment → 平移节点 → 合并/拆分 tab → 删除原 tab → 更新账本
+- WebUI 高级设置页提供迁移按钮和状态统计（独立tab/单tab flow数量）
+- 迁移前确认对话框，建议备份Node-RED flows
+- 新增 API：GET /api/tab-org/status、POST /api/tab-org/migrate
+
+## P3 自动分流预警
+- 单 tab 模式下监控 AutoFlow tab 节点总数
+- 超过阈值（默认200，可通过 AF_SINGLE_TAB_WARN_THRESHOLD 配置）时显示黄色预警卡片
+- 预警信息包含当前节点数和阈值，建议分流或切换回独立tab模式
+
+## P4 混合模式
+- deploy_proposal 增加 target_tab 参数
+- 单个 flow 可手动指定目标 tab（按 tab id 或 label 匹配，不存在则自动创建）
+- flow_catalog 记录 tab_org_mode=mixed, tab_id=目标tab
+- 撤回逻辑支持 mixed 模式，按 tab_id 读取对应 tab精确删除
+
+## 其他
+- 撤回逻辑统一支持 single_tab/mixed 模式
+- WebUI 高级设置页重构：预警显示 + 迁移统计 + 一键迁移 + 混合模式说明
+- 新增测试工单 docs/TEST_v1.3.1_tab_org_p2p3p4.md
+
+## 版本
+- VERSION → 1.3.1

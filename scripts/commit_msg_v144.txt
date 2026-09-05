@@ -1,0 +1,17 @@
+fix(v1.4.4): 实施 wb2 测试报告中的两个观察项修复
+
+【观察项1】撤回 fail-atomic
+- 根因：NR 侧删除/更新失败时仍清账本，导致"注册表说已删但 NR 实际没删"
+  的不一致，出现孤儿边界注释残留、网关节点实际未删等问题
+- 修复：NR 写失败时不清账本，返回 ok=False + 明确错误信息
+  用户可修复 NR 侧问题后重试撤回，保持注册表与 NR 实际状态一致
+
+【观察项2】部署归一化副作用（server_resolved 改写无关节点）
+- 根因：nr_client._normalize_api_call_service 对所有 api-call-service 节点
+  做 action ⇄ domain/service 双向补全，包括用户手动添加的节点
+  （如「💾 存档」节点的空 domain/service 被补为 input_text/set_value）
+- 修复：只正向补全 action（从 domain+service 推出，v7 必需），
+  不反向补全 domain/service（v7 可选，非必须）
+  避免改写用户节点的原始字段
+
+wb2 v1.4.2 测试报告的两个观察项均已实施。

@@ -1,0 +1,18 @@
+feat(v1.4.8): 授权码多tab绑定 + 节点数统计修复
+
+【Bug修复】/api/nr/tabs 节点数统计全部为0
+- Node-RED flows 是扁平结构，tab 节点不含 nodes 数组
+- 普通节点通过 z 字段指向所属 tab
+- 改为按 z 字段统计每个 tab 的节点数
+
+【新功能】授权码支持多tab绑定
+- 创建授权码时可勾选多个目标 tab
+- Agent 只能在这些 tab 内部署/修改，不会越界
+- validate_token 增加 target_tab 越界检查
+
+【前端改进】目标tab从下拉单选改为多选勾选框
+- 增加「绑定到指定 tab」总开关
+- 未勾选时走 per_flow 模式
+- 勾选框显示 tab 名称和节点数
+
+【兼容处理】target_tabs 与旧字段 target_tab 双向兼容

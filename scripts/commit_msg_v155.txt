@@ -1,0 +1,12 @@
+fix(v1.5.5): 修复 propose-dsl target_tab 死参数 + version 返回 unknown
+
+【P1 修复】REST propose-dsl target_tab 死参数
+- 根因：core_propose_dsl 未读取 target_tab 参数，也未传给 _require_api_key
+- 影响：API Key 的 authorized_tabs 授权限制完全不生效，任何 Key 可向任意 tab 提交
+- 修复：显式读取 target_tab，传入 _require_api_key 做越界校验
+- 未授权 tab 返回 403「tab 不在授权范围内」
+- 响应回显 target_tab 和 authorized_tabs 字段
+
+【修复】/api/core/version 返回 unknown
+- 根因：VERSION 文件路径计算错误（少了一级目录）
+- 修复：修正为项目根目录的 VERSION 文件

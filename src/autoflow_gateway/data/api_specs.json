@@ -1,0 +1,60 @@
+[
+  {
+    "name": "llm_caiyun_weather",
+    "title": "彩云天气",
+    "kind": "link_out",
+    "url": "https://api.caiyunapp.com/v2.7/<CAIYUN_TOKEN>/<CAIYUN_LON>,<CAIYUN_LAT>/weather?alert=true",
+    "method": "GET",
+    "extract": "payload.result",
+    "entry_link_id": "af_weather_in",
+    "nr_downstream_link_id": "",
+    "nr_assemble": "",
+    "params": {},
+    "description": "查询彩云天气（默认坐标占位，含预警 alert=true）。返回 result 对象（实时温度/天气/未来小时与每日预报/预警）落在 msg.payload.reply。",
+    "notes": "GET 接口、无请求体。网关 AutoFlow API tab 后端做「必填校验 + HTTP 状态错误处理」，result 经 link out 转发（用户可接 debug 观测或接下游）。黑箱可 调用子流程: llm_caiyun_weather() 触发。⚠️ URL 内 <CAIYUN_TOKEN>/<CAIYUN_LON>,<CAIYUN_LAT> 均为占位符，部署前需替换为你的彩云 token 与坐标。",
+    "nr_tab": true,
+    "nr_headers": {},
+    "nr_body_template": "",
+    "nr_out_links": [],
+    "nr_debug": true
+  },
+  {
+    "name": "anysearch_batch",
+    "title": "AnySearch 资讯搜索",
+    "kind": "link_out",
+    "url": "https://api.anysearch.com/mcp",
+    "method": "POST",
+    "extract": "payload.result",
+    "entry_link_id": "af_anysearch_in",
+    "nr_downstream_link_id": "",
+    "nr_assemble": "",
+    "params": {
+      "keywords": {
+        "name": "keywords",
+        "required": true,
+        "default": null,
+        "type": "str",
+        "enum": null,
+        "desc": "要搜索的关键词，逗号分隔（如 'mac mini m5, 小米智能存储, 苹果眼镜'）"
+      },
+      "max_results": {
+        "name": "max_results",
+        "required": false,
+        "default": 5,
+        "type": "str",
+        "enum": null,
+        "desc": "每个词返回条数（默认 5，anysearch 上限 5）"
+      }
+    },
+    "description": "调用 AnySearch MCP 批量搜索资讯。keywords 逗号分隔，自动展开为多个查询（各加'最新资讯'）。返回 result 落在 msg.payload.reply。",
+    "notes": "POST JSON-RPC 到 api.anysearch.com/mcp，Bearer 鉴权（<ANYSEARCH_API_KEY> 占位，部署前替换）；网关 tab 后端自动构造信封 + 校验必填 + HTTP 错误处理。黑箱可 调用子流程: anysearch_batch(keywords=`mac mini m5, 苹果眼镜`)。",
+    "nr_tab": true,
+    "nr_headers": {
+      "Authorization": "Bearer <ANYSEARCH_API_KEY>",
+      "Content-Type": "application/json"
+    },
+    "nr_body_template": "{'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'batch_search','arguments':{'queries':$split(payload.keywords, /\\s*,\\s*/).{'query': $ & ' 最新资讯', 'max_results': (payload.max_results or 5)}}}}",
+    "nr_out_links": [],
+    "nr_debug": true
+  }
+]

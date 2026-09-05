@@ -1,0 +1,100 @@
+# 凭证 / 本地环境（含 NR/HA 密码，切勿提交）
+.env
+.env.*
+!.env.example
+# WebUI 访问令牌（af-ui-...，切勿提交）
+**/.webui_token
+# 交接/运营文档（含内网 IP、明文令牌路径、个人 NAS 拓扑，不进版本库）
+HANDOFF_*
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 运行时数据（部署账本、待确认、备份等）
+# ★必须写成 `/data/` 锚定仓库根。曾写作 `data/`（无斜杠）→ git 递归匹配任意层级，
+#   把 src/autoflow_gateway/data/（发布版内置 spec 数据）一并排除；而且目录级排除后
+#   git 不再遍历该目录，下方 `!src/autoflow_gateway/data/**.json` 白名单会【完全失效】，
+#   导致发布包缺 api_specs.json，安装后 loader 直接 FileNotFoundError（#708 同类）。
+/data/
+*.log
+
+# 工作记忆（含 MCP 身份码等明文，切勿提交）
+.workbuddy/
+
+# 含 Bark key 的散落文件（任意层级）
+bark_full.json
+bark_notify.js
+
+# Node-RED 凭据（含 HA token + credentialSecret，切勿提交）
+flows_cred.json
+
+# 第三方服务安装器（可重新下载，非源码）
+nssm.exe
+
+# ===== AutoFlow 含密钥/产物的散落文件（不进版本库）=====
+# 真实 flow 导出（含 HA JWT / Basic Auth 明文密码 / NAS IP）
+*.json
+# 发布版内置 spec 数据（占位符，无密钥，必须进版本库）
+# ★白名单生效前提：父目录未被目录级规则排除（见上方 /data/ 注释）
+!src/autoflow_gateway/data/api_specs.json
+!src/autoflow_gateway/data/subflows/*.json
+!src/autoflow_gateway/data/subflows/nr_defs/*.json
+# 教学示例 JSON（README 直接引用，纯占位符无密钥，必须随发布版分发）
+!examples/scene_home_arrive.json
+!examples/subflows/*.json
+# 历史备份目录
+backups/
+nr_backup/
+# autoflow_gateway 根下调试 / 临时脚本
+# ★注意：`_*.py` 不带斜杠 → git 会【递归匹配任意目录】，曾误伤
+#   src/autoflow_gateway/__init__.py（下划线开头）导致包入口从未进版本库，
+#   clone 出来 `from autoflow_gateway import Gateway` 直接坏（#708 同类）。
+#   下面的 `!__init__.py` 是必需豁免，勿删。
+_*.py
+!__init__.py
+_bark_watch.py
+_build_night_home.py
+# 运行/验证产物目录
+verify_out/
+.verify/
+_archive_restarts/
+# 根目录调试脚本与临时 bat
+/_d*.py
+/_db*.py
+/_di*.py
+/_fix_*.py
+/*.bat
+
+# A4 归档区：根目录临时脚本与一次性 flow 导出移入此处（不进版本库）
+scratch/
+
+# 深层历史调试目录（build_subflows.py 等 dev 脚本，不随发布版分发）。
+# R2 起唯一的运行时依赖 subflows_built.json 已迁至 data/subflows/nr_defs/，
+# 此处不再有需白名单放行的文件（少一处「被排除目录内捞文件」的脆弱模式）。
+src/autoflow_gateway/nr_subflows/
+# Windows 服务脚本（install_service.ps1 / uninstall_service.ps1 等）不发布
+*.ps1
+# 根目录 backups（区别于 backups）
+/backups/
+# 运行/调试产物（非 .log 后缀）
+*.err
+_*.md
+_*.jsonl
+
+# 个人 HA 配置导出（含 Bark key / NAS IP，非 AutoFlow 源码）
+/smarthome-assistant/
+
+# ===== 收敛补充（2026-08-14）：本地散落备份/缓存不进版本库 =====
+.cbcache/
+src_backup_*/
+skills_backup*/
+*.bak-*/
+
+# ===== 例外：dw 接手手册（2026-09-02）=====
+# 上方 `HANDOFF_*` 是防敏感信息（内网 IP / 明文令牌 / NAS 拓扑）的宽规则，
+# 会连带排除已脱敏的接手手册，导致 dw clone 后看不到它 —— 文档归类的意义落空。
+# 本文件已核：零内网 IP、零令牌明文，仅含"哪些文件不许进 git"的规则声明。
+# ★ 改动本文件前请重新确认无敏感值；若将来写入真实 IP/令牌，请删除本条豁免。
+!docs/05_handoff/HANDOFF_dw_takeover.md

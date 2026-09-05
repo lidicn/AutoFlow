@@ -1,0 +1,11 @@
+fix(v1.5.4): 修复 propose-dsl 500 + API Key 吊销兼容性
+
+【P0 修复】propose-dsl 返回 500 name 'json' is not defined
+- 根因：webui.py 缺少 import json
+- v1.5.3 token 统计代码中使用 json.dumps() 导致崩溃
+- 影响：所有 propose-dsl 调用失败
+
+【P1 修复】API Key 吊销兼容性
+- PUT /api/keys/{id} 现在支持 revoked=true 吊销
+- 原设计 POST /api/keys/{id}/revoke 仍然有效
+- 两种方式都支持，避免调用方用错接口

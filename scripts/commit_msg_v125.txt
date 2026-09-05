@@ -1,0 +1,21 @@
+release: v1.2.5 — 人类→用户文案修正 + README核心版简介
+
+## 文案修正（vibe coding毛病：以agent视角出发）
+- 全局将用户可见和AI可见的「人类」改为「用户」
+- mcp_server.py: 27处（工具描述中AI会模仿用词）
+- gateway.py: 11处
+- app.js: 2处（部署策略说明）
+- proposals.py: 2处
+- decision_store.py: 1处
+- 修复后LLM回复中「待人类在 WebUI 审批」→「待用户在 WebUI 审批」
+
+## README 更新
+- 安装命令增加「安装到当前目录」推荐方式
+- 安装说明更新：安装后目录结构、更新方式、中国大陆网络代理
+- 新增「核心版（轻量 Node-RED 操作工具）」章节
+- 完整版 vs 核心版对比表
+- 给 AI Agent 的安装提示词（可直接复制发给AI）
+- 核心版使用示例代码
+
+## 版本
+- VERSION → 1.2.5

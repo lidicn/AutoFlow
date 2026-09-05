@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 960" width="960" height="960">
+  <defs>
+    <style>
+      .shield-outer { fill:#0F4C99; }
+      .inner-border { fill:none; stroke:#ffffff; stroke-width:22; stroke-linejoin:round; }
+      .node-style { fill:#0F4C99; stroke:#B8E4FF; stroke-width:22; rx:28; }
+      .curve-line { fill:none; stroke:#B8E4FF; stroke-width:22; stroke-linecap:round; stroke-linejoin:round; }
+    </style>
+  </defs>
+
+  <!-- 盾牌外轮廓 -->
+  <path class="shield-outer" d="M480 70 L850 225 L850 515 C850 695 695 860 480 910 C265 860 110 695 110 515 L110 225 Z"/>
+  <!-- 内部白色边框 -->
+  <path class="inner-border" d="M480 130 L785 260 L785 515 C785 665 655 805 480 855 C305 805 175 665 175 515 L175 260 Z"/>
+
+  <!-- 4个节点，预留充足边距，远离盾牌内边框 -->
+  <rect class="node-style" x="235" y="385" width="130" height="90"/>
+  <rect class="node-style" x="510" y="290" width="155" height="90"/>
+  <rect class="node-style" x="250" y="600" width="155" height="90"/>
+  <rect class="node-style" x="620" y="490" width="130" height="90"/>
+
+  <!-- 单条完整连续平滑贝塞尔路径：左节点出发，向上分支到右上节点；向下分支，先到右下，再汇入左下节点，全程顺滑无硬拐角 -->
+  <path class="curve-line" d="M365 430 C412 426, 444 358, 510 358 M365 430 C426 458, 534 514, 586 546 C624 570, 582 610, 536 634 C478 654, 426 648, 404 642"/>
+</svg>

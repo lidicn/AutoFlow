@@ -1,0 +1,20 @@
+fix(v1.4.3): 修复 wb2 v1.4.2 测试发现的 3 个问题
+
+【P1】缺陷 D /lab/* 路由仍 404
+- 根因：v1.4.2 注册路由时缺少 /api 前缀（注册为 /lab/validate，前端调用 /api/lab/validate）
+- 修复：三个路由改为 /api/lab/validate、/api/lab/deploy、/api/lab/deploys
+
+【P1】授权码频率限制完全不生效（iss_cfe281c282）
+- 根因：validate_token 中重置时间窗口时设置了 rate_window_start=now
+  但未调用 _save_tokens 持久化，导致 rate_window_start 永远为 null，
+  rate_window_count 虽累计但永不触发拦截
+- 修复：重置时间窗口后立即调用 self._save_tokens(data) 持久化
+
+【P2】空 tab「覆盖」语义未实现（iss_1ef5f0307a）
+- 根因：v1.4.2 冲突检查时空 tab 仅 pass 放行，但后续 force 分支
+  仍无条件执行，把 label 改成 "(网关副本)" 另建 tab，原空 tab 残留
+- 修复：空 tab 时设置 target_flow_id=existing.id 走 update_flow 分支
+  直接覆盖原 tab；force 分支（改名新建副本）仅对非空用户 tab 生效
+
+wb2 测试验证：v1.4.2 报告 16 用例 11 通过/1 部分/3 失败/1 受阻，
+3 个失败均为本次修复的问题，修复后应全部通过。

@@ -1,0 +1,47 @@
+[project]
+name = "autoflow-gateway"
+version = "0.1.0"
+description = "AutoFlow Gateway — agent-agnostic gateway for HA discovery + NR scene building"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=1.2.0,<2",
+    "pydantic>=2.0",
+    "uvicorn>=0.30",
+    "starlette>=0.37",
+    "python-dotenv>=1.0",
+    "httpx>=0.27",
+    "websockets>=12.0",
+]
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "AutoFlow" },
+]
+keywords = [
+    "home-assistant",
+    "node-red",
+    "agent",
+    "gateway",
+    "automation",
+]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Topic :: Home Automation",
+]
+urls = { Homepage = "https://github.com/lidicn/AutoFlow", Repository = "https://github.com/lidicn/AutoFlow" }
+
+[project.scripts]
+autoflow = "autoflow_gateway.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["autoflow_gateway"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/autoflow_gateway" = "autoflow_gateway"

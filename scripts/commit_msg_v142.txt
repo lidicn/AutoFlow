@@ -1,0 +1,25 @@
+fix(v1.4.2): 修复 v1.3.3 测试报告中的缺陷 B/C/D
+
+【缺陷B】撤回节点分类误判
+- 根因：网关节点判定仅靠 deployed_ids，边界 comment 节点（AF_START/AF_END）
+  可能未被记录，导致纯网关节点流撤回时 user_nodes_preserved=1
+- 修复：增加 _is_gateway_node 特征判断：
+  1. 节点 id 在 deployed_ids 中 → 网关节点
+  2. comment 节点名称/文本含 AF_START/AF_END → 网关节点（边界标记）
+  3. 节点名称以 af_scene_ 开头 → 网关节点
+
+【缺陷C】撤回后重部署 409 冲突
+- 根因：冲突检查判断 existing.id not in flow_catalog 即"非本网关部署"，
+  但撤回后 flow_catalog 已移除该 id，而 NR 中同名 tab 还在（trimmed_tab 模式），
+  导致网关自管流撤回后无法幂等重部署
+- 修复：冲突检查增加空 tab 判断——如果同名 flow 只有 tab 节点（无其他节点），
+  视为撤回后残留，允许覆盖。结合缺陷B修复后，纯网关节点流撤回会走 deleted_tab
+  分支（u_preserved=0），空 tab 判断作为双重保险
+
+【缺陷D】/lab/* 路由 404
+- 根因：前端 Lab 沙盒部署功能有完整 UI 和 API 调用，但后端未实现 /lab/* 路由
+- 修复：实现三个 API：
+  - POST /lab/validate：flow JSON 校验（lint+schema，不落档）
+  - POST /lab/deploy：直接部署到 NR（不需要提案审批）
+  - GET /lab/deploys：部署历史（JSON 文件存储，最多保留50条）
+- Lab 功能无导航入口（高级功能，通过直接访问或未来扩展使用）

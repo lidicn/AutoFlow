@@ -1,0 +1,19 @@
+feat(v1.5.1): API Key 管理 + /api/core/* 强制认证
+
+【新功能】API Key 管理模块（api_keys.py）
+- 创建/列表/编辑/吊销/审计日志
+- SHA-256 hash 存储，不存明文
+- 权限分级：read/deploy/modify
+- 授权 tab 绑定，越界返回 403
+
+【新功能】/api/core/* 强制认证
+- 所有接口需要 Bearer token
+- propose-dsl/deploy-proposal 需要 deploy 权限
+- deploy-raw/rollback 需要 modify 权限
+- entities/resolve-entity/snapshots 需要 read 权限
+
+【新功能】WebUI API Key 管理页面
+- 创建弹窗：名称/Agent ID/授权tab多选/权限/有效期
+- 列表展示：状态/调用次数/上次使用
+- 编辑授权范围、吊销、查看日志
+- 内置 6 步使用说明

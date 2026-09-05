@@ -1,0 +1,16 @@
+feat(v1.5.0): AutoFlow Pro 首发 - 核心版连网关模式
+
+【新功能】AutoFlow Pro：核心版连网关，兼顾省 token 和安全性
+- 网关新增 /api/core/* 系列 REST API（9个接口）
+- nr_client.py 增加 --gateway 模式（propose-dsl/deploy-raw/entities等）
+- core/skill/SKILL.md 增加 Pro 网关模式章节，DSL 优先引导
+
+【文档】
+- 新增产品定位文档：三版本对比 Core/Standard/Pro
+- 更新架构文档：双路径→三路径
+- 新增 v1.5.x 开发计划
+
+【设计】Agent 身份 + 授权范围双层模型
+- API Key 解决"你是谁"
+- Tab 授权解决"你能做什么"
+- 对话即部署：授权范围内自动部署，危险操作需确认

@@ -1,0 +1,22 @@
+fix(v1.4.1): 修复授权码 auto_deploy 和回滚 100% 失败的 P0 bug
+
+【P0 根因】NRLayer 只暴露 update_flow_nodes，不暴露 update_flow
+- gateway.py 混合模式部署逻辑中两处 self.nr.update_flow → update_flow_nodes
+  （第3959行 target_tab_id 版本、第3993行 tab_id 版本）
+  这是 auto_deploy 失败的真正根因：授权码强制走混合模式（target_tab 必填），
+  每次部署都调用不存在的 update_flow，导致 100% 失败
+- snapshot_manager.py 全量回滚和选择性回滚中两处 nr_client.update_flow → update_flow_nodes
+
+【P2 改进】target_tab 改为可选
+- deploy_tokens.py create_token 签名 target_tab: Optional[str] = None
+- webui.py deploy_token_create 不再校验 target_tab 必填
+- app.js 创建表单：标签改为"目标 tab（可选）"，增加说明文字
+  （留空=不绑定，走 per_flow 模式，每个 flow 独立 tab）
+- 这样 per_flow 自动部署通路也可用，不再把所有流量压进混合模式
+
+【P3 改进】频率限制失败也计数
+- deploy_tokens.py record_usage：rate_window_count 从仅成功后累计
+  改为成功和失败都累计，防止失败风暴绕过频率限制
+
+wb2 测试验证：v1.4.0 测试报告 23 个用例中 3 个失败（P0-3/P0-4/P0-7）
+均为同一根因（NRLayer.update_flow 不存在），本次修复后应全部通过。

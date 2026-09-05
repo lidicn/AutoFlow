@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>AutoFlow 网关</title>
+
+  <!-- 主题色（浏览器地址栏 / PWA 顶栏） -->
+  <meta name="theme-color" content="#2F6BFF" />
+  <meta name="description" content="AutoFlow 网关：AI 与你家智能家居之间的安全闸。一句话加自动化，虚拟重放验证，人工批准才能落真实设备。" />
+
+  <!-- PWA：manifest + Service Worker 资源 -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+
+  <!-- 桌面 favicon -->
+  <link rel="icon" href="/static/brand/logo.svg" type="image/svg+xml" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/brand/png/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/brand/png/favicon-16.png" />
+
+  <!-- iOS PWA：apple-touch-icon（iOS 不支持 SVG，必须 PNG；各尺寸覆盖 iPhone / iPad） -->
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/brand/png/apple-touch-icon-180.png" />
+  <link rel="apple-touch-icon" sizes="167x167" href="/static/brand/png/apple-touch-icon-167.png" />
+  <link rel="apple-touch-icon" sizes="152x152" href="/static/brand/png/apple-touch-icon-152.png" />
+  <link rel="apple-touch-icon" sizes="120x120" href="/static/brand/png/apple-touch-icon-120.png" />
+  <link rel="apple-touch-icon" sizes="76x76" href="/static/brand/png/apple-touch-icon-76.png" />
+
+  <!-- iOS 独立应用模式 -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="AutoFlow" />
+
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <img class="logo" src="/static/brand/logo.svg" alt="AutoFlow" width="26" height="26" />
+        <span class="title">AutoFlow 网关</span>
+      </div>
+      <div class="topbar-right">
+        <span id="envBadge" class="badge env">…</span>
+        <span id="authZone" class="auth-zone"></span>
+        <button id="tpBtn" class="btn ghost" title="DSL 验证池开关（关闭后 Agent 的 DSL 编译请求将被拒绝）"><span class="btn-emoji">🧪</span><span class="btn-text">验证池</span></button>
+        <button id="rnBtn" class="btn ghost" title="允许 Agent 提交原生节点（含 Function 节点，中风险，可随时关闭）"><span class="btn-emoji">🧬</span><span class="btn-text">原生节点</span></button>
+        <button id="dpBtn" class="btn ghost" title="部署策略（自动生成的 flow 可免审直装，手写 raw flow 仍须人工审核）"><span class="btn-emoji">⚖</span><span class="btn-text">部署策略</span></button>
+        <button id="shBtn" class="btn ghost" title="自动修复：Agent 自主调试已部署 flow 的最大重试次数（默认 3，防死循环）"><span class="btn-emoji">♻️</span><span class="btn-text">自动修复</span></button>
+      </div>
+    </header>
+
+    <!-- 桌面侧边导航 -->
+    <nav class="sidebar" id="sidebar">
+      <div class="nav-group">
+        <div class="nav-group-title">核心</div>
+        <button class="navitem" data-tab="dashboard"><img class="ic" src="/static/icons/ic-dashboard.svg" alt="" width="20" height="20" />概览</button>
+        <button class="navitem" data-tab="tutorials"><span class="ic" style="display:inline-flex;align-items:center;justify-content:center;font-size:16px">📚</span>教程</button>
+        <button class="navitem" data-tab="proposals"><img class="ic" src="/static/icons/ic-proposals.svg" alt="" width="20" height="20" />提案</button>
+        <button class="navitem" data-tab="deployed"><img class="ic" src="/static/icons/ic-deployed.svg" alt="" width="20" height="20" />已部署</button>
+        <button class="navitem" data-tab="llm_agent"><img class="ic" src="/static/icons/ic-llm.svg" alt="" width="20" height="20" />AI 对话</button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-title">管理</div>
+        <button class="navitem" data-tab="subflows"><img class="ic" src="/static/icons/ic-subflows.svg" alt="" width="20" height="20" />子流程</button>
+        <button class="navitem" data-tab="link_apis"><img class="ic" src="/static/icons/ic-link.svg" alt="" width="20" height="20" />Link API</button>
+        <button class="navitem" data-tab="agents"><img class="ic" src="/static/icons/ic-agents.svg" alt="" width="20" height="20" />Agent 管理</button>
+        <button class="navitem" data-tab="deploy_tokens"><span class="ic" style="display:inline-flex;align-items:center;justify-content:center;font-size:15px">🔑</span>授权码</button>
+        <button class="navitem" data-tab="api_keys"><span class="ic" style="display:inline-flex;align-items:center;justify-content:center;font-size:15px">🤖</span>API Key</button>
+        <button class="navitem" data-tab="templates"><span class="ic" style="display:inline-flex;align-items:center;justify-content:center;font-size:15px">📋</span>模板库</button>
+        <button class="navitem" data-tab="token_stats"><span class="ic" style="display:inline-flex;align-items:center;justify-content:center;font-size:15px">📊</span>Token 统计</button>
+        <button class="navitem" data-tab="error_kb"><span class="ic" style="display:inline-flex;align-items:center;justify-content:center;font-size:15px">🐛</span>错误知识库</button>
+        <button class="navitem" data-tab="safe"><img class="ic" src="/static/icons/ic-safe.svg" alt="" width="20" height="20" />安全闸</button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-title">工具</div>
+        <button class="navitem" data-tab="diagnostics"><img class="ic" src="/static/icons/ic-diagnostics.svg" alt="" width="20" height="20" />诊断</button>
+        <button class="navitem" data-tab="notes"><img class="ic" src="/static/icons/ic-notes.svg" alt="" width="20" height="20" />笔记</button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-title">系统</div>
+        <button class="navitem" data-tab="settings"><img class="ic" src="/static/icons/ic-settings.svg" alt="" width="20" height="20" />设置</button>
+        <button class="navitem" data-tab="help"><img class="ic" src="/static/icons/ic-help.svg" alt="" width="20" height="20" />帮助</button>
+        <button class="navitem" data-tab="acp_tokens"><img class="ic" src="/static/icons/ic-acp.svg" alt="" width="20" height="20" />ACP 令牌</button>
+        <button class="navitem" data-tab="llm_settings"><img class="ic" src="/static/icons/ic-llm-settings.svg" alt="" width="20" height="20" />大模型设置</button>
+        <button class="navitem" data-tab="update"><span class="ic" style="display:inline-flex;align-items:center;justify-content:center;font-size:15px">⬆️</span>系统更新</button>
+      </div>
+    </nav>
+
+    <main class="content" id="content">
+      <section class="view" id="view-dashboard" hidden></section>
+      <section class="view" id="view-tutorials" hidden></section>
+      <section class="view" id="view-safe" hidden></section>
+      <section class="view" id="view-proposals" hidden></section>
+      <section class="view" id="view-deployed" hidden></section>
+      <section class="view" id="view-subflows" hidden></section>
+      <section class="view" id="view-link_apis" hidden></section>
+      <section class="view" id="view-agents" hidden></section>
+      <section class="view" id="view-deploy_tokens" hidden></section>
+      <section class="view" id="view-api_keys" hidden></section>
+      <section class="view" id="view-templates" hidden></section>
+      <section class="view" id="view-token_stats" hidden></section>
+      <section class="view" id="view-error_kb" hidden></section>
+      <section class="view" id="view-diagnostics" hidden></section>
+      <section class="view" id="view-notes" hidden></section>
+      <section class="view" id="view-settings" hidden></section>
+      <section class="view" id="view-help" hidden>
+        <div class="view-head"><h2>📖 使用手册</h2><span class="sub">AutoFlow 网关 · 完整产品使用指南</span></div>
+
+      <div class="help-layout">
+        <aside class="toc-sidebar card">
+          <h3>目录</h3>
+          <ol class="toc">
+            <li><a href="#h-intro">产品是什么</a></li>
+            <li><a href="#h-mcp">接入 Agent（MCP 配置）</a></li>
+            <li><a href="#h-write">让 Agent 编写 flow</a></li>
+            <li><a href="#h-review">审核 / 撤回 Agent 编写的 flow</a></li>
+            <li><a href="#h-gate">安全闸是什么、怎么用</a></li>
+            <li><a href="#h-selfheal">flow 不工作？跟 Agent 沟通 + 自动修复</a></li>
+            <li><a href="#h-inject">inject 节点是自动修复必须的吗？（重点答疑）</a></li>
+            <li><a href="#h-extra">补充：接入令牌安全 / 顶部开关 / 子流程 / 操作日志</a></li>
+            <li><a href="#h-concepts">核心概念详解</a></li>
+            <li><a href="#h-faq">常见问题 FAQ</a></li>
+          </ol>
+        </aside>
+        <div class="help-content">
+
+        <!-- 0 引言 -->
+        <div class="card" id="h-intro">
+          <h3>产品是什么</h3>
+          <p class="desc">AutoFlow 网关是一座「桥」：它让你用自然语言指挥 AI Agent 去编写并部署 Home Assistant / Node-RED 的自动化 flow，同时用 <b>安全闸</b> 和 <b>人工审核</b> 守住真实电器的安全边界。核心闭环是：</p>
+          <div class="desc" style="line-height:1.9">
+            <b>① 配置 MCP</b> 把 agent 接入网关 →
+            <b>② Agent 编写 flow</b>（DSL 或原生 flow）→
+            <b>③ 网关审核 / 部署</b>（闸门 + 你点「部署到 NR」）→
+            <b>④ 真跑不通时，你跟 Agent 沟通，让它走自动修复</b>自动修。
+          </div>
+          <p class="desc">本手册依次讲清这四步，以及兜底的安全机制。建议第一次使用前通读，之后可按目录跳读。</p>
+        </div>
+
+        <!-- 一 MCP 配置 -->
+        <div class="card" id="h-mcp">
+          <h3>一、接入 Agent（MCP 配置）</h3>
+          <p class="desc">MCP（Model Context Protocol）是 agent 与网关对话的协议。每个 Agent 拿到一张「接入令牌」后，在它的 MCP 客户端里填好地址和令牌即可连上。</p>
+
+          <h4>步骤</h4>
+          <ol class="desc">
+            <li>打开左侧 <b>Agents</b> 面板，填 <b>名称</b>（如 <code>deepseek++</code>）、<b>权限级别</b>（tier）、<b>身份模式</b>（mode），点「生成接入令牌」。</li>
+            <li>弹窗里会显示一次性接入令牌与连接信息，<b>请立即复制保存</b>（接入令牌仅显示这一次）。</li>
+            <li>在你的 Agent / MCP 客户端里按下方配置填写。</li>
+          </ol>
+
+          <h4>连接配置</h4>
+          <div class="code-box">服务器地址（端点，依身份模式而定）：
+  黑箱（仅 DSL）：   http://&lt;网关host&gt;:8000/mcp
+  白箱（可自由部署）：http://&lt;网关host&gt;:8000/mcp-white
+  双箱（先白后黑）：  http://&lt;网关host&gt;:8000/mcp-white
+  管理员（运维）：    http://&lt;网关host&gt;:8000/mcp-admin
+
+请求头：
+  Authorization: Bearer &lt;接入令牌&gt;</div>
+
+          <h4>身份模式（mode）怎么选</h4>
+          <table class="tbl">
+            <thead><tr><th>模式</th><th>能做什么</th><th>何时用</th></tr></thead>
+            <tbody>
+              <tr><td>黑箱 black</td><td>只提交 DSL，由编译器生成 flow，<b>禁止</b> Function 节点</td><td>常规场景自动化，最安全</td></tr>
+              <tr><td>白箱 white</td><td>可直接写 raw flow（含原生节点）并部署</td><td>需要原生节点 / 逃生舱场景</td></tr>
+              <tr><td>双箱 dual</td><td>先白箱后黑箱，连 /mcp-white</td><td>想灵活但保留 DSL 回落</td></tr>
+              <tr><td>管理员 admin</td><td>运维专用，连 /mcp-admin</td><td>网关维护，普通 agent 不用</td></tr>
+            </tbody>
+          </table>
+
+          <h4>权限级别（tier）</h4>
+          <div class="desc">
+            <span class="badge tier-staging">staging</span> 练手 / 虚拟 HA，随便试；
+            <span class="badge tier-prod">prod</span> 真实环境，动真设备；
+            <span class="badge tier-sandbox">sandbox</span> 受限沙箱。
+          </div>
+          <p class="desc">连不上时先核对：① 地址端口对不对（默认 8000）；② 接入令牌是否完整、有无多余空格；③ 该 agent 是否被「吊销」（吊销后连接会被拒）。</p>
+        </div>
+
+        <!-- 二 编写 flow -->
+        <div class="card" id="h-write">
+          <h3>二、让 Agent 编写 flow</h3>
+          <p class="desc">接入后，你用大白话给 agent 下指令（如「书房 PC 开机时，把书房显示器挂灯调到 60% 暖光」），agent 通过 MCP 工具把场景提交给网关。提交物分两类：</p>
+          <table class="tbl">
+            <thead><tr><th>提交物</th><th>来源</th><th>网关判定</th><th>含义</th></tr></thead>
+            <tbody>
+              <tr><td>DSL 场景</td><td>编译器编译</td><td><span class="badge ok">编译产物·可信</span></td><td>自动生成，无 Function 节点，可自动部署</td></tr>
+              <tr><td>原生 raw flow</td><td>agent 手写</td><td><span class="badge st-candidate">手写·需审</span></td><td>含原生节点，部署前必须人工审核</td></tr>
+            </tbody>
+          </table>
+          <p class="desc">Agent 提交后，场景会出现在 <b>提案</b> 面板：</p>
+          <ul class="desc">
+            <li>能看到 <b>闸门结果</b>：<span class="badge ok">闸门 PASS</span> 或 <span class="badge danger">闸门 FAIL</span>；</li>
+            <li>能看到 <b>闸门断言</b>（✅/❌ 逐条列出期望状态）；</li>
+            <li>能看到 <b>静态检查</b>（原生 flow 的 lint error/warning、硬伤、逻辑不可达）；</li>
+            <li>可信 DSL 标「可信·可自动部署」，原生 flow 标「需人工审核」。</li>
+          </ul>
+          <p class="desc">你不必看懂 DSL 细节——看闸门 PASS/FAIL 和断言就够了。FAIL 时把页面上的报错原文转给 agent，让它改。</p>
+        </div>
+
+        <!-- 三 审核/撤销 -->
+        <div class="card" id="h-review">
+          <h3>三、审核 / 撤回 Agent 编写的 flow</h3>
+
+          <h4>1）提案面板（部署前把关）</h4>
+          <p class="desc">在 <b>提案</b> 面板对每个场景做决定：</p>
+          <ul class="desc">
+            <li><b>部署到 NR</b>：闸门通过且你认可，点它把 flow 落到 Node-RED（可信 DSL 可一键；原生 raw 需你确认无误后部署）。</li>
+            <li><b>拒绝</b>：明显不对，打回给 agent 重做。</li>
+            <li><b>归档 / 删除</b>：暂时搁置或彻底移除提案。</li>
+            <li><b>注册子流程</b>：若是子流程类提案，点它写 NR 子流程实例 + 登记注册表，之后 Agent 可经 MCP 调用。</li>
+          </ul>
+
+          <h4>2）已部署面板（部署后撤回）</h4>
+          <p class="desc">部署成功后，flow 出现在 <b>已部署</b> 面板，你可：</p>
+          <ul class="desc">
+            <li><b>▶ 触发</b>：手动点火验证 flow 是否真跑通（等价于点一次 inject）。</li>
+            <li><b>撤回</b>：安全移除该 flow。<b>只删网关自己写入的节点，保留你在该 tab 里自己的节点。</b></li>
+          </ul>
+          <p class="desc">撤回有两种结果，会弹 toast 提示：</p>
+          <ul class="desc">
+            <li><span class="badge ok">trimmed_tab</span>：tab 里还有你自己的节点，只移除网关节点、保留你的节点；</li>
+            <li><span class="badge ok">deleted_tab</span>：整个 tab 都是网关部署的，整 tab 删除。</li>
+          </ul>
+          <p class="desc" style="color:#c0392b">若出现 <span class="badge stale">注册表漂移</span>：网关账本记着已部署，但 Node-RED 里已无该 flow_id（可能你手动删过 / 换了 NR 实例）。此时撤回只清账本、不碰 NR，属正常现象。</p>
+        </div>
+
+        <!-- 四 安全闸 -->
+        <div class="card" id="h-gate">
+          <h3>四、安全闸是什么、怎么用</h3>
+          <p class="desc"><b>安全闸 = 真实设备保护机制。</b>网关能控制真实电器，误操作有现实后果（设备损坏、能耗、安全隐患）。安全闸让你预先声明「哪些设备 agent 不能乱动」，在 agent 的部署/操作触及这些设备时强制拦截或留痕。</p>
+
+          <h4>使用步骤</h4>
+          <ol class="desc">
+            <li>打开 <b>安全闸</b> 面板，点「<b>导入全部设备</b>」：从 Home Assistant / Node-RED 拉取全屋实体目录（仅显式触发，不会随测试自动跑）。</li>
+            <li>在「添加保护」搜索框输入设备名 / 区域（如「书房灯」「客厅」「office」），点选设备加入保护。</li>
+            <li>给规则选 <b>保护等级</b>：</li>
+          </ol>
+          <table class="tbl">
+            <thead><tr><th>等级</th><th>行为</th><th>适用</th></tr></thead>
+            <tbody>
+              <tr><td><span class="badge tier-0">Tier-0 需确认</span></td><td>agent 触及即<b>暂停等人工确认</b></td><td>高价值 / 危险设备（空调、总闸、门锁）</td></tr>
+              <tr><td><span class="badge tier-1">Tier-1 放行</span></td><td>放行但<b>记操作日志</b></td><td>低风险常调设备（夜灯、风扇）</td></tr>
+            </tbody>
+          </table>
+          <p class="desc">原则：宁可先 Tier-0 把所有重要设备圈起来，再按需放宽到 Tier-1。去人审（自动修复）后，<b>操作日志是你唯一可追溯来源</b>，请在「设置 → 操作日志」里定期回看。</p>
+        </div>
+
+        <!-- 五 跑不通+自愈 -->
+        <div class="card" id="h-selfheal">
+          <h3>五、flow 不工作？跟 Agent 沟通 + 自动修复</h3>
+
+          <h4>第一步：你自己先验证</h4>
+          <ul class="desc">
+            <li>到 <b>已部署</b> 面板点 <b>▶ 触发</b> 手动点火；</li>
+            <li>到 <b>诊断</b> 面板做 <b>debug 回看</b>，看 flow 真实输出（红色报错 / 空输出 / 节点数异常都算「没跑通」）；</li>
+            <li>把看到的报错原文（debug 文本、断言失败项、异常节点）发给 agent。</li>
+          </ul>
+
+          <h4>第二步：让 agent 走自动修复</h4>
+          <p class="desc">你只需对 agent 说「这个 flow 跑不通，走自动修复修一下」。Agent 会按下面循环自动调试：</p>
+          <div class="desc" style="line-height:1.9">
+            <b>inject 点火</b> → <b>debug 回读</b> 网关旁路订阅的 NR 输出 → <b>分析报错</b> → <b>apply 修正</b> flow → 再点火验证 → 直到跑通。
+          </div>
+          <p class="desc">为防止 Agent 陷入「修了又错、错了又修」的死循环，网关有 <b>自愈预算</b>：</p>
+          <ul class="desc">
+            <li>默认 <b>最多 3 次</b>自动修正尝试（按 <code>(agent, flow)</code> 计失败次数）；</li>
+            <li>顶部 <b>♻️ 按钮</b>可改这个上限；设为 <b>0 即关闭自动修复</b>（此时任何修正都回到人工审核）；</li>
+            <li>预算用尽仍失败，Agent 会如实告诉你「已超重试上限，需你人工介入」，而不是偷偷假装成功。</li>
+          </ul>
+          <p class="desc"><b>关键认知：</b>自愈预算是「纯失败次数计数」——它跟 flow 里有没有 inject 节点<b>无关</b>。有没有 inject 只影响「能不能自动点火验证」，不影响预算这道安全闸门本身。</p>
+        </div>
+
+        <!-- 六 inject 答疑 -->
+        <div class="card" id="h-inject">
+          <h3>六、inject 节点是自动修复必须的吗？（重点答疑）</h3>
+          <p class="desc"><b>结论：不是必须。</b>下面分两层讲清。</p>
+
+          <h4>1）自愈预算本身不依赖 inject</h4>
+          <p class="desc">网关的失败计数保护（<code>_selfheal_budget_check</code>）是按 <code>(agent, flow)</code> 的失败次数计数的，完全不关心 flow 里有没有 inject 节点。所以即便没有 inject，预算机制照常生效，agent 也不会无限循环。</p>
+
+          <h4>2）没有 inject 时，触发这一步会怎样</h4>
+          <p class="desc">自动修复的「点火」入口在发现 flow 没有 inject 节点时，<b>不会报错</b>，而是返回：</p>
+          <div class="code-box">{ "ok": true, "triggered": [], "warning": "该 flow 没有 inject 节点，无触发目标" }</div>
+          <p class="desc">即 <code>triggered</code> 为空、带一句警告。此时自动修复「分析 / 修正 / 验证」链条里，<b>「自动点火验证」这一步没有目标</b>。Agent 应当这样处置（按推荐顺序）：</p>
+          <ol class="desc">
+            <li><b>补一个 inject 节点</b>：最常见的修法，让 flow 可被自动点火；</li>
+            <li><b>改用 flow 已有的其他触发器</b>：如 HA 状态变化事件、HTTP in、websocket 等——这些触发同样会产生 debug 帧；</li>
+            <li><b>如实告知你</b>：若实在无法自动验证，Agent 应说「该 flow 没有可自动触发的入口，请你手动触发，或我给它加一个 inject」，<b>而不是假装跑通</b>。</li>
+          </ol>
+          <p class="desc">而 <b>debug 回读</b>（<code>autoflow_debug_read</code>）读的是网关旁路订阅的 NR debug 事件流，对「任何产生的 debug 帧」都有效、与触发源无关——所以只要 flow 真被触发过（不管谁触发的），Agent 都能读到输出去做修正。</p>
+          <div class="desc" style="background:var(--bg-soft);border-left:3px solid var(--accent);padding:8px 12px;margin-top:8px">
+            <b>一句话总结：</b>inject 不是自动修复的「开关」，只是「自动点火的便捷入口」。没有它，预算保护照常、debug 回读照常，只是 agent 得先解决「怎么触发这个 flow」才能自动验证——要么加 inject，要么用别的触发器，要么请你手动触发。
+          </div>
+        </div>
+
+        <!-- 七 补充 -->
+        <div class="card" id="h-extra">
+          <h3>七、补充：接入令牌安全 / 顶部开关 / 子流程 / 操作日志</h3>
+
+          <h4>接入令牌安全</h4>
+          <ul class="desc">
+            <li>接入令牌<b>仅生成时显示一次</b>，请妥善保存；</li>
+            <li><b>重置接入令牌</b>：旧码立即失效，生成新码（仍只显示一次）；</li>
+            <li><b>吊销</b>：Agent 无法再连网关（记录保留可恢复）；<b>删除</b>：彻底移除、不可恢复；</li>
+            <li>怀疑泄露 → 直接「重置接入令牌」即可废掉旧码。</li>
+          </ul>
+
+          <h4>顶部开关（topbar）</h4>
+          <table class="tbl">
+            <thead><tr><th>按钮</th><th>作用</th></tr></thead>
+            <tbody>
+              <tr><td>🔑</td><td>设置 WebUI 访问令牌</td></tr>
+              <tr><td>🧪</td><td>DSL 验证任务池开关（关闭后 agent 的 DSL 调用被拒）</td></tr>
+              <tr><td>🧬 逃逸</td><td>原生节点逃逸开关（中风险逃生舱，可随时关）</td></tr>
+              <tr><td>⚖</td><td>部署策略（compiler_auto 下编译产物标「可信」可自动部署，raw 仍须人审）</td></tr>
+              <tr><td>♻️</td><td>自动修复最大重试次数（默认 3，0 = 关闭）</td></tr>
+            </tbody>
+          </table>
+
+          <h4>子流程提案</h4>
+          <p class="desc">agent 可提交「子流程」类提案。你在提案面板点 <b>注册子流程</b> 后：写 NR 子流程实例 + 登记子流程注册表，之后 agent 即可经 MCP 调用该子流程（如历史查询、Bark 推送等通用能力）。</p>
+
+          <h4>操作日志</h4>
+          <p class="desc">在 <b>设置 → 操作日志</b> 查看所有部署 / 应用修正的留痕。去人审（自动修复）后，这是唯一可追溯来源，建议定期回看。</p>
+        </div>
+
+        <!-- 七-B 核心概念详解 -->
+        <div class="card" id="h-concepts">
+          <h3>核心概念详解</h3>
+          <p class="desc">AutoFlow 涉及一些特有概念，这里逐一解释原理和作用。</p>
+
+          <h4>DSL（领域特定语言）</h4>
+          <p class="desc">DSL 是 AutoFlow 定义的一种结构化场景描述语言，比原生 Node-RED flow JSON 更简洁、更安全。Agent 提交 DSL 后，网关的<strong>编译器</strong>会将其转换为标准 NR flow 节点。</p>
+          <p class="desc">编译器生成的 flow <strong>不含 Function 节点</strong>（无法执行任意 JS 代码），因此被标记为「编译产物·可信」，可免人工审核直接部署。这是 DSL 模式比 raw flow 模式更安全的根本原因。</p>
+
+          <h4>安全闸（Safety Gate）</h4>
+          <p class="desc">安全闸是 AutoFlow 的<strong>真实设备保护机制</strong>。在 flow 部署到 Node-RED 之前，网关会检查 flow 中操作的设备是否在受保护列表中：</p>
+          <ul class="desc">
+            <li><strong>Tier-0（需确认）</strong>：触及即暂停，等人工确认后才能继续</li>
+            <li><strong>Tier-1（放行+审计）</strong>：允许操作，但记录到操作日志</li>
+          </ul>
+          <p class="desc">安全闸的检查结果以「断言」形式展示（✅/❌ 逐条列出预期状态），你不必看懂 DSL，看断言就知道 flow 会操作哪些设备。</p>
+
+          <h4>vhass（虚拟孪生重放）</h4>
+          <p class="desc">vhass 是 AutoFlow 的<strong>虚拟环境测试</strong>能力。它可以在不触碰真实设备的情况下，模拟 Home Assistant 环境来验证 flow 的行为。</p>
+          <p class="desc">当 flow 部署到 staging（测试环境）时，网关会先在虚拟环境中重放 flow 的执行过程，检查预期状态是否满足。只有虚拟验证通过后，才允许部署到 prod（真实环境）。</p>
+          <p class="desc">这相当于给自动化流程加了一道「彩排」——先在虚拟舞台上演一遍，确认没问题再正式演出。</p>
+
+          <h4>自动修复（原称自愈闭环）</h4>
+          <p class="desc">自动修复是 AutoFlow 的核心能力：当已部署的 flow 不工作时，Agent 可以自动调试并修复，无需你手动排查。</p>
+          <p class="desc">修复循环：<strong>inject 点火</strong> → <strong>debug 回读</strong>（网关旁路订阅 NR 的 debug 事件流）→ <strong>分析报错</strong> → <strong>apply 修正</strong> flow → 再点火验证 → 直到跑通。</p>
+          <p class="desc">为防止死循环，网关有<strong>自动修复预算</strong>（默认最多 3 次重试，按 Agent+flow 计失败次数）。预算用尽后 Agent 会如实告知「需人工介入」，不会假装成功。</p>
+
+          <h4>Link API（HTTP 桥接）</h4>
+          <p class="desc">Link API 是 AutoFlow 的<strong>外部 HTTP 服务桥接</strong>能力，让 flow 可以调用外部 API 或接收外部 webhook。</p>
+          <p class="desc">两种模式：</p>
+          <ul class="desc">
+            <li><strong>link out 推送</strong>：把 flow 的输出推送到外部 HTTP 端点（如第三方 API、webhook）</li>
+            <li><strong>http_api 内联</strong>：网关内置 HTTP 接口，不生成 NR 节点，直接由网关处理请求</li>
+          </ul>
+          <p class="desc">Link API 安装后会合并到 Node-RED 的「AutoFlow API」tab 中，增量更新不重复创建节点。</p>
+
+          <h4>子流程注册表（Subflow Registry）</h4>
+          <p class="desc">子流程注册表是 AutoFlow 管理可复用 NR 子流程的目录。注册后的子流程，Agent 可以通过 MCP 直接调用（在 DSL 中写「调用子流程: 名称(参数)」）。</p>
+          <p class="desc">子流程分两类：</p>
+          <ul class="desc">
+            <li><strong>内置（managed）</strong>：AutoFlow 自带的子流程（如 Bark 推送），网关负责安装和更新</li>
+            <li><strong>已导入（imported）</strong>：你从 Node-RED 导入的自定义子流程，网关只登记不修改 NR 实例</li>
+          </ul>
+          <p class="desc">删除内置子流程会同时删除 NR 实例；删除已导入子流程只从注册表移除，NR 上的子流程保持原样。</p>
+
+          <h4>注册表漂移（Registry Drift）</h4>
+          <p class="desc">注册表漂移指网关的注册表记录着某个 flow「已部署」，但 Node-RED 里已经找不到这个 flow_id 了。</p>
+          <p class="desc">常见原因：你手动在 NR 里删除了该 flow，或者更换了 Node-RED 实例。这不是错误，而是记录不一致。</p>
+          <p class="desc">处理方法：点击「撤回」，网关会只清理注册表、不碰 Node-RED（因为 flow 已经不在了）。</p>
+        </div>
+
+        <!-- 八 FAQ -->
+        <div class="card" id="h-faq">
+          <h3>八、常见问题 FAQ</h3>
+          <ul class="desc">
+            <li><b>agent 连不上网关？</b> 核对端点地址（黑/白箱别填反）、接入令牌完整无空格、该 agent 未被吊销。</li>
+            <li><b>提案显示「需人工审核」但我想自动化？</b> 那是原生 raw flow（含原生节点），按设计必须人审；改用 DSL 场景可走「可信·自动部署」。</li>
+            <li><b>撤回会误删我自己的节点吗？</b> 不会。只删网关写入的节点，你的节点保留（见 trimmed_tab / deleted_tab 提示）。</li>
+            <li><b>自动修复一直修不好？</b> 预算（默认 3）用尽后 agent 会交回人工；你也可把 ♻️ 调到更大，或自己看 debug 把报错发给 agent。</li>
+            <li><b>flow 没有 inject 还能自愈吗？</b> 能，预算照常；只是 agent 需先解决「怎么触发」——加 inject、用别的触发器、或请你手动触发（详见第六章）。</li>
+          </ul>
+          <p class="desc" style="margin-top:10px">仍有疑问？把现象贴给 agent，或在「笔记」里记下待办，下次让 agent 帮你查。</p>
+        </div>
+        </div>
+      </section>
+      <section class="view" id="view-acp_tokens" hidden></section>
+      <section class="view" id="view-llm_settings" hidden></section>
+      <section class="view" id="view-llm_agent" hidden></section>
+      <section class="view" id="view-update" hidden></section>
+    </main>
+
+    <!-- 移动端底部导航：聚焦三大核心入口 + 更多 -->
+    <nav class="bottomnav" id="bottomnav">
+      <button class="navitem" data-tab="proposals"><img class="ic" src="/static/icons/ic-proposals.svg" alt="" width="24" height="24" /><span>提案</span></button>
+      <button class="navitem" data-tab="deployed"><img class="ic" src="/static/icons/ic-deployed.svg" alt="" width="24" height="24" /><span>已部署</span></button>
+      <button class="navitem" data-tab="llm_agent"><img class="ic" src="/static/icons/ic-llm.svg" alt="" width="24" height="24" /><span>AI对话</span></button>
+      <button class="navitem" id="bottomnavMore" data-action="more"><img class="ic" src="/static/icons/ic-more.svg" alt="" width="24" height="24" /><span>更多</span></button>
+    </nav>
+
+    <!-- 移动端「更多」抽屉 -->
+    <div class="mobile-sheet" id="mobileSheet" hidden>
+      <div class="mobile-sheet-backdrop" data-action="close-sheet"></div>
+      <div class="mobile-sheet-panel">
+        <div class="mobile-sheet-head">
+          <span>全部功能</span>
+          <button class="btn ghost" data-action="close-sheet" aria-label="关闭">✕</button>
+        </div>
+        <div class="mobile-sheet-grid">
+          <button class="navitem" data-tab="dashboard"><img class="ic" src="/static/icons/ic-dashboard.svg" alt="" width="22" height="22" />概览</button>
+          <button class="navitem" data-tab="tutorials"><span class="ic" style="display:inline-flex;align-items:center;justify-content:center;font-size:16px">📚</span>教程</button>
+          <button class="navitem" data-tab="safe"><img class="ic" src="/static/icons/ic-safe.svg" alt="" width="22" height="22" />安全闸</button>
+          <button class="navitem" data-tab="subflows"><img class="ic" src="/static/icons/ic-subflows.svg" alt="" width="22" height="22" />子流程</button>
+          <button class="navitem" data-tab="link_apis"><img class="ic" src="/static/icons/ic-link.svg" alt="" width="22" height="22" />Link API</button>
+          <button class="navitem" data-tab="agents"><img class="ic" src="/static/icons/ic-agents.svg" alt="" width="22" height="22" />Agent 管理</button>
+          <button class="navitem" data-tab="diagnostics"><img class="ic" src="/static/icons/ic-diagnostics.svg" alt="" width="22" height="22" />诊断</button>
+          <button class="navitem" data-tab="notes"><img class="ic" src="/static/icons/ic-notes.svg" alt="" width="22" height="22" />笔记</button>
+          <button class="navitem" data-tab="settings"><img class="ic" src="/static/icons/ic-settings.svg" alt="" width="22" height="22" />设置</button>
+          <button class="navitem" data-tab="help"><img class="ic" src="/static/icons/ic-help.svg" alt="" width="22" height="22" />帮助</button>
+          <button class="navitem" data-tab="acp_tokens"><img class="ic" src="/static/icons/ic-acp.svg" alt="" width="22" height="22" />ACP 令牌</button>
+          <button class="navitem" data-tab="llm_settings"><img class="ic" src="/static/icons/ic-llm-settings.svg" alt="" width="22" height="22" />大模型设置</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-mask" id="modalMask" hidden>
+    <div class="modal">
+      <div class="modal-head"><span id="modalTitle">提示</span><button class="btn ghost" id="modalClose">✕</button></div>
+      <div class="modal-body" id="modalBody"></div>
+    </div>
+  </div>
+
+    <!-- 首次运行免责声明（C11/C21） -->
+    <div class="modal-mask" id="firstRunMask" hidden>
+      <div class="modal first-run">
+        <div class="modal-head"><span>首次使用 · 风险须知</span></div>
+        <div class="modal-body">
+          <p>AutoFlow 可控制 <strong>真实电器与设备</strong>。误操作可能造成现实世界后果（设备损坏、能耗、安全隐患）。</p>
+          <p>继续使用即表示你已理解并接受这一风险，并确认你对此运行环境拥有合法控制权。</p>
+          <label class="ck"><input type="checkbox" id="firstRunAck" /> 我已理解并接受上述风险</label>
+        </div>
+        <div class="modal-foot">
+          <button class="btn primary" id="firstRunAccept" disabled>进入</button>
+        </div>
+      </div>
+    </div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="/static/tutorials.js"></script>
+  <script src="/static/app.js"></script>
+  <!-- PWA：注册 Service Worker（离线可打开；不缓存 /api 与 /mcp，实时数据始终走网络） -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('/sw.js').catch(function () {});
+      });
+    }
+  </script>
+</body>
+</html>

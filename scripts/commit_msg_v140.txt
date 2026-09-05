@@ -1,0 +1,45 @@
+feat(v1.4.0): 部署授权码（Trusted Agent Auto-Deploy）P0-P2 完整实现
+
+【P0 基础机制】
+- 新增 deploy_tokens.py：授权码生成/验证/吊销，SHA-256 哈希存储，创建时只显示一次
+- 多重限制：目标 tab 绑定、有效期（默认4h）、权限（deploy/modify/undeploy）、节点数阈值、资源配额、频率限制
+- 新增 snapshot_manager.py：全量快照/增量快照/全量回滚/选择性回滚/快照差异对比
+- 审计日志：每次操作记录时间/Agent/操作类型/Flow/节点数/成功失败
+- gateway.py：propose_dsl/propose_raw 增加 deploy_token 参数，授权码有效且闸门通过时自动调用 deploy_proposal 部署
+- _try_auto_deploy_with_token 辅助函数：验证授权码→部署前快照→自动部署→记录使用日志
+- fail-safe 设计：授权码无效/过期/吊销/超配额时自动回退到人工审批，不拒绝部署
+
+【P1 安全增强】
+- 增量快照：每次操作前自动创建，支持选择性回滚（只恢复指定 flow）
+- 操作频率限制：每分钟最多操作数（默认10次），超限拒绝
+- 资源配额：最大节点数（默认500）、最大flow数（默认20），超限拒绝
+- 危险操作二次确认：require_confirm_dangerous 配置，前端吊销/回滚均需确认
+- 回滚前自动创建新快照：防止误回滚后无法恢复
+
+【P2 体验完善】
+- 使用统计面板：每个授权码显示部署/修改/撤回次数、已用节点数、失败次数
+- 实时通知：操作成功/失败 toast 提示
+- 预览模式：授权码无效时回退到人工审批（相当于预览提案）
+- 并发控制+NR实例绑定：bound_agent/bound_nr_instance 配置
+- 快照差异对比：diff_snapshots API 对比两个快照的增删改
+
+【后端 API】
+- GET/POST /api/deploy-tokens
+- DELETE /api/deploy-tokens/{id}
+- GET /api/deploy-tokens/{id}/logs
+- GET /api/deploy-tokens/{id}/snapshots
+- POST /api/deploy-tokens/{id}/rollback
+- GET /api/deploy-tokens/{id}/diff
+
+【MCP 工具】
+- autoflow_deploy_raw 增加 deploy_token 参数
+- autoflow_propose_dsl 增加 deploy_token 参数
+
+【WebUI】
+- 新增「授权码」管理页面（导航→管理→授权码）
+- 创建授权码表单：名称/目标tab/有效期/权限/节点阈值/资源配额/频率限制
+- 创建成功弹窗：显示授权码明文（只显示一次，提示立即复制保存）
+- 授权码列表：状态徽章（有效/已吊销/已过期）、使用统计、操作按钮
+- 日志查看弹窗：时间线展示所有操作记录
+- 快照查看弹窗：列出所有快照，支持一键回滚
+- 吊销/回滚均需二次确认
