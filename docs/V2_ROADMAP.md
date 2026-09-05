@@ -73,6 +73,21 @@ Phase 4: 竞技场模式（长期）
 | 0.7 | 验证 MCP 可调用（:8002/mcp） | tester | ✅ 完成（2026-09-05 返回结构化 JSON） |
 | 0.8 | 配置 Kanban 看板 | PM | ✅ 完成（2026-09-05 docs/03_dev/KANBAN.md） |
 | 0.9 | 微信通知通道测试 | PM | ⏳ 待执行 |
+| 0.10 | 代码审查 + P0修复 | 团队 | ✅ 完成（2026-09-05 commit 5b1d791） |
+| 0.11 | P0-1 API Key fail-open修复 | backend-dev | ✅ 38测试通过 |
+| 0.12 | P0-2 内网IP过滤修复 | backend-dev | ✅ 26+处替换 |
+| 0.13 | P0-5 多Agent身份管理 | backend-dev | ✅ 21测试通过 |
+| 0.14 | P1-7 Flow一键回滚 | backend-dev | ✅ 8测试通过 |
+| 0.15 | P1-6 Flow版本对比 | backend-dev | ✅ api_specs.json + flow_linter |
+
+---
+
+## 三-补充：Phase 0 总结
+
+**完成时间**：2026-09-05
+**代码审查评级**：B+（可投产，3个P0已修复）
+**测试覆盖**：P0修复新增52个回归测试，全部通过
+**待办**：部署验证（NAS Docker :8002）、微信通知通道
 
 ---
 

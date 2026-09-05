@@ -630,8 +630,9 @@ def test_image_vision_subflow_compile():
     flow = compile_dsl(dsl)
     nodes = flow["nodes"]
     urls = {n.get("url") for n in nodes if n.get("type") == "http request"}
-    assert "http://<NAS_IP>:1880/llm/image" in urls, urls
-    assert "http://<NAS_IP>:1880/llm/vision" in urls, urls
+    # <NAS_IP> 占位符会被 resolve_system_placeholders 替换为真实 NR_URL 主机名
+    assert any(url and "/llm/image" in url for url in urls), urls
+    assert any(url and "/llm/vision" in url for url in urls), urls
     # 文生图：提取节点把 image_url 规整进 payload.reply
     ext_img = [n for n in nodes if n.get("type") == "change"
                and n.get("name") == "取 llm_doubao_image 返回值"]

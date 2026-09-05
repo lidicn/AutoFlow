@@ -297,34 +297,27 @@ class TestEnsureBeforeNodeGate(unittest.TestCase):
 
     def test_ensure_noop_when_all_present(self):
         """4 个历史子流程全部在场且指纹匹配 → no-op。"""
-        from autoflow_gateway.subflows import ensure_history_subflow
+        from autoflow_gateway.subflows import ensure_history_subflow, _load_history_subflows_built
+
+        built = _load_history_subflows_built()
+        present = []
+        for arr in built:
+            for n in arr:
+                present.append(n)
 
         class FakeNR:
-            def __init__(self):
+            def __init__(self, nodes):
+                self._nodes = nodes
                 self.deployed = None
             def list_flows(self):
-                nodes = []
-                for sid in HISTORY_SUBFLOW_IDS:
-                    nodes.append({"type": "subflow", "id": sid, "name": sid})
-                    nodes.append({
-                        "type": "api-get-history", "id": f"{sid}__n_hist", "z": sid,
-                        "entityIdType": "equals", "entityId": "",
-                        "startDateType": "date", "endDateType": "date",
-                        "useRelativeTime": False, "relativeTime": "",
-                        "flatten": True, "outputType": "array",
-                        "outputLocationType": "msg", "outputLocation": "payload",
-                        "x": 400, "y": 200, "wires": [],
-                    })
-                    nodes.append({"type": "function", "id": f"{sid}__n_parse", "z": sid,
-                                  "func": "return msg;", "wires": [["placeholder"]]})
-                return nodes
+                return list(self._nodes)
             def get_default_server_id(self):
                 return "fake-server"
             def deploy_all(self, combined, **kw):
                 self.deployed = combined
                 return {"deployed": len(combined)}
 
-        nr = FakeNR()
+        nr = FakeNR(present)
         res = ensure_history_subflow(nr)
         self.assertFalse(res["created"], res)
         self.assertTrue(res["exists"], res)
@@ -345,7 +338,7 @@ class TestEnsureBeforeNodeGate(unittest.TestCase):
 
         res = ensure_history_subflow(BadNR())
 
-        self.assertEqual(res["created"])  # 降级到重建（NR 不可达时不抛异常）
+        self.assertTrue(res["created"])  # 降级到重建（NR 不可达时不抛异常）
 
     def test_no_nr_client_is_noop(self):
         """无 NR client 时 ensure 不崩溃。"""
