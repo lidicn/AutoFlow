@@ -790,6 +790,16 @@ async function loadExperience() {
         <div id="exp-patterns"><div class="empty">加载中…</div></div>
       </div>
     </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+      <div class="card">
+        <h3 style="margin:0 0 12px">最佳实践</h3>
+        <div id="exp-best"><div class="empty">加载中…</div></div>
+      </div>
+      <div class="card">
+        <h3 style="margin:0 0 12px">Agent 行为对比</h3>
+        <div id="exp-agents"><div class="empty">加载中…</div></div>
+      </div>
+    </div>
     <div class="card">
       <h3 style="margin:0 0 12px">最近操作日志</h3>
       <div id="exp-logs"><div class="empty">加载中…</div></div>
@@ -865,6 +875,52 @@ async function refreshExperience() {
           `).join("")}
         </table>
       ` : '<div class="empty">暂无数据</div>';
+    }
+
+    // 最佳实践
+    const br = await api("GET", "/experience/best-practices?top_n=8");
+    if (br.ok && br.data.best_practices) {
+      $("#exp-best").innerHTML = br.data.best_practices.length ? `
+        <div style="max-height:250px;overflow:auto">
+        ${br.data.best_practices.map(p => `
+          <div style="padding:8px;border-bottom:1px solid var(--border)">
+            <div style="font-size:12px;margin-bottom:4px">
+              <span style="color:var(--text-muted)">${esc(p.trigger)}</span>
+              <span style="color:var(--text-muted)"> → </span>
+              <span>${esc(p.action)}</span>
+            </div>
+            <div style="font-size:11px;color:var(--text-muted)">
+              使用 ${p.usage_count} 次 · 置信度 ${p.confidence}%
+            </div>
+          </div>
+        `).join("")}
+        </div>
+      ` : '<div class="empty">暂无最佳实践（需要成功的 propose-dsl 调用积累）</div>';
+    }
+
+    // Agent 对比
+    const ar = await api("GET", "/experience/agent-comparison?days=" + days);
+    if (ar.ok && ar.data.agents) {
+      $("#exp-agents").innerHTML = ar.data.agents.length ? `
+        <table style="width:100%;font-size:12px">
+          <thead><tr style="text-align:left;color:var(--text-muted)">
+            <th style="padding:6px">Agent</th>
+            <th style="padding:6px">操作数</th>
+            <th style="padding:6px">成功率</th>
+            <th style="padding:6px">平均耗时</th>
+          </tr></thead>
+          <tbody>
+            ${ar.data.agents.map(a => `
+              <tr style="border-bottom:1px solid var(--border)">
+                <td style="padding:6px"><code>${esc(a.agent_id)}</code></td>
+                <td style="padding:6px">${a.total_operations}</td>
+                <td style="padding:6px">${a.success_rate}%</td>
+                <td style="padding:6px">${a.avg_duration_ms}ms</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      ` : '<div class="empty">暂无 Agent 数据</div>';
     }
 
     // 操作日志

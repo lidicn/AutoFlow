@@ -256,6 +256,145 @@ class ExperienceLogger:
             "total_patterns": len(data["patterns"]),
         }
 
+    def get_best_practices(self, top_n: int = 10) -> Dict[str, Any]:
+        """从经验数据中提取最佳实践。"""
+        pattern_data = self._load_json(self.pattern_file, {"patterns": {}})
+        entity_data = self._load_json(self.entity_file, {"entity_count": {}})
+
+        # 热门触发-动作模式
+        top_patterns = sorted(pattern_data.get("patterns", {}).items(),
+                             key=lambda x: x[1], reverse=True)[:top_n]
+
+        practices = []
+        for key, count in top_patterns:
+            parts = key.split("|", 1)
+            trigger = parts[0] if len(parts) > 0 else ""
+            action = parts[1] if len(parts) > 1 else ""
+            practices.append({
+                "trigger": trigger,
+                "action": action,
+                "usage_count": count,
+                "confidence": min(95, 50 + count * 5),  # 使用越多置信度越高
+                "dsl_example": f"trigger: {trigger}\n  action: {action}",
+            })
+
+        # 热门实体
+        top_entities = sorted(entity_data.get("entity_count", {}).items(),
+                             key=lambda x: x[1], reverse=True)[:top_n]
+
+        return {
+            "ok": True,
+            "best_practices": practices,
+            "hot_entities": [{"entity": k, "usage_count": v} for k, v in top_entities],
+            "total_patterns": len(pattern_data.get("patterns", {})),
+        }
+
+    def get_agent_comparison(self, days: int = 7) -> Dict[str, Any]:
+        """对比不同 Agent 的行为表现。"""
+        logs_result = self.get_logs(days=days, limit=10000)
+        logs = logs_result["logs"]
+
+        agent_stats = defaultdict(lambda: {
+            "total": 0, "success": 0, "fail": 0,
+            "total_duration": 0, "operations": Counter(),
+        })
+
+        for log in logs:
+            agent = log.get("agent_id", "unknown")
+            stats = agent_stats[agent]
+            stats["total"] += 1
+            if log.get("success"):
+                stats["success"] += 1
+            else:
+                stats["fail"] += 1
+            stats["total_duration"] += log.get("duration_ms", 0)
+            stats["operations"][log.get("operation", "unknown")] += 1
+
+        comparison = []
+        for agent, stats in agent_stats.items():
+            total = stats["total"]
+            comparison.append({
+                "agent_id": agent,
+                "total_operations": total,
+                "success_count": stats["success"],
+                "fail_count": stats["fail"],
+                "success_rate": round(stats["success"] / total * 100, 1) if total else 0,
+                "avg_duration_ms": stats["total_duration"] // total if total else 0,
+                "operations": dict(stats["operations"].most_common(5)),
+            })
+
+        # 按成功率排序
+        comparison = sorted(comparison, key=lambda x: x["success_rate"], reverse=True)
+
+        return {
+            "ok": True,
+            "period": f"最近 {days} 天",
+            "agents": comparison,
+            "total_agents": len(comparison),
+        }
+
+    def recommend_templates(self, keyword: str = "", top_n: int = 5) -> Dict[str, Any]:
+        """根据关键词推荐模板（基于经验数据关联）。"""
+        # 加载模板库
+        templates_file = os.path.join(os.path.dirname(self.base_dir), "templates.json")
+        templates = []
+        if os.path.exists(templates_file):
+            try:
+                with open(templates_file, "r", encoding="utf-8") as f:
+                    tdata = json.load(f)
+                    templates = tdata.get("templates", []) if isinstance(tdata, dict) else tdata
+            except Exception:
+                pass
+
+        # 基于经验数据的热门模式推荐
+        pattern_data = self._load_json(self.pattern_file, {"patterns": {}})
+        hot_patterns = sorted(pattern_data.get("patterns", {}).items(),
+                             key=lambda x: x[1], reverse=True)[:10]
+
+        recommendations = []
+        keyword_lower = keyword.lower() if keyword else ""
+
+        # 匹配模板
+        for tpl in templates:
+            score = 0
+            name = tpl.get("name", "").lower()
+            desc = tpl.get("description", "").lower()
+            if keyword_lower and (keyword_lower in name or keyword_lower in desc):
+                score += 100
+            recommendations.append({
+                "template_id": tpl.get("id", ""),
+                "name": tpl.get("name", ""),
+                "description": tpl.get("description", ""),
+                "score": score,
+                "source": "template_library",
+            })
+
+        # 从热门模式生成推荐
+        for key, count in hot_patterns:
+            parts = key.split("|", 1)
+            trigger = parts[0] if len(parts) > 0 else ""
+            action = parts[1] if len(parts) > 1 else ""
+            score = count * 10
+            if keyword_lower and (keyword_lower in trigger.lower() or keyword_lower in action.lower()):
+                score += 50
+            recommendations.append({
+                "template_id": f"pattern_{key}",
+                "name": f"{trigger} → {action}",
+                "description": f"热门模式：{trigger} 触发 {action}（已使用 {count} 次）",
+                "score": score,
+                "source": "experience_pattern",
+                "dsl_example": f"trigger: {trigger}\n  action: {action}",
+            })
+
+        # 按分数排序
+        recommendations = sorted(recommendations, key=lambda x: x["score"], reverse=True)[:top_n]
+
+        return {
+            "ok": True,
+            "keyword": keyword,
+            "recommendations": recommendations,
+        }
+
     def get_summary(self, days: int = 7) -> Dict[str, Any]:
         """获取经验数据汇总。"""
         logs_result = self.get_logs(days=days, limit=10000)

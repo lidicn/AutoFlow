@@ -843,6 +843,37 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         except Exception as e:
             return _js({"ok": False, "error": str(e)}, 500)
 
+    async def experience_best_practices(request: Request):
+        """最佳实践库。"""
+        try:
+            top_n = int(request.query_params.get("top_n", 10))
+            logger = _experience_logger()
+            result = logger.get_best_practices(top_n=top_n)
+            return _js(result)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def experience_agent_comparison(request: Request):
+        """Agent 行为对比。"""
+        try:
+            days = int(request.query_params.get("days", 7))
+            logger = _experience_logger()
+            result = logger.get_agent_comparison(days=days)
+            return _js(result)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def experience_recommend(request: Request):
+        """模板推荐。"""
+        try:
+            keyword = request.query_params.get("keyword", "")
+            top_n = int(request.query_params.get("top_n", 5))
+            logger = _experience_logger()
+            result = logger.recommend_templates(keyword=keyword, top_n=top_n)
+            return _js(result)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
     async def experience_patterns(request: Request):
         """DSL 模式统计。"""
         try:
@@ -3185,6 +3216,9 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/experience/logs", experience_logs, methods=["GET"]),
         Route("/api/experience/entities", experience_entities, methods=["GET"]),
         Route("/api/experience/patterns", experience_patterns, methods=["GET"]),
+        Route("/api/experience/best-practices", experience_best_practices, methods=["GET"]),
+        Route("/api/experience/agent-comparison", experience_agent_comparison, methods=["GET"]),
+        Route("/api/experience/recommend", experience_recommend, methods=["GET"]),
         # 错误知识库（v1.5.7）
         Route("/api/errors", error_knowledge_list, methods=["GET"]),
         Route("/api/errors/stats", error_knowledge_stats, methods=["GET"]),
