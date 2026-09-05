@@ -765,6 +765,39 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         except Exception as e:
             return _js({"ok": False, "error": str(e)}, 500)
 
+    # ── 错误知识库（v1.5.7）──
+    def _error_knowledge_store():
+        from .error_knowledge import ErrorKnowledgeStore
+        data_dir = getattr(cfg, "data_dir", None) or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+        return ErrorKnowledgeStore(os.path.join(data_dir, "error_knowledge"))
+
+    async def error_knowledge_list(request: Request):
+        """列出错误案例。"""
+        try:
+            qp = request.query_params
+            store = _error_knowledge_store()
+            result = store.list_errors(
+                error_type=qp.get("error_type") or None,
+                keyword=qp.get("keyword") or None,
+                agent_id=qp.get("agent_id") or None,
+                limit=int(qp.get("limit", 50)),
+                offset=int(qp.get("offset", 0)),
+            )
+            return _js(result)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def error_knowledge_stats(request: Request):
+        """错误统计。"""
+        try:
+            days = int(request.query_params.get("days", 7))
+            store = _error_knowledge_store()
+            result = store.get_stats(days=days)
+            return _js(result)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
     # ── AutoFlow Pro：/api/core/* 轻量 Agent 客户端 REST API（v1.5.0）──
     async def core_version(request: Request):
         """网关版本 + 兼容性检查。"""
@@ -842,8 +875,28 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                 "agent_id": agent_id,
             }
             _record_token("propose-dsl", agent_id, len(dsl), output_chars, "dsl")
+            # 失败时自动记录到错误知识库
+            if not result.get("ok"):
+                try:
+                    _error_knowledge_store().record(
+                        dsl=dsl,
+                        error_msg=result.get("error", "") or result.get("gate", {}).get("reason", ""),
+                        stage=result.get("stage", ""),
+                        agent_id=agent_id,
+                        proposal_id=result.get("proposal_id", ""),
+                    )
+                except Exception:
+                    pass
             return _js(result)
         except Exception as e:
+            # 异常也记录
+            try:
+                _error_knowledge_store().record(
+                    dsl=dsl, error_msg=str(e), stage="exception",
+                    agent_id=agent_id,
+                )
+            except Exception:
+                pass
             return _js({"ok": False, "error": str(e)}, 500)
 
     async def core_deploy_proposal(request: Request):
@@ -2931,6 +2984,9 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/keys/{key_id}", api_keys_update, methods=["PUT"]),
         Route("/api/keys/{key_id}/revoke", api_keys_revoke, methods=["POST"]),
         Route("/api/keys/logs", api_keys_logs, methods=["GET"]),
+        # 错误知识库（v1.5.7）
+        Route("/api/errors", error_knowledge_list, methods=["GET"]),
+        Route("/api/errors/stats", error_knowledge_stats, methods=["GET"]),
         # Token 统计（v1.5.3）
         Route("/api/core/token-stats", core_token_stats, methods=["GET"]),
         # AutoFlow Pro: /api/core/* 轻量 Agent 客户端 API
