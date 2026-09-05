@@ -621,7 +621,7 @@ async function loadTokenStats() {
 async function refreshTokenStats() {
   const days = $("#ts-days").value;
   try {
-    const r = await api("GET", "/core/token-stats?days=" + days);
+    const r = await api("GET", "/token-stats?days=" + days);
     if (!r.ok) throw new Error(r.data?.error || r.status);
     const s = r.data.stats;
 

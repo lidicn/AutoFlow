@@ -753,10 +753,20 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             pass
 
     async def core_token_stats(request: Request):
-        """Token 消耗统计。"""
+        """Token 消耗统计（Pro API，需 API Key）。"""
         agent_info, err = _require_api_key(request, required_perm="read")
         if err:
             return err
+        try:
+            days = int(request.query_params.get("days", 7))
+            store = _token_stats_store()
+            stats = store.get_stats(days=days)
+            return _js({"ok": True, "stats": stats})
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def internal_token_stats(request: Request):
+        """Token 消耗统计（WebUI 内部，session 认证）。"""
         try:
             days = int(request.query_params.get("days", 7))
             store = _token_stats_store()
@@ -3281,6 +3291,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/errors/stats", error_knowledge_stats, methods=["GET"]),
         # Token 统计（v1.5.3）
         Route("/api/core/token-stats", core_token_stats, methods=["GET"]),
+        Route("/api/token-stats", internal_token_stats, methods=["GET"]),
         # AutoFlow Pro: /api/core/* 轻量 Agent 客户端 API
         Route("/api/core/version", core_version, methods=["GET"]),
         Route("/api/core/health", core_health, methods=["GET"]),
