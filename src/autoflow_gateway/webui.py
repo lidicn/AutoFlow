@@ -817,7 +817,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                 if os.path.exists(_vp):
                     try:
                         with open(_vp, "r", encoding="utf-8") as f:
-                            ver = f.read().strip()
+                            ver = f.read().strip().lstrip("\ufeff").strip()
                         if ver and ver != "unknown":
                             break
                     except Exception:
@@ -964,32 +964,76 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                     for target in wire_group:
                         connections.append({"from": nid, "to": target})
 
+            # 构建邻接表
+            adj = {}
+            for c in connections:
+                adj.setdefault(c["from"], []).append(c["to"])
+
+            # BFS：从每个 trigger 出发，找所有可达的 action 节点
+            def _bfs_actions(start_id):
+                visited = set()
+                queue = [start_id]
+                found_actions = []
+                while queue:
+                    nid = queue.pop(0)
+                    if nid in visited:
+                        continue
+                    visited.add(nid)
+                    act = next((a for a in actions if a["id"] == nid), None)
+                    if act:
+                        found_actions.append(act)
+                    for nxt in adj.get(nid, []):
+                        if nxt not in visited:
+                            queue.append(nxt)
+                return found_actions
+
             # 生成 DSL 草稿
             dsl_lines = ["# AutoFlow DSL 草稿（从 raw JSON 转换，仅供参考）", ""]
+            action_ids_used = set()
             for i, trig in enumerate(triggers):
                 trig_name = trig["name"] or trig["type"]
                 dsl_lines.append(f"trigger: {trig_name}")
-                # 找这个触发节点连接的动作
-                downstream = [c["to"] for c in connections if c["from"] == trig["id"]]
-                for did in downstream:
-                    act = next((a for a in actions if a["id"] == did), None)
-                    if act:
-                        act_name = act["name"] or act["type"]
-                        # 尝试提取 HA 服务调用
-                        ha_domain = act["node"].get("domain", "")
-                        ha_service = act["node"].get("service", "")
-                        if ha_domain and ha_service:
-                            dsl_lines.append(f"  action: {ha_domain}.{ha_service}")
-                        else:
-                            dsl_lines.append(f"  action: {act_name}")
+                # BFS 找所有可达 action
+                reachable = _bfs_actions(trig["id"])
+                if not reachable:
+                    dsl_lines.append("  # 未找到可达的动作节点，请手动补充")
+                for act in reachable:
+                    act_name = act["name"] or act["type"]
+                    action_ids_used.add(act["id"])
+                    # 尝试提取 HA 服务调用
+                    ha_domain = act["node"].get("domain", "")
+                    ha_service = act["node"].get("service", "")
+                    if ha_domain and ha_service:
+                        dsl_lines.append(f"  action: {ha_domain}.{ha_service}")
+                    else:
+                        dsl_lines.append(f"  action: {act_name}")
+                dsl_lines.append("")
+
+            # 列出未被任何 trigger 覆盖的 action（孤立节点）
+            orphan_actions = [a for a in actions if a["id"] not in action_ids_used]
+            if orphan_actions:
+                dsl_lines.append("# 以下动作节点未被任何触发节点覆盖（可能是独立流程或孤立节点）")
+                for act in orphan_actions:
+                    act_name = act["name"] or act["type"]
+                    ha_domain = act["node"].get("domain", "")
+                    ha_service = act["node"].get("service", "")
+                    if ha_domain and ha_service:
+                        dsl_lines.append(f"# action: {ha_domain}.{ha_service}")
+                    else:
+                        dsl_lines.append(f"# action: {act_name}")
                 dsl_lines.append("")
 
             if not triggers:
                 dsl_lines.append("# 未识别到触发节点，请手动补充")
                 dsl_lines.append("trigger: <请填写触发条件>")
-                for act in actions[:3]:
+                for act in actions[:5]:
                     act_name = act["name"] or act["type"]
-                    dsl_lines.append(f"  action: {act_name}")
+                    ha_domain = act["node"].get("domain", "")
+                    ha_service = act["node"].get("service", "")
+                    if ha_domain and ha_service:
+                        dsl_lines.append(f"  action: {ha_domain}.{ha_service}")
+                    else:
+                        dsl_lines.append(f"  action: {act_name}")
 
             dsl_draft = "\n".join(dsl_lines)
 
