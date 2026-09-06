@@ -321,7 +321,10 @@ class ArenaManager:
             area_map = {}
             try:
                 if hasattr(self.gateway, 'ha') and self.gateway.ha:
-                    area_map = self.gateway.ha.entity_areas() or {}
+                    # HALayer 没有 entity_areas，需要用 .client
+                    client = getattr(self.gateway.ha, 'client', None) or self.gateway.ha
+                    if hasattr(client, 'entity_areas'):
+                        area_map = client.entity_areas() or {}
             except Exception:
                 pass
             result = []
