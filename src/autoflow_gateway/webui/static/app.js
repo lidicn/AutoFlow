@@ -118,7 +118,7 @@ function fmtTime(s) {
 }
 
 // ── 导航（C1/C3：工作区 + 版本同步已移除，新增设置管理界面）──
-const TABS = ["dashboard", "tutorials", "safe", "proposals", "deployed", "subflows", "link_apis", "agents", "deploy_tokens", "api_keys", "templates", "token_stats", "error_kb", "experience", "diagnostics", "notes", "settings", "help", "acp_tokens", "llm_settings", "llm_agent", "update"];
+const TABS = ["dashboard", "tutorials", "safe", "proposals", "deployed", "subflows", "link_apis", "agents", "deploy_tokens", "api_keys", "templates", "token_stats", "error_kb", "experience", "arena", "diagnostics", "notes", "settings", "help", "acp_tokens", "llm_settings", "llm_agent", "update"];
 function setTab(tab) {
   if (!TABS.includes(tab)) tab = "dashboard";
   $$(".navitem[data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
