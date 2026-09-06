@@ -5022,9 +5022,17 @@ async function arenaOpen(arenaId) {
             `).join("") : '<div class="empty">暂无数据</div>'}
           </div>
           <div class="card">
-            <h3 style="margin:0 0 12px">📦 虚拟设备</h3>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+              <h3 style="margin:0">📦 设备池</h3>
+              <button class="btn" style="font-size:12px;padding:4px 10px" onclick="arenaSyncModal()">从 HA 同步</button>
+            </div>
             <div style="font-size:12px;line-height:1.8">
-              ${a.devices.map(d => `<div><code>${esc(d.entity_id)}</code> <span style="color:var(--text-muted)">${esc(d.friendly_name)}</span></div>`).join("")}
+              ${a.devices.length ? a.devices.map(d => `
+                <div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0">
+                  <span><code>${esc(d.entity_id)}</code> <span style="color:var(--text-muted)">${esc(d.friendly_name)}</span>${d.synced_from_ha ? ' <span class="badge" style="font-size:10px;background:#4caf50;color:#fff">真实</span>' : ''}</span>
+                  <button class="btn" style="font-size:11px;padding:2px 8px;color:#f44336" onclick="arenaRemoveDevice('${esc(d.entity_id)}')">移除</button>
+                </div>
+              `).join("") : '<div class="empty">暂无设备，点击「从 HA 同步」添加</div>'}
             </div>
           </div>
         </div>
@@ -5065,6 +5073,91 @@ function arenaBack() {
   $("#arena-detail").hidden = true;
   $("#arena-arenas").hidden = false;
   refreshArenaList();
+}
+
+async function arenaSyncModal() {
+  const a = _arena_current;
+  if (!a) return;
+  // 先加载 HA 设备列表
+  modal("从真实 HA 同步设备", `<div class="empty">加载中…</div>`);
+  try {
+    // 用分区名作为区域筛选（去掉"竞技场"后缀）
+    const arenaName = a.replace("_", " ").replace("room", "").trim();
+    const r = await api("GET", "/arena/ha_devices");
+    if (!r.ok) throw new Error(r.data?.error || "加载失败");
+    const devices = r.data.devices || [];
+    // 按区域分组
+    const byArea = {};
+    devices.forEach(d => {
+      const area = d.area || "未分组";
+      if (!byArea[area]) byArea[area] = [];
+      byArea[area].push(d);
+    });
+    const areas = Object.keys(byArea).sort();
+    modal("从真实 HA 同步设备", `
+      <div style="max-height:400px;overflow-y:auto;margin-bottom:12px">
+        ${areas.map(area => `
+          <div style="margin-bottom:12px">
+            <div style="font-weight:600;font-size:13px;margin-bottom:6px;color:var(--text-muted)">${esc(area)}（${byArea[area].length}个）</div>
+            ${byArea[area].map(d => `
+              <label style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px;cursor:pointer">
+                <input type="checkbox" class="arena-sync-cb" value="${esc(d.entity_id)}" />
+                <code>${esc(d.entity_id)}</code>
+                <span style="color:var(--text-muted)">${esc(d.friendly_name)}</span>
+              </label>
+            `).join("")}
+          </div>
+        `).join("")}
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn" onclick="closeModal()">取消</button>
+        <button class="btn btn-primary" onclick="arenaSyncSubmit()">同步选中设备</button>
+        <span style="font-size:12px;color:var(--text-muted)">已选 <span id="arena-sync-count">0</span> 个</span>
+      </div>
+    `);
+    // 绑定计数
+    setTimeout(() => {
+      document.querySelectorAll(".arena-sync-cb").forEach(cb => {
+        cb.addEventListener("change", () => {
+          const n = document.querySelectorAll(".arena-sync-cb:checked").length;
+          const el = $("#arena-sync-count");
+          if (el) el.textContent = n;
+        });
+      });
+    }, 50);
+  } catch (e) {
+    modal("从真实 HA 同步设备", `<div class="empty">加载失败: ${esc(e.message)}</div><div style="text-align:right;margin-top:12px"><button class="btn" onclick="closeModal()">关闭</button></div>`);
+  }
+}
+
+async function arenaSyncSubmit() {
+  const a = _arena_current;
+  const checked = Array.from(document.querySelectorAll(".arena-sync-cb:checked")).map(cb => cb.value);
+  if (!checked.length) { toast("请至少选择一个设备", "error"); return; }
+  try {
+    const r = await api("POST", `/arena/arenas/${a}/sync_devices`, { entity_ids: checked });
+    if (r.ok) {
+      toast(`已同步 ${r.data.added} 个设备`, "success");
+      closeModal();
+      arenaOpen(a);
+    } else {
+      toast(r.data?.error || "同步失败", "error");
+    }
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function arenaRemoveDevice(entityId) {
+  const a = _arena_current;
+  if (!confirm(`确定移除设备 ${entityId}？`)) return;
+  try {
+    const r = await api("POST", `/arena/arenas/${a}/remove_device`, { entity_id: entityId });
+    if (r.ok) {
+      toast("已移除", "success");
+      arenaOpen(a);
+    } else {
+      toast(r.data?.error || "移除失败", "error");
+    }
+  } catch (e) { toast(e.message, "error"); }
 }
 
 function arenaProposeModal() {

@@ -1697,6 +1697,41 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         except Exception as e:
             return _js({"ok": False, "error": str(e)}, 500)
 
+    async def arena_ha_devices(request: Request):
+        """获取真实 HA 设备列表（按区域筛选），用于同步到竞技场。"""
+        try:
+            area = request.query_params.get("area", "")
+            devices = await asyncio.to_thread(arena_mgr.get_ha_devices, area or None)
+            return _js({"ok": True, "devices": devices})
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def arena_sync_devices(request: Request):
+        """将选定的真实 HA 设备同步到竞技场分区。"""
+        try:
+            body = await request.json()
+            arena_id = request.path_params["arena_id"]
+            entity_ids = body.get("entity_ids", [])
+            if not isinstance(entity_ids, list) or not entity_ids:
+                return _js({"ok": False, "error": "entity_ids 不能为空"}, 400)
+            result = await asyncio.to_thread(arena_mgr.sync_devices, arena_id, entity_ids)
+            return _js(result)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def arena_remove_device(request: Request):
+        """从竞技场分区移除设备。"""
+        try:
+            body = await request.json()
+            arena_id = request.path_params["arena_id"]
+            entity_id = body.get("entity_id", "")
+            if not entity_id:
+                return _js({"ok": False, "error": "entity_id 不能为空"}, 400)
+            result = await asyncio.to_thread(arena_mgr.remove_device, arena_id, entity_id)
+            return _js(result)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
     # ── 诊断查看器（P4-C，只读）──
     async def diagnostics_view(request: Request):
         """聚合 env/health、各类计数、最近结构化 trace，供 WebUI 诊断 tab 只读展示。
@@ -3412,6 +3447,9 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/arena/arenas/{arena_id}/submit", arena_submit_flow, methods=["POST"]),
         Route("/api/arena/arenas/{arena_id}/leaderboard", arena_leaderboard, methods=["GET"]),
         Route("/api/arena/stats", arena_stats, methods=["GET"]),
+        Route("/api/arena/ha_devices", arena_ha_devices, methods=["GET"]),
+        Route("/api/arena/arenas/{arena_id}/sync_devices", arena_sync_devices, methods=["POST"]),
+        Route("/api/arena/arenas/{arena_id}/remove_device", arena_remove_device, methods=["POST"]),
         # 设置管理界面（C3/C21/C25）
         Route("/api/connection/test", connection_test, methods=["POST"]),
         # 连接设置（#45）：HA / NR / Bark 凭据界面化，避免用户硬编码进脚本

@@ -293,6 +293,137 @@ class ArenaManager:
             "locked_tasks": len([t for t in tasks if t.get("status") == "locked"]),
         }
 
+    # ── 设备管理（从真实 HA 同步） ──
+
+    def get_ha_devices(self, area_name: Optional[str] = None) -> List[Dict]:
+        """从 gateway 的 device_catalog 获取真实 HA 设备列表。
+
+        Args:
+            area_name: 按区域名筛选（如 "书房"），None 返回全部
+        Returns:
+            设备列表，每项含 entity_id, friendly_name, area, state, domain, attributes
+        """
+        if not self.gateway:
+            return []
+        try:
+            cat = self.gateway.state.get_device_catalog()
+            ents = cat.get("entities", {})
+            if isinstance(ents, dict):
+                ents = list(ents.values())
+            result = []
+            for e in ents:
+                eid = e.get("entity_id", "")
+                if not eid:
+                    continue
+                area = e.get("area", "")
+                if area_name and area != area_name:
+                    continue
+                domain = eid.split(".", 1)[0]
+                result.append({
+                    "entity_id": eid,
+                    "friendly_name": e.get("friendly_name") or eid,
+                    "area": area,
+                    "state": e.get("state") or "",
+                    "domain": domain,
+                    "attributes": e.get("attributes") or {},
+                })
+            return result
+        except Exception as ex:
+            print(f"[arena] get_ha_devices 失败: {ex}")
+            return []
+
+    def sync_devices(self, arena_id: str, entity_ids: List[str]) -> Dict:
+        """将选定的真实 HA 设备同步到竞技场分区。
+
+        - 从 device_catalog 查找这些 entity_id 的完整信息
+        - 追加到分区的 devices 列表（已存在的跳过，去重）
+        - 更新 vhass 种子文件并重置 vhass
+        """
+        arena = self._get_arena(arena_id)
+        if not arena:
+            return {"ok": False, "error": "分区不存在"}
+        if not self.gateway:
+            return {"ok": False, "error": "gateway 未连接"}
+        # 从 device_catalog 查找
+        cat = self.gateway.state.get_device_catalog()
+        ents = cat.get("entities", {})
+        if isinstance(ents, dict):
+            ents = list(ents.values())
+        cat_map = {e.get("entity_id"): e for e in ents if e.get("entity_id")}
+
+        existing_ids = set(d["entity_id"] for d in arena.get("devices", []))
+        added = []
+        for eid in entity_ids:
+            eid = eid.strip()
+            if not eid or eid in existing_ids:
+                continue
+            e = cat_map.get(eid)
+            if not e:
+                continue
+            domain = eid.split(".", 1)[0]
+            arena.setdefault("devices", []).append({
+                "entity_id": eid,
+                "friendly_name": e.get("friendly_name") or eid,
+                "area": e.get("area", ""),
+                "state": e.get("state") or "",
+                "domain": domain,
+                "attributes": e.get("attributes") or {},
+                "synced_from_ha": True,
+                "synced_at": _utcnow_iso(),
+            })
+            existing_ids.add(eid)
+            added.append(eid)
+
+        # 保存 arenas.json
+        arenas = self._load_arenas()
+        for i, a in enumerate(arenas):
+            if a["id"] == arena_id:
+                arenas[i] = arena
+                break
+        self._save_json(self.arenas_file, {"arenas": arenas})
+
+        # 更新 vhass 种子文件
+        self._rewrite_seed(arena_id, arena)
+        # 重置 vhass
+        self._reset_vhass(arena_id)
+
+        return {"ok": True, "added": len(added), "added_ids": added,
+                "total_devices": len(arena.get("devices", []))}
+
+    def remove_device(self, arena_id: str, entity_id: str) -> Dict:
+        """从竞技场分区移除设备。"""
+        arena = self._get_arena(arena_id)
+        if not arena:
+            return {"ok": False, "error": "分区不存在"}
+        devices = arena.get("devices", [])
+        before = len(devices)
+        arena["devices"] = [d for d in devices if d["entity_id"] != entity_id]
+        after = len(arena["devices"])
+        if before == after:
+            return {"ok": False, "error": "设备不存在"}
+
+        arenas = self._load_arenas()
+        for i, a in enumerate(arenas):
+            if a["id"] == arena_id:
+                arenas[i] = arena
+                break
+        self._save_json(self.arenas_file, {"arenas": arenas})
+
+        self._rewrite_seed(arena_id, arena)
+        self._reset_vhass(arena_id)
+        return {"ok": True, "removed": entity_id, "total_devices": after}
+
+    def _rewrite_seed(self, arena_id: str, arena: Dict):
+        """根据 arena.devices 重写 vhass 种子文件。"""
+        seed_path = os.path.join(self.data_dir, f"{arena_id}_seed.json")
+        seed = {
+            "version": 1,
+            "areas": {arena_id: arena.get("name", arena_id)},
+            "entities": arena.get("devices", []),
+        }
+        with open(seed_path, "w", encoding="utf-8") as f:
+            json.dump(seed, f, ensure_ascii=False, indent=2)
+
     # ── 题目管理 ──
 
     def list_tasks(self, arena_id: str, status: Optional[str] = None) -> List[Dict]:
