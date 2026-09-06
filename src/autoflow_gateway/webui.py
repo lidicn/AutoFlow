@@ -101,8 +101,14 @@ def _bootstrap_webui_token(cfg) -> Optional[str]:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(tok)
-            os.chmod(p, 0o600)
+            os.chmod(tmp, 0o600)     # 先对临时文件设权限，再 rename 到目标路径
             os.replace(tmp, p)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
         finally:
             try:
                 os.unlink(tmp)

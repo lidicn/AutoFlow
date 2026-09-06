@@ -121,6 +121,7 @@ class TestBufferAndRead(unittest.TestCase):
         b = make_bridge()
         b._handle_message(json.dumps({"topic": "debug", "data": {
             "id": "n1", "name": "d", "msg": "v1", "_path": {"id": "f1"}}}))
+        time.sleep(0.01)  # 确保 received_at 不同时序正确
         b._handle_message(json.dumps({"id": "n2", "msg": "v2", "z": "f1"}))
         res = b.read()
         self.assertTrue(res["ok"])
