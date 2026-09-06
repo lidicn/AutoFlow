@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 AutoFlow Gateway — WebUI 后端（人类控制面）
@@ -1698,11 +1698,22 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             return _js({"ok": False, "error": str(e)}, 500)
 
     async def arena_ha_devices(request: Request):
-        """获取真实 HA 设备列表（按区域筛选），用于同步到竞技场。"""
+        """获取真实 HA 设备列表（按区域/domain/关键词筛选），用于同步到竞技场。"""
         try:
             area = request.query_params.get("area", "")
-            devices = await asyncio.to_thread(arena_mgr.get_ha_devices, area or None)
+            domain = request.query_params.get("domain", "")
+            keyword = request.query_params.get("keyword", "")
+            devices = await asyncio.to_thread(
+                arena_mgr.get_ha_devices, area or None, domain or None, keyword or None)
             return _js({"ok": True, "devices": devices})
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def arena_ha_areas(request: Request):
+        """获取 HA 所有区域及设备数量，用于筛选下拉。"""
+        try:
+            areas = await asyncio.to_thread(arena_mgr.get_ha_areas)
+            return _js({"ok": True, "areas": areas})
         except Exception as e:
             return _js({"ok": False, "error": str(e)}, 500)
 
@@ -3448,6 +3459,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/arena/arenas/{arena_id}/leaderboard", arena_leaderboard, methods=["GET"]),
         Route("/api/arena/stats", arena_stats, methods=["GET"]),
         Route("/api/arena/ha_devices", arena_ha_devices, methods=["GET"]),
+        Route("/api/arena/ha_areas", arena_ha_areas, methods=["GET"]),
         Route("/api/arena/arenas/{arena_id}/sync_devices", arena_sync_devices, methods=["POST"]),
         Route("/api/arena/arenas/{arena_id}/remove_device", arena_remove_device, methods=["POST"]),
         # 设置管理界面（C3/C21/C25）

@@ -5078,56 +5078,121 @@ function arenaBack() {
 async function arenaSyncModal() {
   const a = _arena_current;
   if (!a) return;
-  // 先加载 HA 设备列表
-  modal("从真实 HA 同步设备", `<div class="empty">加载中…</div>`);
+  window._arena_sync_filter = { area: "", domain: "", keyword: "" };
+  modal("从真实 HA 同步设备", `
+    <div style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">
+      <select id="arena-sync-area" class="input" style="flex:1;min-width:120px;font-size:13px">
+        <option value="">全部区域</option>
+      </select>
+      <select id="arena-sync-domain" class="input" style="width:110px;font-size:13px">
+        <option value="">全部类型</option>
+        <option value="light">灯</option>
+        <option value="switch">开关</option>
+        <option value="cover">窗帘</option>
+        <option value="climate">空调</option>
+        <option value="fan">风扇</option>
+        <option value="media_player">媒体</option>
+        <option value="lock">锁</option>
+        <option value="sensor">传感器</option>
+        <option value="binary_sensor">二元传感</option>
+        <option value="input_boolean">布尔</option>
+      </select>
+      <input id="arena-sync-search" class="input" placeholder="搜索设备名…" style="flex:1;min-width:120px;font-size:13px" />
+    </div>
+    <div id="arena-sync-list" style="max-height:350px;overflow-y:auto;margin-bottom:12px;border:1px solid var(--border);border-radius:6px;padding:8px">
+      <div class="empty">加载中…</div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="arenaSyncSubmit()">同步选中</button>
+      <button class="btn" style="font-size:12px" onclick="arenaSyncSelectAll()">全选</button>
+      <button class="btn" style="font-size:12px" onclick="arenaSyncSelectNone()">清空</button>
+      <span style="font-size:12px;color:var(--text-muted)">已选 <span id="arena-sync-count">0</span> / 显示 <span id="arena-sync-total">0</span></span>
+    </div>
+  `);
+  // 加载区域列表
   try {
-    // 用分区名作为区域筛选（去掉"竞技场"后缀）
-    const arenaName = a.replace("_", " ").replace("room", "").trim();
-    const r = await api("GET", "/arena/ha_devices");
+    const ar = await api("GET", "/arena/ha_areas");
+    if (ar.ok && ar.data.areas) {
+      const sel = $("#arena-sync-area");
+      ar.data.areas.forEach(a => {
+        const opt = document.createElement("option");
+        opt.value = a.name;
+        opt.textContent = `${a.name}（${a.count}）`;
+        sel.appendChild(opt);
+      });
+    }
+  } catch (e) { console.warn("加载区域失败", e); }
+  // 绑定筛选事件
+  setTimeout(() => {
+    ["arena-sync-area", "arena-sync-domain"].forEach(id => {
+      const el = $("#" + id);
+      if (el) el.addEventListener("change", () => arenaSyncRefresh());
+    });
+    const search = $("#arena-sync-search");
+    if (search) {
+      let t;
+      search.addEventListener("input", () => {
+        clearTimeout(t);
+        t = setTimeout(() => arenaSyncRefresh(), 300);
+      });
+    }
+    arenaSyncRefresh();
+  }, 50);
+}
+
+async function arenaSyncRefresh() {
+  const area = $("#arena-sync-area")?.value || "";
+  const domain = $("#arena-sync-domain")?.value || "";
+  const keyword = $("#arena-sync-search")?.value || "";
+  const listEl = $("#arena-sync-list");
+  if (!listEl) return;
+  listEl.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const params = new URLSearchParams();
+    if (area) params.set("area", area);
+    if (domain) params.set("domain", domain);
+    if (keyword) params.set("keyword", keyword);
+    const r = await api("GET", "/arena/ha_devices?" + params.toString());
     if (!r.ok) throw new Error(r.data?.error || "加载失败");
     const devices = r.data.devices || [];
-    // 按区域分组
-    const byArea = {};
-    devices.forEach(d => {
-      const area = d.area || "未分组";
-      if (!byArea[area]) byArea[area] = [];
-      byArea[area].push(d);
-    });
-    const areas = Object.keys(byArea).sort();
-    modal("从真实 HA 同步设备", `
-      <div style="max-height:400px;overflow-y:auto;margin-bottom:12px">
-        ${areas.map(area => `
-          <div style="margin-bottom:12px">
-            <div style="font-weight:600;font-size:13px;margin-bottom:6px;color:var(--text-muted)">${esc(area)}（${byArea[area].length}个）</div>
-            ${byArea[area].map(d => `
-              <label style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px;cursor:pointer">
-                <input type="checkbox" class="arena-sync-cb" value="${esc(d.entity_id)}" />
-                <code>${esc(d.entity_id)}</code>
-                <span style="color:var(--text-muted)">${esc(d.friendly_name)}</span>
-              </label>
-            `).join("")}
-          </div>
-        `).join("")}
-      </div>
-      <div style="display:flex;gap:8px;align-items:center">
-        <button class="btn" onclick="closeModal()">取消</button>
-        <button class="btn btn-primary" onclick="arenaSyncSubmit()">同步选中设备</button>
-        <span style="font-size:12px;color:var(--text-muted)">已选 <span id="arena-sync-count">0</span> 个</span>
-      </div>
-    `);
+    $("#arena-sync-total").textContent = devices.length;
+    if (!devices.length) {
+      listEl.innerHTML = '<div class="empty">无匹配设备</div>';
+      return;
+    }
+    listEl.innerHTML = devices.map(d => `
+      <label style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px;cursor:pointer;border-bottom:1px solid var(--border)">
+        <input type="checkbox" class="arena-sync-cb" value="${esc(d.entity_id)}" />
+        <span style="min-width:60px"><span class="badge" style="font-size:10px;background:var(--bg-soft)">${esc(d.domain)}</span></span>
+        <code style="flex:1">${esc(d.entity_id)}</code>
+        <span style="color:var(--text-muted);font-size:12px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(d.friendly_name)}</span>
+      </label>
+    `).join("");
     // 绑定计数
-    setTimeout(() => {
-      document.querySelectorAll(".arena-sync-cb").forEach(cb => {
-        cb.addEventListener("change", () => {
-          const n = document.querySelectorAll(".arena-sync-cb:checked").length;
-          const el = $("#arena-sync-count");
-          if (el) el.textContent = n;
-        });
+    document.querySelectorAll(".arena-sync-cb").forEach(cb => {
+      cb.addEventListener("change", () => {
+        const n = document.querySelectorAll(".arena-sync-cb:checked").length;
+        const el = $("#arena-sync-count");
+        if (el) el.textContent = n;
       });
-    }, 50);
+    });
   } catch (e) {
-    modal("从真实 HA 同步设备", `<div class="empty">加载失败: ${esc(e.message)}</div><div style="text-align:right;margin-top:12px"><button class="btn" onclick="closeModal()">关闭</button></div>`);
+    listEl.innerHTML = `<div class="empty">加载失败: ${esc(e.message)}</div>`;
   }
+}
+
+function arenaSyncSelectAll() {
+  document.querySelectorAll(".arena-sync-cb").forEach(cb => cb.checked = true);
+  const n = document.querySelectorAll(".arena-sync-cb:checked").length;
+  const el = $("#arena-sync-count");
+  if (el) el.textContent = n;
+}
+
+function arenaSyncSelectNone() {
+  document.querySelectorAll(".arena-sync-cb").forEach(cb => cb.checked = false);
+  const el = $("#arena-sync-count");
+  if (el) el.textContent = 0;
 }
 
 async function arenaSyncSubmit() {

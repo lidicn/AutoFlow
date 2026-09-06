@@ -295,11 +295,18 @@ class ArenaManager:
 
     # ── 设备管理（从真实 HA 同步） ──
 
-    def get_ha_devices(self, area_name: Optional[str] = None) -> List[Dict]:
-        """从 gateway 的 device_catalog 获取真实 HA 设备列表。
+    def get_ha_devices(self, area_name: Optional[str] = None,
+                       domain: Optional[str] = None,
+                       keyword: Optional[str] = None) -> List[Dict]:
+        """从 gateway 的 device_catalog + HA websocket 注册表获取真实 HA 设备列表。
+
+        device_catalog 的 area 字段可能为空（refresh 失败时），
+        用 gateway.ha.entity_areas() 补全区域信息（entity_id → area_name）。
 
         Args:
             area_name: 按区域名筛选（如 "书房"），None 返回全部
+            domain: 按 domain 筛选（如 "light"），None 返回全部
+            keyword: 按 entity_id 或 friendly_name 关键词过滤
         Returns:
             设备列表，每项含 entity_id, friendly_name, area, state, domain, attributes
         """
@@ -310,26 +317,54 @@ class ArenaManager:
             ents = cat.get("entities", {})
             if isinstance(ents, dict):
                 ents = list(ents.values())
+            # 从 HA websocket 注册表获取区域映射（比 device_catalog 的 area 更可靠）
+            area_map = {}
+            try:
+                if hasattr(self.gateway, 'ha') and self.gateway.ha:
+                    area_map = self.gateway.ha.entity_areas() or {}
+            except Exception:
+                pass
             result = []
             for e in ents:
                 eid = e.get("entity_id", "")
                 if not eid:
                     continue
-                area = e.get("area", "")
+                # 优先用 websocket 注册表的区域，兜底用 device_catalog 的 area
+                area = area_map.get(eid) or e.get("area", "")
                 if area_name and area != area_name:
                     continue
-                domain = eid.split(".", 1)[0]
+                dom = eid.split(".", 1)[0]
+                if domain and dom != domain:
+                    continue
+                fn = e.get("friendly_name") or eid
+                if keyword and keyword.lower() not in eid.lower() and keyword.lower() not in fn.lower():
+                    continue
                 result.append({
                     "entity_id": eid,
-                    "friendly_name": e.get("friendly_name") or eid,
+                    "friendly_name": fn,
                     "area": area,
                     "state": e.get("state") or "",
-                    "domain": domain,
+                    "domain": dom,
                     "attributes": e.get("attributes") or {},
                 })
             return result
         except Exception as ex:
             print(f"[arena] get_ha_devices 失败: {ex}")
+            return []
+
+    def get_ha_areas(self) -> List[Dict]:
+        """获取 HA 所有区域及设备数量，用于筛选下拉。"""
+        if not self.gateway:
+            return []
+        try:
+            devices = self.get_ha_devices()
+            area_count = {}
+            for d in devices:
+                a = d.get("area") or "未分组"
+                area_count[a] = area_count.get(a, 0) + 1
+            return [{"name": a, "count": c} for a, c in sorted(area_count.items(), key=lambda x: -x[1])]
+        except Exception as ex:
+            print(f"[arena] get_ha_areas 失败: {ex}")
             return []
 
     def sync_devices(self, arena_id: str, entity_ids: List[str]) -> Dict:
