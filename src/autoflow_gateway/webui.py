@@ -85,7 +85,9 @@ def _bootstrap_webui_token(cfg) -> Optional[str]:
 
     - 已设 AF_WEBUI_TOKEN 或文件已存在 → 不生成，返回 None（幂等）。
     - 生成的令牌写入 data_dir/.webui_token（docker 下即 ./data/.webui_token，持久化、重启不失效），
-      并打印到 stdout 供 `docker compose logs` 查看。guarded() 每次请求实时解析，写文件即时生效。
+      文件权限 0600。guarded() 每次请求实时解析，写文件即时生效。
+    - ★ 安全（M7）：**令牌绝不打印到 stdout**。`docker compose logs` 是控制面凭证，
+      日志泄露 = 网关失陷，故只打印文件路径，令牌需 `docker exec` 读文件或宿主机 cat 获取。
     - 本地开发不设 AF_WEBUI_TOKEN_AUTO 时，维持原行为（无令牌则仅本机开放、外部 403）。
     """
     if os.environ.get("AF_WEBUI_TOKEN_AUTO", "").lower() not in ("1", "true", "yes"):
@@ -101,6 +103,7 @@ def _bootstrap_webui_token(cfg) -> Optional[str]:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(tok)
+            os.chmod(tmp, 0o600)  # M7：令牌文件仅属主可读
             os.replace(tmp, p)
         finally:
             try:
@@ -110,8 +113,11 @@ def _bootstrap_webui_token(cfg) -> Optional[str]:
     except Exception as e:
         print(f"[WebUI] 警告：生成 .webui_token 失败（{e}），WebUI 仅本机开放。", flush=True)
         return None
+    # M7：只打印路径，不打印令牌本身（docker compose logs 泄露 = 控制面失陷）
     print(f"[WebUI] 首次启动已生成访问令牌 -> {p}", flush=True)
-    print(f"[WebUI] 浏览器访问 WebUI 请携带 ?token={tok}（或登录页粘贴）。令牌已写入文件，重启不失效。", flush=True)
+    print(f"[WebUI] 取令牌：docker exec <容器> cat {p}"
+          f"（宿主机挂载时直接 cat ./data/.webui_token）。"
+          f"浏览器访问携带 ?token=<令牌> 或在登录页粘贴；令牌已落盘，重启不失效。", flush=True)
     return tok
 
 

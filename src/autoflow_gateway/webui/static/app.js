@@ -3340,7 +3340,7 @@ async function doImportSubflow() {
 // 只读自省用户 tab，注册薄桥接（link_out），不改动用户 NR 流。多参数 TTS 队列支持逐行增删编辑。
 function showImportLinkApiFromTab() {
   modal("从 tab 链接导入 Link API", `
-    <p class="desc">把 Node-RED 编辑器里的 tab 链接（如 <code>http://192.168.2.200:1990/#flow/e70a201b5f004927</code>）粘贴进来。
+    <p class="desc">把 Node-RED 编辑器里的 tab 链接（如 <code>http://<NAS_IP>:1990/#flow/e70a201b5f004927</code>）粘贴进来。
     网关会<b>只读</b>自省该 tab，判断能否注册成可调用 API——之后 agent 写 flow 时说「使用 TTS」或「智能语音播报队列」即可调用。不会改动你的 NR 流。</p>
     <div class="field"><label>tab 链接</label><input id="lt-url" placeholder="http://host:1990/#flow/<tabid>"></div>
     <button class="btn primary" id="lt-detect">检测能否注册</button>

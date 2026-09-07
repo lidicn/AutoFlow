@@ -176,13 +176,13 @@ cd E:\NAS\autoflow
 git archive --format=tar.gz --output=C:\Users\lidicn\AppData\Local\Temp\autoflow_vXXX.tar.gz HEAD
 
 # 2. SCP 到 NAS
-scp C:\Users\lidicn\AppData\Local\Temp\autoflow_vXXX.tar.gz lidicn@192.168.2.200:/tmp/
+scp C:\Users\lidicn\AppData\Local\Temp\autoflow_vXXX.tar.gz lidicn@<NAS_IP>:/tmp/
 
 # 3. SSH 解压并重启
-ssh lidicn@192.168.2.200 "cd /vol1/1000/docker/autoflow && tar -xzf /tmp/autoflow_vXXX.tar.gz --overwrite && docker restart autoflow_gateway"
+ssh lidicn@<NAS_IP> "cd /vol1/1000/docker/autoflow && tar -xzf /tmp/autoflow_vXXX.tar.gz --overwrite && docker restart autoflow_gateway"
 
 # 4. 验证
-curl http://192.168.2.200:8000/api/core/version
+curl http://<NAS_IP>:8000/api/core/version
 ```
 
 **NAS 关键路径：**
@@ -354,7 +354,7 @@ data/arena/
 - 每个版本提交前做语法检查 + 冒烟测试（curl 验证核心接口）
 - 每 2-3 个开发版本后集中开工单给 wb2
 - P0/P1 bug 立即修复
-- 测试工单路径：`\\100.112.138.64\share\AutoFlowTestv2\tests`
+- 测试工单路径：`\\<SHARE_HOST>\share\AutoFlowTestv2\tests`
 
 ### 8.2 wb2 测试环境
 
@@ -365,16 +365,16 @@ data/arena/
 
 ```bash
 # 版本验证
-curl http://192.168.2.200:8000/api/core/version
+curl http://<NAS_IP>:8000/api/core/version
 
 # 竞技场分区列表
-curl -b "session=xxx" http://192.168.2.200:8000/api/arena/arenas
+curl -b "session=xxx" http://<NAS_IP>:8000/api/arena/arenas
 
 # 竞技场区域列表（设备同步用）
-curl -b "session=xxx" http://192.168.2.200:8000/api/arena/ha_areas
+curl -b "session=xxx" http://<NAS_IP>:8000/api/arena/ha_areas
 
 # WebUI 页面加载
-curl -I http://192.168.2.200:8000/
+curl -I http://<NAS_IP>:8000/
 ```
 
 ---
@@ -383,7 +383,7 @@ curl -I http://192.168.2.200:8000/
 
 ### 9.1 memory-agent
 
-- 运行在 192.168.2.200:8086
+- 运行在 <NAS_IP>:8086
 - 项目目录：E:\NAS\memory-agent
 - 竞技场对接交接单已写入：`E:\NAS\memory-agent\docs\交接单_AutoFlow竞技场对接.md`
 - 4 个任务：get_arena_inspiration (P0)、evaluate_creativity (P0)、record_arena_result (P1)、数据快照 (P1)
@@ -391,14 +391,14 @@ curl -I http://192.168.2.200:8000/
 
 ### 9.2 Home Assistant
 
-- 地址：http://192.168.2.200:8123
+- 地址：http://<NAS_IP>:8123
 - Long-Lived Token 配置在网关环境变量
 - 2883 个设备，15 个区域
 
 ### 9.3 Node-RED
 
-- NR1880 生产：http://192.168.2.200:1880，33 tab/1061 节点
-- NR1990 开发：http://192.168.2.200:1990，35 tab/1282 节点（已从备份恢复）
+- NR1880 生产：http://<NAS_IP>:1880，33 tab/1061 节点
+- NR1990 开发：http://<NAS_IP>:1990，35 tab/1282 节点（已从备份恢复）
 - NR1990 空竞技场备份：`/vol1/1000/docker/Node-RED-dev/flows.json.arena-empty-backup`
 
 ---

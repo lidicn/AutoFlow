@@ -1,6 +1,10 @@
 # AutoFlow 开发路线图与测试节奏
 
-> **创建时间**：2026-09-05
+> ## ⛔ 已作废（2026-09-08）—— 内容停在 v1.5.6
+>
+> 当前版本已到 **v2.0.11-beta**，路线图已被 [`../05_handoff/PROJECT_HANDOFF_20260907.md`](../05_handoff/PROJECT_HANDOFF_20260907.md)
+> 的「下一步建议」和 [`../02_architecture/ARCHITECTURE.md`](../02_architecture/ARCHITECTURE.md) §18 取代。
+> 保留仅为历史留档。
 > **负责人**：dw
 > **当前版本**：v1.5.6
 > **原则**：开发迭代 → 集中测试 → 修复发布，按阶段推进，不频繁打断

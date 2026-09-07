@@ -264,20 +264,23 @@ NR flow JSON
 - **`llm_client.py`** — 自带 LLM 客户端（OpenAI 兼容 `/chat/completions`，多后端 fallback + 日志脱敏）。
 - **`self_update.py`** — 受控自更新（见 §7 护栏）；WebUI 自更新只识别 `v*` tag。
 - **`debug_bridge.py`** — NR 5.x 原生 debug 事件旁路采集（见 §8）。
+- ☆ **`arena.py`** — **竞技场**（v2.0 主线）：分区 → 自由命题 → 三层题目审核 → vhass 验收 → 题目锁定 → 排行榜。数据落在 `data/arena/`。设计见 [04_ideas/ARENA_free_writing_design.md](../04_ideas/ARENA_free_writing_design.md)。
+- ☆ **`experience.py`** — 经验数据收集管道（v1.6）：每次 DSL 提交/验收的结果回流成经验，喂给 `error_knowledge.py` 与智能推荐。
 
 ---
 
-## 11. 模块速查表（`src/autoflow_gateway/`，39 个）
+## 11. 模块速查表（`src/autoflow_gateway/`，50 个 .py）
 
-> 2026-09-02 对源码核对。**加粗**为两份旧架构文档均未记录的模块。
+> **2026-09-08 重新接手时核对**（上一版为 2026-09-02 的 39 个）。
+> ☆ 标记 = v1.4–v2.0（dw 主导期）新增，上一版表格完全没有的模块，共 **9 个**。
 
 **入口 / 门面**
 
 | 模块 | 一句话 |
 |---|---|
-| `gateway.py` (8885 行) | 核心门面，聚合一切；`_GOLDEN_JOBS` + `_TRACE_RING` |
+| `gateway.py` (9172 行) | 核心门面，聚合一切；`_GOLDEN_JOBS` + `_TRACE_RING` |
 | `mcp_server.py` | MCP 服务 + Bearer 中间件；47 个 `autoflow_*` 工具 |
-| `webui.py` (2359 行) | WebUI ASGI 应用（治理/控制面，无业务逻辑） |
+| `webui.py` (3701 行) | WebUI ASGI 应用（治理/控制面，无业务逻辑） |
 | **`webui_auth.py`** | **WebUI 账号密码登录 + 服务端会话（三套令牌隔离）** |
 | `cli.py` | 无 MCP 客户端的 JSON 入口 |
 
@@ -317,6 +320,20 @@ NR flow JSON
 | **`task_store.py`** | **DSL 验证任务池；`tasks` + `task_claims`（多 agent 各自独立做同一任务）** |
 | **`api_config_store.py`** | **Link API 运行时配置（独立 SQLite 表，真实密钥不进 git）** |
 | **`audit.py`** | **审计日志统一读取入口** |
+| ☆ `api_keys.py` (310) | **API Key 管理**：`af_pro_<32hex>`，存 SHA-256 hash；授权 tabs + 权限 + 过期（**fail-closed**） |
+| ☆ `deploy_tokens.py` (365) | **部署授权码**：Tab 级授权，信任 Agent 可在指定 tab 自动部署；含节点阈值转人工、配额、限流 |
+| ☆ `templates.py` (275) | **模板库**（Pro 版，与 DSL 的 `template_lib.py` 不同层：这是可复用 flow 模板） |
+
+**Pro / 体验 / 竞技场（v1.5–v2.0 新增）**
+
+| 模块 | 一句话 |
+|---|---|
+| ☆ `arena.py` (848) | **竞技场**：分区/题目/提交/验收；三层判重（实体重叠 >60% / 文本相似 >85% / LLM 考官 0.6–0.85）、创造力评分、题目锁定、排行榜 |
+| ☆ `experience.py` (636) | **经验数据收集管道**：实体共现、DSL 模式、错误样本自动采集，供智能推荐 |
+| ☆ `tab_organizer.py` (492) | **Tab 组织分级方案**：P2 迁移 + P3 预警 |
+| ☆ `error_knowledge.py` (187) | **错误知识库**：失败归因 → 修复建议 |
+| ☆ `token_stats.py` (150) | **Token 消耗统计**：按天/Agent/端点/模式聚合 |
+| ☆ `snapshot_manager.py` | **快照 / 回滚**：授权码操作前自动快照（full 全量 / incremental 增量），支持一键回滚 |
 
 **孪生 / 集成 / 运维**
 
@@ -432,15 +449,44 @@ autoflow mock-api --port 9100 --registry data/mock_api_registry.json
 
 ---
 
-## 18. 项目收尾阶段（2026-09-02）
+## 18. 项目阶段与当前重点（2026-09-08 更新）
 
-**当前定位：v1.2.x「可推广收尾版」**，不堆新功能。三件收尾：
+> ⚠️ 本节在 2026-09-02 曾写「v1.2.x 收尾版，之后进入维护态」。该判断**已被实际情况推翻**：
+> v1.2.1 之后项目又迭代了 57 个 commit 到 **v2.0.11-beta**，新增三条产品线。
+> 节标题与内容已重写，旧的「维护态 / 不堆新功能」结论**不再有效**，请勿引用。
 
-1. **文案去技术化** —— 面向 hassbian（bbs.hassbian.com）HA/NR/ESPHome 极客。
-   ⚠️ 注意 v2 方案已**推翻** v1 的「全面去技术化」：术语（flow/tab/节点/实体/DSL）**保留**，
-   只对 AutoFlow 特有概念（安全闸/vhass/自愈闭环/Link API）加注。详见
-   [01_product/WEBUI_UX_PROPOSAL_v2.md](../01_product/WEBUI_UX_PROPOSAL_v2.md)。
-2. **UX 美化**
-3. **文档归一**（本文所在的结构）
+### 18.1 版本演进
 
-之后进入**维护态**。角色分工见 [05_handoff/HANDOFF_dw_takeover.md](../05_handoff/HANDOFF_dw_takeover.md)。
+| 阶段 | 版本 | 内容 |
+|---|---|---|
+| 我交接出去时 | v1.2.1 | DSL 网关基本盘：编译 → 校验 → vhass 重放 → 人工批准 → 部署 |
+| v1.4 | Deploy Tokens | Tab 级授权、可信 agent 自动部署、节点数阈值转人工、配额与限流 |
+| v1.5–v1.7 | **AutoFlow Pro** | API Key（`af_pro_<32hex>`，SHA-256 存哈希）、Token 用量统计、模板库、经验库 |
+| v2.0 | **Arena 竞技场** | 3 个分区（书房/客厅/卧室，各 8 设备）、三层去重、创意分、vhass 验收、排行榜 |
+
+### 18.2 当前重点：Arena（竞技场）
+
+后端 `arena.py`（848 行）+ 前端（app.js 约 100 处、侧栏 🏟️ 入口）**已实现并在库中**。
+设计初衷见 [04_ideas/ARENA_idea.md](../04_ideas/ARENA_idea.md)（该文件状态仍写「想法阶段」，
+**实际已实现**，待更新）。
+
+- **目的**：让多个 agent 在授权的真实设备上写 flow，顺带收获经验数据 / DSL 边界 bug / 优质 flow。
+- **三层去重**：实体重叠 >60% → 文本相似度 >85% → LLM 判定（0.6–0.85 区间，失败 fail-open）。
+- **创意分**：新颖度 40% + 复杂度 20% + 实用性 20% + 描述质量 20%。
+- **待办**：① NR 1990 真实部署验证 ② 教程补全 ③ Phase2 挑战模式。
+
+### 18.3 收尾三件事（v1.2.x 遗留，状态更新）
+
+| 事项 | 状态 |
+|---|---|
+| 文案去技术化 | ✅ 已完成。⚠️ v2 方案**推翻** v1 的「全面去技术化」：术语（flow/tab/节点/实体/DSL）**保留**，只对 AutoFlow 特有概念（安全闸/vhass/自愈闭环/Link API）加注。详见 [01_product/WEBUI_UX_PROPOSAL_v2.md](../01_product/WEBUI_UX_PROPOSAL_v2.md) |
+| UX 美化 | ✅ 已完成（WebUI v2 重构） |
+| 文档归一 | ✅ 已完成（本文所在结构） |
+
+### 18.4 遗留技术债
+
+- **§17 巨石模块**：`gateway.py` 9172 行、`dsl_engine.py` 3816 行，维护成本高，不做大型重构。
+- **B1 无独立 staging NR**：staging 与 prod 同实例，**跨 T007–T010 连续 4 票 BLOCKED 的根因**。
+  B1 解决前，不得声称任何写类 e2e 验证「已闭环」。详见 [04_test/findings-ledger.md](../04_test/findings-ledger.md)。
+- **历史测试红**：截至 2026-09-08 全量仍有约 95 个历史失败（种子数漂移、lint 规则演进、
+  校验器变严等），非新引入，待逐批清理。

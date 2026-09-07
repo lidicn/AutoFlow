@@ -45,7 +45,10 @@ _PATTERNS = [
 # 占位符 / 教学模板 / 环境变量读取 —— 命中这些视为安全写法，不报警。
 _SAFE_MARKERS = re.compile(
     r"<[A-Z_]{3,}>|your_|example|placeholder|dummy|fake|"
-    r"os\.getenv|os\.environ|getenv\(|\$\{|\{\{|xxx+|\.\.\.",
+    r"os\.getenv|os\.environ|getenv\(|\$\{|\{\{|xxx+|\.\.\.|"
+    # 测试 fixture 惯例前缀：test-xxx / legacy-xxx 是写死在用例里的假值，
+    # 真实凭据不会以这两个前缀开头，误报若不清掉会逼人整条规则禁用。
+    r"\btest[-_]|\blegacy[-_]",
     re.IGNORECASE,
 )
 

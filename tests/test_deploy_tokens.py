@@ -120,7 +120,7 @@ class TestTabScope(_Base):
         r = self._make(target_tabs=["abc123"])
         v = self.store.validate_token(
             r["token_plaintext"], operation="deploy",
-            target_tab="http://192.168.2.200:1880/#flow/abc123")
+            target_tab="http://<NR_HOST>:1880/#flow/abc123")
         self.assertTrue(v["ok"], "URL 中的 #flow/<id> 应被提取后比对")
 
     def test_no_binding_allows_any_tab(self):

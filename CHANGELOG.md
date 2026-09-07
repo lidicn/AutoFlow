@@ -1,3 +1,70 @@
+## 2.0.11-beta (2026-09-07)
+- 【改进】同步设备弹窗加宽至 860px，改为左侧 friendly_name / 右侧 entity_id 的双列布局。
+- 【改进】补齐 v1.4–v2.0 三个新模块的测试覆盖（wb1 接手后补）：`test_api_keys.py`(16) / `test_deploy_tokens.py`(19) / `test_arena.py`(24)，共 59 项。
+
+## 2.0.10-beta (2026-09-07)
+- 【Bug 修复】修复设备同步时区域为空：`gateway.ha` 是 HALayer 对象，区域映射必须走 `gateway.ha.client.entity_areas()`（走 WebSocket），直接调 `gateway.ha.entity_areas()` 不存在。
+
+## 2.0.9-beta (2026-09-07)
+- 【新功能】同步设备弹窗支持按区域 / domain / 关键词筛选，便于在 2883 个设备里定位。
+
+## 2.0.8-beta (2026-09-07)
+- 【新功能】从真实 HA 同步设备到竞技场分区（用户勾选后同步，可移除），同步后自动更新 vhass 种子并重置。
+
+## 2.0.7-beta (2026-09-07)
+- 【Bug 修复】修复 `TABS` 数组缺少 `arena` 导致点击竞技场跳转到概览页。
+
+## 2.0.6-beta (2026-09-07)
+- 【Bug 修复】修复竞技场 modal 调用方式错误导致页面跳转概览（`modal()` 只接受 title/html 两参数）。
+
+## 2.0.5-beta (2026-09-06)
+- 【发布】竞技场 beta 版。核心模块 `arena.py`、3 个初始分区（书房/客厅/主卧室，各 8 个虚拟设备）、创造力评分、vhass 虚拟环境验收、题目锁定、排行榜、全局统计。
+
+## 2.0.4-alpha (2026-09-06)
+- 【新功能】竞技场 SKILL 文档（`skills/arena.md`）+ 首次访问引导弹窗。
+
+## 2.0.3-alpha (2026-09-06)
+- 【新功能】第三层 LLM 考官：文本相似度落在 0.6–0.85 模糊区间时由 LLM 仲裁是否真重复（LLM 不可用 fail-open）。
+
+## 2.0.2-alpha (2026-09-06)
+- 【新功能】竞技场 WebUI 前端（分区卡片/题目列表/排行榜/设备池/提交弹窗）+ Agent Bearer API Key 接入（`/api/arena/*` 支持 Bearer 认证）。
+
+## 2.0.1-alpha (2026-09-06)
+- 【Bug 修复 P0】修复 API Key 永不过期：`api_keys.py` 过期校验用 `except Exception: pass` 静默吞掉 naive datetime 比较错误，导致 `expires_at` 无效时仍然放行。改为 **fail-closed**：格式非法或 naive（缺时区）一律拒绝。已补回归守卫 `test_api_keys.py::TestP0ExpiryFailClosed`。
+
+## 2.0.0-alpha (2026-09-06)
+- 【新功能】竞技场模式（Arena）核心模块：多 Agent 自由命题编写 flow，三层题目审核（实体重叠度 >60% / 文本相似度 >85% / LLM 考官模糊区间仲裁），第一个验收通过的 Agent 锁定题目。
+
+## 1.7.1 (2026-09-05)
+- 【Bug 修复】修复 Token 统计页面 401 跳转登录页（`/api/token-stats` 未纳入认证白名单）。
+
+## 1.7.0 (2026-09-05)
+- 【发布】经验复用稳定版：经验数据收集、错误知识库、智能推荐三件套稳定可用。
+
+## 1.6.4 (2026-09-05)
+- 【Bug 修复】修复 DSL 模式聚合管道不工作 + 模板推荐路径错误。
+
+## 1.6.3 (2026-09-05)
+- 【新功能】智能推荐：相似案例推荐 + 修复建议 + 实体推荐。
+
+## 1.6.2 (2026-09-05)
+- 【新功能】经验库：最佳实践沉淀 + Agent 对比 + 模板推荐。
+
+## 1.6.1 (2026-09-05)
+- 【新功能】经验数据收集管道：实体共现、DSL 模式、错误知识库自动采集。
+
+## 1.6.0 (2026-09-05)
+- 【发布】AutoFlow Pro 稳定版。
+
+## 1.5.9 (2026-09-05)
+- 【Bug 修复】修复 raw-to-dsl 转换丢失 action + VERSION 文件 BOM 污染（VERSION 必须无 BOM UTF-8）。
+
+## 1.5.8 (2026-09-05)
+- 【新功能】LLM 不可用时离线降级 + raw flow 转 DSL 的 raw-to-dsl 转换。
+
+## 1.5.7 (2026-09-05)
+- 【新功能】Token 消耗可视化统计页面 + 错误知识库。
+
 ## 1.5.6 (2026-09-05)
 - 【Bug 修复】进一步修复 `/api/core/version` 返回 `unknown`：容器内 webui.py 实际路径是 `/app/src/autoflow_gateway/webui.py`，计算出的 `/app/VERSION` 不存在，实际文件在 `/repo/VERSION`。改为多路径尝试（相对路径 + /repo/VERSION + /app/VERSION + cwd/VERSION）。
 
