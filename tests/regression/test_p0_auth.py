@@ -39,9 +39,13 @@ except ImportError as _e:
 class TmpCfgMixin:
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="af_p0auth_")
+        # S-4 语义只在 token_only 模式下成立（公网 403 / 本机放行）；
+        # 默认 password_only 模式下未认证一律 401（弹登录框），是另一套同样安全的语义。
         self.cfg = GatewayConfig(data_dir=self.tmp, env="staging")
+        os.environ["AF_WEBUI_TOKEN_MODE"] = "token_only"
 
     def tearDown(self):
+        os.environ.pop("AF_WEBUI_TOKEN_MODE", None)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 
@@ -80,13 +84,20 @@ class TestP0Auth(TmpCfgMixin, unittest.TestCase):
 
     # 1) 无 token → 403（本机/回环除外）
     def test_no_token_remote_403_local_ok(self):
-        """P0-3 (S-4)：未配置/未带 token 时，公网 Peer 访问 /api 一律 403；本机放行。"""
-        st_remote, _ = _raw_status(self.app, "/api/health", client_ip="203.0.113.5")
+        """P0-3 (S-4)：token_only 模式下，公网 Peer 访问受保护 /api 一律 403；本机放行。
+
+        注意：/api/health 自 v1.5 起是**有意公开**的探测端点（只回 ok/env/service，
+        无敏感信息，供监控/冒烟匿名可达），不能用它来验证 403 语义，改用 /api/pending。
+        """
+        st_remote, _ = _raw_status(self.app, "/api/pending", client_ip="203.0.113.5")
         self.assertEqual(st_remote, 403)
-        st_local, _ = _raw_status(self.app, "/api/health", client_ip="127.0.0.1")
+        st_local, _ = _raw_status(self.app, "/api/pending", client_ip="127.0.0.1")
         self.assertEqual(st_local, 200)
-        st_local6, _ = _raw_status(self.app, "/api/health", client_ip="::1")
+        st_local6, _ = _raw_status(self.app, "/api/pending", client_ip="::1")
         self.assertEqual(st_local6, 200)
+        # 固化新设计：health 端点对公网也公开（有意的运维探测豁免）
+        st_health, _ = _raw_status(self.app, "/api/health", client_ip="203.0.113.5")
+        self.assertEqual(st_health, 200)
 
     # 2) 伪造 XFF 不被采信
     def test_spoofed_xff_not_trusted(self):
@@ -95,20 +106,20 @@ class TestP0Auth(TmpCfgMixin, unittest.TestCase):
         反例：真反向代理（Peer 回环 + XFF 公网）应放行 —— 验证「只信 Peer，不信 XFF」。
         """
         st_spoof, _ = _raw_status(
-            self.app, "/api/health",
+            self.app, "/api/pending",
             client_ip="203.0.113.7",
             headers=[(b"x-forwarded-for", b"127.0.0.1")],
         )
         self.assertEqual(st_spoof, 403)
         st_spoof6, _ = _raw_status(
-            self.app, "/api/health",
+            self.app, "/api/pending",
             client_ip="198.51.100.9",
             headers=[(b"x-forwarded-for", b"::1")],
         )
         self.assertEqual(st_spoof6, 403)
         # 可信反向代理转发本机客户端：Peer 回环 + XFF 回环 → 放行（采纳 XFF 当真实客户端）
         st_proxy_local, _ = _raw_status(
-            self.app, "/api/health",
+            self.app, "/api/pending",
             client_ip="127.0.0.1",
             headers=[(b"x-forwarded-for", b"127.0.0.1")],
         )
@@ -126,7 +137,7 @@ class TestP0Auth(TmpCfgMixin, unittest.TestCase):
         try:
             app = build_webui_asgi(self.cfg, gateway=self.gw)
             st, _ = _raw_status(
-                app, "/api/health",
+                app, "/api/pending",
                 client_ip="203.0.113.5",
                 headers=[(b"authorization", "Bearer café".encode("utf-8"))],
             )
