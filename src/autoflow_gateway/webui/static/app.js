@@ -5099,7 +5099,7 @@ async function arenaSyncModal() {
       </select>
       <input id="arena-sync-search" class="input" placeholder="搜索设备名…" style="flex:1;min-width:120px;font-size:13px" />
     </div>
-    <div id="arena-sync-list" style="max-height:350px;overflow-y:auto;margin-bottom:12px;border:1px solid var(--border);border-radius:6px;padding:8px">
+    <div id="arena-sync-list" style="max-height:480px;overflow-y:auto;margin-bottom:12px;border:1px solid var(--border);border-radius:6px;padding:8px 12px">
       <div class="empty">加载中…</div>
     </div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -5110,6 +5110,11 @@ async function arenaSyncModal() {
       <span style="font-size:12px;color:var(--text-muted)">已选 <span id="arena-sync-count">0</span> / 显示 <span id="arena-sync-total">0</span></span>
     </div>
   `);
+  // 加宽弹窗
+  setTimeout(() => {
+    const m = document.querySelector(".modal-mask:not([hidden]) .modal");
+    if (m) m.style.maxWidth = "860px";
+  }, 10);
   // 加载区域列表
   try {
     const ar = await api("GET", "/arena/ha_areas");
@@ -5162,11 +5167,11 @@ async function arenaSyncRefresh() {
       return;
     }
     listEl.innerHTML = devices.map(d => `
-      <label style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px;cursor:pointer;border-bottom:1px solid var(--border)">
+      <label style="display:flex;align-items:center;gap:10px;padding:6px 4px;font-size:13px;cursor:pointer;border-bottom:1px solid var(--border)">
         <input type="checkbox" class="arena-sync-cb" value="${esc(d.entity_id)}" />
-        <span style="min-width:60px"><span class="badge" style="font-size:10px;background:var(--bg-soft)">${esc(d.domain)}</span></span>
-        <code style="flex:1">${esc(d.entity_id)}</code>
-        <span style="color:var(--text-muted);font-size:12px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(d.friendly_name)}</span>
+        <span style="min-width:70px"><span class="badge" style="font-size:10px;background:var(--bg-soft)">${esc(d.domain)}</span></span>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(d.friendly_name)}">${esc(d.friendly_name)}</span>
+        <code style="color:var(--text-muted);font-size:12px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(d.entity_id)}">${esc(d.entity_id)}</code>
       </label>
     `).join("");
     // 绑定计数
