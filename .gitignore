@@ -98,3 +98,10 @@ skills_backup*/
 # 本文件已核：零内网 IP、零令牌明文，仅含"哪些文件不许进 git"的规则声明。
 # ★ 改动本文件前请重新确认无敏感值；若将来写入真实 IP/令牌，请删除本条豁免。
 !docs/05_handoff/HANDOFF_dw_takeover.md
+
+# ===== 收敛补充（2026-09-08）：一次性生成脚本与本地产物不进版本库 =====
+# gen_r21_flows.py 是 R21 压测流的一次性生成器，outputs/ 与 tmp/ 是运行产物。
+# 三者历史上多次被 `git add -A` 误夹带，这里显式排除，杜绝再犯。
+/gen_r21_flows.py
+/outputs/
+/tmp/
