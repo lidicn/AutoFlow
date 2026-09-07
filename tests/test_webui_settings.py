@@ -38,6 +38,9 @@ pytestmark = pytest.mark.skipif(not _OK, reason=f"需要 starlette+mcp：{_ERR}"
 @pytest.fixture
 def env():
     tmp = tempfile.mkdtemp(prefix="af_sh_")
+    # 账号密码改造后默认 password_only：未认证写请求一律 401（含本机 TestClient）。
+    # 本组测试不关心认证，设 token_only 让回环放行（与 test_install_tab 等同款）。
+    os.environ["AF_WEBUI_TOKEN_MODE"] = "token_only"
     cfg = GatewayConfig(data_dir=tmp, env="staging")
     gw = Gateway(cfg)
     app = build_webui_asgi(cfg, gateway=gw)
@@ -45,6 +48,7 @@ def env():
     client.__enter__()
     yield client, gw, cfg
     client.__exit__(None, None, None)
+    os.environ.pop("AF_WEBUI_TOKEN_MODE", None)
     shutil.rmtree(tmp, ignore_errors=True)
 
 
