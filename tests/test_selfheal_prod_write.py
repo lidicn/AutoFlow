@@ -38,8 +38,14 @@ import types as _types
 
 
 def _install_mcp_stub():
-    if "mcp.server.fastmcp" in _sys.modules:
+    # ★ 只在 mcp 包**真实不可用**时才装桩。原实现用 `in _sys.modules` 判断，
+    # 但真包装了只是尚未 import 时，桩会抢占 sys.modules 并**永久遮蔽真包**，
+    # 污染全量跑时所有后导入的测试（2026-09-08 排查：test_webui* 全灭的根因）。
+    try:
+        import mcp.server.fastmcp  # noqa: F401
         return
+    except ImportError:
+        pass
 
     class _FastMCP:
         def __init__(self, *a, **k):
@@ -74,15 +80,23 @@ _install_mcp_stub()
 
 # webui 模块顶层 import starlette（测试解释器未装）。mcp_server 只引用 build_webui_asgi
 # （且仅在 run 入口用到），注入最小桩即可完成导入，不影响 autoflow_apply 逻辑。
-_webui_stub = _types.ModuleType("autoflow_gateway.webui")
+# ★ 同样只在 starlette 真实不可用时才装桩 —— 否则 sys.modules 里的 stub
+# （build_webui_asgi 返回 None）会被全量跑时后导入的 test_webui.py 等命中，
+# 造成「self.app is None」的大面积误挂（test_webui 9 + password_login 12 + subflow_webui 8）。
+try:
+    import starlette  # noqa: F401
+    _HAVE_STARLETTE = True
+except ImportError:
+    _HAVE_STARLETTE = False
 
+if not _HAVE_STARLETTE:
+    _webui_stub = _types.ModuleType("autoflow_gateway.webui")
 
-def _build_webui_asgi(*a, **k):
-    return None
+    def _build_webui_asgi(*a, **k):
+        return None
 
-
-_webui_stub.build_webui_asgi = _build_webui_asgi
-_sys.modules["autoflow_gateway.webui"] = _webui_stub
+    _webui_stub.build_webui_asgi = _build_webui_asgi
+    _sys.modules["autoflow_gateway.webui"] = _webui_stub
 
 import autoflow_gateway.mcp_server as mcp_server  # noqa: E402  (需先装 mcp/webui 桩)
 
