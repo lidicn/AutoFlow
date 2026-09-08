@@ -29,22 +29,64 @@
 
 ## 本阶段目标
 
-让 **书房竞技场** 成为可验收的场地：agent 出题 → 写 DSL → 提交 → vhass 验收 → 上榜，全链路跑通；
-同时清掉工单 002 里剩余的两项真实缺陷。
+让 **书房竞技场** 成为可验收的场地：**先把书房真实 HA 设备同步进竞技场和 vhass 孪生**，
+再跑 agent 出题 → 写 DSL → 提交 → 验收 → 上榜全链路；同时清掉工单 002 里剩余的两项真实缺陷。
 
-## 验收场地：书房竞技场
+★ 目标是产出**真实能用的 flow**——设备必须来自真实 HA，验收执行在孪生上。
+
+## 验收场地：书房竞技场（**真实设备驱动**）
 
 - 分区 id：**`study_room`**，名称「书房竞技场」
-- 8 个设备（**均为 vhass 虚拟设备，不触碰物理设备**）：
-  `switch.computer`(电脑)、`light.desk_lamp`(台灯)、`light.monitor_lamp`(显示器挂灯)、
-  `climate.study_ac`(书房空调)、`cover.study_curtain`(书房窗帘)、
-  `sensor.study_temperature`(书房温度)、`binary_sensor.study_motion`(书房人体感应)、
-  `input_boolean.focus_mode`(专注模式)
 - 阈值：`phase2_threshold=20`、`creativity_threshold=0.3`
 - 相关 API：`/api/arena/arenas`、`/api/arena/arenas/{id}/propose`、`/api/arena/arenas/{id}/submit`、
-  `/api/arena/arenas/{id}/leaderboard`、`/api/arena/stats`
+  `/api/arena/arenas/{id}/leaderboard`、`/api/arena/stats`、
+  `/api/arena/ha_areas`、`/api/arena/ha_devices`、`/api/arena/arenas/{id}/sync_devices`
+
+### ⚠️ 关键：设备必须来自真实 HA，不能用默认占位设备
+
+分区出厂自带的 8 个设备（`switch.computer`、`light.desk_lamp`、`light.monitor_lamp`、
+`climate.study_ac`、`cover.study_curtain`、`sensor.study_temperature`、
+`binary_sensor.study_motion`、`input_boolean.focus_mode`）是 **`DEFAULT_ARENAS` 里的占位种子**，
+**在真实 HA 里大概率并不存在**。对着它们出的题、写的 flow 是「假可用」——
+编译能过、vhass 能跑，但拿到真实环境一部署就因为实体不存在而失效。
+
+**因此验收链路必须是：**
+
+```
+真实 HA 书房设备  ──sync_devices──▶  竞技场分区 devices（synced_from_ha=true）
+                                        │
+                                        └─▶ _rewrite_seed() 重写 vhass 种子 ──▶ _reset_vhass()
+                                                                                    │
+agent 用真实 entity_id 写 DSL ──▶ vhass 孪生上验收 ──▶ 排行榜
+                                                        │
+                                        （验收执行在孪生，不碰物理设备）
+```
+
+这样产出的 flow **携带真实 entity_id，经人工批准后可在真实环境直接部署**；
+而验收过程跑在 vhass 孪生上，**不触碰任何物理设备**。
 
 ## 任务清单
+
+### T0（tester，P0 前置）—— 书房真实设备同步进竞技场
+
+**这个任务不完成，后面的验收全是假的。** 先做。
+
+1. `GET /api/arena/ha_areas` 拿到区域列表，**确认「书房」在 HA 里的准确区域名**
+   （可能叫「书房」/「Study」/别的，以实际返回为准）
+2. `GET /api/arena/ha_devices?area=<书房区域名>` 列出书房真实设备
+3. 挑选 **6–10 个**进竞技场，挑选原则：
+   - 覆盖多个 domain（`light` / `switch` / `climate` / `cover` / `sensor` / `binary_sensor`），
+     否则 agent 写不出有意义的自动化
+   - 优先选状态可读、动作可逆的（灯、开关、窗帘），**避开强副作用设备**（门锁、燃气阀、摄像头）
+4. `POST /api/arena/arenas/study_room/sync_devices`，body `{"entity_ids": [...]}`
+5. **校验**（缺一不可）：
+   - 响应 `added_ids` 与提交清单一致（不存在的 entity_id 会被静默跳过，必须逐个核对）
+   - 分区 devices 里这些项带 `synced_from_ha: true` 和 `synced_at`
+   - vhass 种子文件已重写（`_rewrite_seed`），新实体在孪生里能被读到
+6. 同步后**清空/替换掉那 8 个占位设备**，避免 agent 拿到假 entity_id
+
+**验收**：输出一份「书房竞技场真实设备清单」（entity_id + friendly_name + domain），
+写进 `docs/04_test/findings-ledger.md`，后续所有出题都只能用这批 entity_id。
 
 ### T1（backend-dev-1，P1 性能）—— webui.py 同步调用阻塞事件循环
 
@@ -69,17 +111,21 @@
   2. `schema_block` 响应含 `would_block_on_schema: True`
   3. 补一份回归测试
 
-### T3（tester）—— 书房竞技场端到端验收
+### T3（tester，依赖 T0）—— 书房竞技场端到端验收
 
+- **前置**：T0 已完成，竞技场里是真实 HA 同步来的设备。
 - **做法**：在 `study_room` 分区完整走一轮：
-  `propose`（出题，含实体集）→ 三层去重（实体重叠 >60% / 文本相似 >85% / LLM 判定 0.6–0.85）
-  → `submit`（提交 DSL）→ vhass 验收 → `leaderboard` 上榜 → `stats` 计数正确。
+  `propose`（出题，实体集取自 T0 清单）→ 三层去重（实体重叠 >60% / 文本相似 >85% /
+  LLM 判定 0.6–0.85）→ `submit`（提交 DSL）→ vhass 验收 → `leaderboard` 上榜 → `stats` 计数正确。
 - **验收**：
   1. 至少 3 个不同 agent_id 各提交 1 个 flow，全部出现在排行榜
-  2. 故意重复出题（实体重叠 >60%）被判重拒绝，返回明确原因
-  3. 创意分低于 `creativity_threshold=0.3` 的提交被拒
-  4. 全过程 **0 次触碰真实 NR 实例**（见下方红线）
-  5. 验收脚本落在 `tests/`，可重复执行
+  2. **每个 flow 引用的 entity_id 100% 来自 T0 真实设备清单**（脚本断言，不允许出现占位设备）
+  3. 故意重复出题（实体重叠 >60%）被判重拒绝，返回明确原因
+  4. 创意分低于 `creativity_threshold=0.3` 的提交被拒
+  5. 全过程 **0 次部署到真实 NR**、**0 次触碰物理设备**（见下方红线）
+  6. 验收脚本落在 `tests/`，可重复执行
+  7. ★ 抽 1 个产出的 flow 做「真实可用性抽查」：确认它经人工批准后能直接在真实环境部署
+     （只做静态核对：实体存在、动作合法；**不实际部署**）
 
 ### T4（reviewer）—— 审查
 
@@ -89,14 +135,17 @@
 ## 工作方式
 
 1. PM 先读 `ARCHITECTURE.md` §18（项目阶段与当前重点）和工单 002，再细化任务分配
-2. 每个任务独立 commit，message 带任务号（如 `[T1] ...`）
-3. 遇到阻塞立即上报，不要卡住
-4. **不要 push** —— 提交留在本地，由项目负责人签收后统一推送
+2. **顺序**：T0 必须最先完成（阻塞 T3）；T1 / T2 可与 T0 并行
+3. 每个任务独立 commit，message 带任务号（如 `[T0] ...`、`[T1] ...`）
+4. 遇到阻塞立即上报，不要卡住
+5. **不要 push** —— 提交留在本地，由项目负责人签收后统一推送
 
 ## 关键约束（红线，违反即打回）
 
 1. **prod NR 只读铁律**：`<NAS_IP>:1880` / `:1990` 一律只读。任何写操作需显式 `allow_prod`
-   且 PM 同意。**禁止触碰用户手工搭建的 flow**。竞技场验收只用 vhass 虚拟设备。
+   且 PM 同意。**禁止触碰用户手工搭建的 flow**。
+   - 竞技场的**设备**必须是真实 HA 同步来的（见 T0），否则产出的 flow 是假的
+   - 竞技场的**验收执行**一律跑在 vhass 孪生上，**不部署到真实 NR、不驱动物理设备**
 2. **测试基线**：当前全量 `95 failed / 1461 passed`，这 95 个是**历史遗留的测试漂移**（测试写死旧 API 名），
    **不是本次引入的，也【不要】去修**。只保证：自己改动相关的测试绿、且不新增红。
    判断方式：跑全量必须加
@@ -118,6 +167,12 @@
 ---
 
 ## 备注（给项目负责人，不用发给团队）
+
+- **为什么必须是真实设备**（2026-09-08 项目负责人的修正）：初稿曾让团队直接用分区自带的 8 个
+  占位设备（`switch.computer` 等）做验收。这 8 个是 `arena.py::DEFAULT_ARENAS` 的种子数据，
+  真实 HA 里大概率不存在 —— 对它们写的 flow 编译能过、vhass 能跑，但一部署到真实环境就因
+  实体不存在而失效，等于「假可用」。正确链路是
+  `真实 HA → sync_devices → 分区 devices(synced_from_ha=true) → _rewrite_seed → vhass 孪生`。
 
 - **已知风险**：DSH 的 `subagent-model-selection.allowedModels` 目前只列了 `dsh-power-chat` 和
   `pm-chat`，但 FFL v1 团队当年确实用 `backend-dev-chat` / `tester-chat` 等跑通过。
