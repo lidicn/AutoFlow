@@ -179,23 +179,26 @@ class TestLayer1EntityOverlap(_ManagerBase):
         tid = self._propose_ok()
         self._lock_task(tid)
         # 2 个实体中 1 个重叠 = 0.5，未超 0.6 → 不拦（第一层）
+        # （B24 考官上线后夹具需文题一致：标题/描述须提及电脑与空调）
         r = self.mgr.propose_task(
-            "study_room", "雨天自动关窗提醒",
-            "检测到下雨且窗户未关时，发送提醒并关闭窗帘",
+            "study_room", "电脑开机自动开空调",
+            "当书房电脑开机时，自动打开书房空调调节到舒适温度",
             ["switch.computer", "climate.study_ac"], "agent-2")
         self.assertTrue(r["ok"], f"0.5 重叠不应被第一层拦截: {r}")
 
 
 class TestLayer2TextSimilarity(_ManagerBase):
     def test_near_identical_text_rejected(self):
+        # B24 考官上线后夹具需文题一致：第一题提电脑+窗帘，第二题同文换空调（实体面换掉
+        # 绕开第一层），文本几乎相同（sim>0.85 → 第二层拦），且窗帘为公共设备过考官
         tid = self._propose_ok(
             title="观影模式自动调光",
-            desc="打开电视时自动调暗客厅主灯并打开氛围灯，营造观影氛围")
+            desc="打开电脑时自动关闭窗帘，营造观影氛围",
+            entities=["switch.computer", "cover.study_curtain"])
         self._lock_task(tid)
-        # 实体完全不同（绕开第一层），文本几乎相同（sim>0.85 → 第二层拦）
         r = self.mgr.propose_task(
             "study_room", "观影模式自动调光",
-            "打开电视时自动调暗客厅主灯并打开氛围灯，营造观影氛围。",
+            "打开电脑时自动关闭窗帘，营造观影氛围。",
             ["climate.study_ac", "cover.study_curtain"], "agent-2")
         self.assertFalse(r["ok"])
         self.assertTrue(r["is_duplicate"])
@@ -247,12 +250,13 @@ class TestFflRegression(_ManagerBase):
 
     def test_f02_serial_duplicate_rejected(self):
         """F-02：判重必须覆盖 available 题——串行（无并发）重复提交也必须被拦。"""
+        # B24 考官上线后夹具需文题一致（提及电脑与台灯、含触发+动作语义）
         self._propose_ok(title="串行重复实验",
-                         desc="两道完全相同的题，串行提交第二道必须被判重拦截",
+                         desc="当书房电脑开机时自动打开台灯；两道完全相同的题，串行提交第二道必须被判重拦截",
                          entities=STUDY_DEVICES[:2])
         r = self.mgr.propose_task(
             "study_room", "串行重复实验",
-            "两道完全相同的题，串行提交第二道必须被判重拦截",
+            "当书房电脑开机时自动打开台灯；两道完全相同的题，串行提交第二道必须被判重拦截",
             STUDY_DEVICES[:2], "agent-2")
         self.assertFalse(r["ok"], "串行重复题必须被拦（判重作用域须覆盖 available）")
         self.assertTrue(r.get("is_duplicate"))

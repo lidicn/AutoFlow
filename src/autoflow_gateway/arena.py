@@ -12,6 +12,7 @@ MVP 阶段：验收用 propose-dsl 的 vhass staging 闸门，不真实部署到
 
 import json
 import os
+import re
 import time
 import uuid
 import difflib
@@ -113,6 +114,126 @@ def _text_similarity(text1: str, text2: str) -> float:
     return difflib.SequenceMatcher(None, text1.lower(), text2.lower()).ratio()
 
 
+# ── B24 规则考官：文题一致性与基本逻辑检查（无 LLM 也可用）────────────────
+# 背景：创意分原为纯字面启发式（相似度/设备数/描述长度），LLM 未配置时「考官」
+# 实际不存在 → 大量文不对题的题（标题说台灯、描述说温度）以 0.8+ 高分通过。
+_DOMAIN_CN = {
+    "light": "灯", "switch": "开关", "climate": "空调", "cover": "窗帘",
+    "sensor": "传感器", "binary_sensor": "传感器", "media_player": "电视",
+    "input_boolean": "模式", "fan": "风扇", "humidifier": "加湿器",
+}
+_TRIGGER_CUES = ("当", "如果", "超过", "低于", "达到", "检测到", "每天", "时段",
+                 "时间", "打开时", "关闭时", "有人", "无人", "晚于", "早于", "时")
+_ACTION_CUES = ("开", "关", "调", "发", "通知", "播报", "记录", "监测", "提醒",
+                "推送", "查询", "启动", "停止")
+
+
+def _entity_labels(entity_ids: List[str], devices: List[Dict]) -> Dict[str, List[str]]:
+    """entity_id -> 候选中文标签（友好名 + 域中文名）的全部 2-gram 片段。
+
+    用 2-gram 而非整名匹配：「书房温度」在「当温度超过30度」里匹配不到整体，
+    但「温度」片段能命中——中文无分词器，2-gram 是零依赖下最稳的近似。
+    """
+    by_id = {d.get("entity_id"): d for d in devices}
+    labels: Dict[str, List[str]] = {}
+    for eid in entity_ids:
+        d = by_id.get(eid) or {}
+        names = [d.get("friendly_name") or ""]
+        dom = eid.split(".", 1)[0] if "." in eid else ""
+        cn = _DOMAIN_CN.get(dom)
+        if cn:
+            names.append(cn)
+        grams = set()
+        for n in names:
+            if len(n) <= 2:
+                grams.add(n)
+            else:
+                grams.update(n[i:i + 2] for i in range(len(n) - 1))
+        grams.discard("")
+        labels[eid] = sorted(grams)
+    return labels
+
+
+def _rule_logic_review(title: str, description: str,
+                       entity_ids: List[str], devices: List[Dict]) -> Dict:
+    """规则考官：不依赖 LLM 的文题一致性 / 基本逻辑检查。
+
+    返回 {"logic_ok": bool, "issues": [...], "warnings": [...]}。
+    硬失败（logic_ok=False）只抓最刺眼的「文不对题」与「无触发无动作」，
+    宁松勿严——误杀真创意比放过头伤害更大。
+    """
+    issues: List[str] = []
+    warns: List[str] = []
+    text = title + " " + description
+    labels = _entity_labels(entity_ids, devices)
+
+    def _hit(side_text: str, eid: str) -> bool:
+        return any(n and n in side_text for n in labels.get(eid, []))
+
+    # 1) 文不对题（B24 主目标）。两级判：
+    #    a) 描述未提及任何所列设备 → 描述在说别的东西；
+    #    b) 标题提了设备但与描述提及的完全错位 → 标题与描述说的不是一件事。
+    #    （标题不点设备是合法的，如「观影模式自动调光」——不能因此误杀）
+    title_eids = [e for e in entity_ids if _hit(title, e)]
+    desc_eids = [e for e in entity_ids if _hit(description, e)]
+    by_id = {d.get("entity_id"): d for d in devices}
+    _names = sorted({(by_id.get(e) or {}).get("friendly_name") or e for e in entity_ids})
+    if entity_ids and not desc_eids:
+        issues.append("描述未提及任何所列设备（描述在说别的东西）。涉及设备："
+                      + "、".join(_names))
+    elif title_eids and not (set(title_eids) & set(desc_eids)):
+        issues.append(
+            "标题与描述提及的设备完全错位（文不对题）：标题提到的设备应在描述中"
+            "出现。涉及设备：" + "、".join(_names))
+
+    # 2) 描述需含触发与动作语义（纯监测类允许只含监测词）
+    has_trigger = any(c in description for c in _TRIGGER_CUES)
+    has_action = any(c in description for c in _ACTION_CUES)
+    is_monitor_only = any(w in (title + description) for w in ("监测", "告警", "记录", "预警"))
+    if not is_monitor_only and not (has_trigger and has_action):
+        issues.append("描述既无触发语义（当/超过/低于/检测到…）也无动作语义（开/关/通知…），"
+                      "不像一条可执行的自动化")
+
+    # 3) 软警告：过半设备在标题+描述里都没被提到
+    unmentioned = [e for e in entity_ids if not _hit(text, e)]
+    if entity_ids and len(unmentioned) > len(entity_ids) / 2:
+        warns.append("过半设备未在标题/描述中提及：" + "、".join(unmentioned))
+
+    return {"logic_ok": not issues, "issues": issues, "warnings": warns}
+
+
+def _llm_logic_review(title: str, description: str, entity_ids: List[str]) -> Optional[Dict]:
+    """LLM 考官：语义级审查（标题↔描述↔实体一致性 + 逻辑合理性 + 创新性）。
+
+    LLM 未配置/不可用时返回 None（调用方降级为规则考官）。配置 LLM 后自动启用。
+    """
+    try:
+        from .llm_client import chat_sync
+    except Exception:
+        return None
+    prompt = (
+        "你是智能家居自动化题目的考官。审题并只输出 JSON："
+        '{"logic_ok": bool, "issues": ["..."], "novelty": 0.0~1.0}。'
+        "审查点：①标题与描述说的是同一件事吗（文不对题→logic_ok=false）；"
+        "②触发条件与动作在逻辑上成立吗；③所列设备支撑得起这个场景吗；"
+        "④场景新颖吗（老套的开关灯给低 novelty）。\n"
+        f"标题：{title}\n描述：{description}\n设备：{', '.join(entity_ids)}"
+    )
+    try:
+        raw = chat_sync([{"role": "user", "content": prompt}], max_tokens=300)
+        m = re.search(r"\{.*\}", str(raw), re.S)
+        if not m:
+            return None
+        d = json.loads(m.group(0))
+        return {
+            "logic_ok": bool(d.get("logic_ok", True)),
+            "issues": [str(x) for x in (d.get("issues") or [])][:5],
+            "novelty": max(0.0, min(1.0, float(d.get("novelty", 0.5)))),
+        }
+    except Exception:
+        return None  # LLM 不可用 → 降级规则考官
+
+
 def _creativity_score(
     title: str,
     description: str,
@@ -122,11 +243,11 @@ def _creativity_score(
 ) -> Tuple[float, Dict]:
     """计算创造力评分（0-1）。
 
-    维度：
-    - 新颖性 (40%)：与已有题目的差异度
-    - 复杂度 (20%)：涉及设备数量和逻辑复杂度
-    - 实用性 (20%)：是否基于真实设备
+    维度（★ B24：创新性优先）：
+    - 新颖性 (50%)：与已有题目的差异度（LLM 考官可用时改用其语义新颖度）
     - 描述质量 (20%)：题目描述的详细程度
+    - 复杂度 (15%)：涉及设备数量和逻辑复杂度
+    - 实用性 (15%)：是否基于真实设备
     """
     # 新颖性：与所有已有题目的最小相似度的反向
     max_sim = 0.0
@@ -160,7 +281,7 @@ def _creativity_score(
     else:
         quality = max(0.5, 1.0 - (desc_len - 100) / 200.0)
 
-    score = novelty * 0.4 + complexity * 0.2 + practicality * 0.2 + quality * 0.2
+    score = novelty * 0.5 + quality * 0.2 + complexity * 0.15 + practicality * 0.15
     breakdown = {
         "novelty": round(novelty, 3),
         "complexity": round(complexity, 3),
@@ -589,16 +710,42 @@ class ArenaManager:
                             "llm_judge": judge,
                         }
 
-            # 创造力评分
+            # ★ B24 两级考官：LLM 语义审查（配置后自动启用）→ 规则考官兜底
+            logic = _llm_logic_review(title, description, entity_ids)
+            examiner = "llm"
+            if logic is None:
+                logic = _rule_logic_review(title, description, entity_ids, arena.get("devices", []))
+                examiner = "rules"
+            if not logic.get("logic_ok"):
+                return {
+                    "ok": False,
+                    "is_duplicate": False,
+                    "examiner": examiner,
+                    "logic_review": logic,
+                    "reason": "考官判定题目逻辑不成立（文不对题 / 无触发无动作）："
+                              + "；".join(logic.get("issues") or []),
+                }
+
+            # 创造力评分（★ B24：创新性优先——novelty 权重 0.5）
             score, breakdown = _creativity_score(
                 title, description, entity_ids, arena.get("devices", []), arena_tasks
             )
+            # LLM 考官可用时，以其语义新颖度替代字面相似度 novelty（二者取高不再加成，
+            # 防止双重加分；LLM novelty 更贴近「真创新」）
+            if examiner == "llm" and "novelty" in logic:
+                breakdown["novelty"] = logic["novelty"]
+                score = round(
+                    logic["novelty"] * 0.5
+                    + breakdown["description_quality"] * 0.2
+                    + breakdown["complexity"] * 0.15
+                    + breakdown["practicality"] * 0.15, 3)
 
             threshold = arena.get("creativity_threshold", 0.3)
             if score < threshold:
                 return {
                     "ok": False,
                     "is_duplicate": False,
+                    "examiner": examiner,
                     "creativity_score": score,
                     "creativity_breakdown": breakdown,
                     "reason": f"创造力评分 {score} 低于阈值 {threshold}，题目太简单或缺乏创意",
@@ -615,6 +762,7 @@ class ArenaManager:
                 "status": "available",  # available | in_progress | locked | failed
                 "creativity_score": score,
                 "creativity_breakdown": breakdown,
+                "examiner": examiner,
                 "proposed_by": agent_id,
                 "proposed_at": _utcnow_iso(),
                 "locked_by": None,
@@ -694,7 +842,13 @@ class ArenaManager:
                                   "error": "题目状态已变化，本次提交未生效",
                                   "stage": "race_guard"}
                         continue
-                    if result.get("ok"):
+                    # ★ B23（FFL R4 F-R4-03）：锁定必须以**验收通过**为前提。
+                    # 旧实现只看 result["ok"]（propose_dsl 流程成功），编译过但
+                    # verdict=拦截 的 flow 也被 locked 并计入 Phase2，还占住题目
+                    # （题目一次性，他人无法再提交正确 flow）。与下方「失败后解锁，
+                    # 其他 Agent 可以选」的设计意图矛盾。
+                    _gate = result.get("gate") or {}
+                    if result.get("ok") and _gate.get("passed", True):
                         t["status"] = "locked"
                         t["flow_dsl"] = dsl
                         t["verification"] = result.get("gate", {})
