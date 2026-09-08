@@ -6218,6 +6218,7 @@ class Gateway:
         replay_zero_steps = []
         conservative_hits = []  # 【V-F1】跨步收集「保守命中」的 JSONata 分支
         _declared_effect_unreplayed_steps = []  # 【V-NEW-1】声明效果却 0 重放且不可归因于已知原因
+        _extern_branch_unverified = []  # 【B22】外部调用驱动的分支 → 反置动作被重放却跳过断言
         for step in steps:
             # 2a) 应用本步世界事件（多步场景逐步推进现实态）
             for eid, st in (step.get("world") or {}).items():
@@ -6291,6 +6292,10 @@ class Gateway:
                         if _st is not None:
                             inactive_effects.add((_t, _st))
             # 2d) 断言后置条件
+            # 【B22】本 flow 是否含 vhass 未建模的外部调用（history_* / http / link out）：
+            # 有则分支判定可能依赖不可求值的返回值，「未激活分支」的跳过不再无条件可信。
+            _has_external_call = any(
+                _vg_is_external_call(nd.get("type")) for nd in flow.get("nodes", []))
             assertions = []
             failures = []
             for cond in step.get("expected", []):
@@ -6301,12 +6306,30 @@ class Gateway:
                     # 来自未激活分支的后置条件：当前世界态下该分支不会执行，
                     # 断言它必失败（设备处于另一态）→ 假阳性。跳过（非失败、非 N/A）。
                     if (eid, want) in inactive_effects:
-                        assertions.append({
+                        _item = {
                             "kind": "state", "entity_id": eid,
                             "expected": want, "actual": None, "ok": True,
                             "branch_inactive": True,
                             "reason": ("该后置条件来自未激活分支（当前世界态下该分支不执行），"
-                                       "按 P3-F1/P3-F2 修复跳过断言（非失败）")})
+                                       "按 P3-F1/P3-F2 修复跳过断言（非失败）")}
+                        # 【B22】「未激活分支」可跳过断言的前提是：分支判定本身**可求值**。
+                        # 若 flow 含 vhass 未建模的外部调用（history_* / http / link out），
+                        # 分支可能因其返回值不可求值而错选（实测：payload.found 恒缺失 →
+                        # 走 else）。此时「未激活」不可信；若本步实际重放了**与期望相反**
+                        # 的动作（期望 on 却重放 turn_off），绝不能静默跳过——否则就是
+                        #「flow 做了反置动作仍判放行」的假绿。
+                        if _has_external_call:
+                            _opp = ("turn_off(" + eid) if want == "on" else (
+                                ("turn_on(" + eid) if want == "off" else None)
+                            if _opp and any(_opp in r for r in replayed):
+                                _item["branch_inactive_unverified"] = True
+                                _item["opposite_replayed"] = True
+                                _extern_branch_unverified.append(eid)
+                                _item["reason"] += (
+                                    "；⚠ 但本步实际重放了与该期望相反的动作，且 flow 含 vhass"
+                                    "未建模的外部调用（子流程/http），分支判定不可求值 → "
+                                    "该「未激活」结论不可信（B22），结论降级为未充分验证")
+                        assertions.append(_item)
                         continue
                     rec = store.get_state(eid)
                     got = rec.get("state") if rec else None
@@ -6532,6 +6555,13 @@ class Gateway:
                 "→ 只证明了「动作被调用」，未证明「动作产生了期望的世界态」。"
                 "fully_verified 不视为完整验证（B20/F-R2-01）。")
 
+        if _extern_branch_unverified:
+            warnings.append(
+                "【分支判定不可求值】flow 含 vhass 未建模的外部调用（history_* / http / link out），"
+                "分支依据其返回值判定 → 闸门无法求值，「未激活分支」的跳过结论不可信；且已实测到"
+                "与该后置条件相反的动作被重放。结论降级为未充分验证（B22）。"
+                "请勿把外部子流程返回值当作分支判据。")
+
         # A22：存在「被跳过/未建模/重放归零 warn_only」的验证层时，即便断言全过也不算充分验证，
         # verdict 降级为「未充分验证」（而非「放行」），消除「零验证报 pass」假象。
         # 【V-F1】复杂 JSONata 无法本地求值却「保守命中」→ 条件未经逻辑校验即视为通过，
@@ -6548,6 +6578,7 @@ class Gateway:
             _declared_effect_unreplayed or
             _pre_sat_only or  # 【B20①】全部 state 断言前置已满足，无转变证据
             _zero_assertion or  # 【B20②】零断言：只证动作被调用，未证世界态
+            bool(_extern_branch_unverified) or  # 【B22】分支判定不可求值，跳过结论不可信
             bool(_domain_mismatch_hits)  # 【WB84·P3-F4】错域 service 不得宣称 fully_verified
         )
         if _function_only:

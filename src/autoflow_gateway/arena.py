@@ -88,14 +88,22 @@ DEFAULT_ARENAS = [
 # ── 题目审核：实体重叠度 ──────────────────────────────────────
 
 def _entity_overlap(new_entities: List[str], existing_entities: List[str]) -> float:
-    """计算新题目与已有题目的实体重叠度。"""
+    """计算新题目与已有题目的实体重叠度。
+
+    ★ B21 修复：取**双向覆盖率的最大值**（旧实现只按新题实体数做分母，新题是旧题
+    实体的超集时会被稀释到阈值下）。实况：旧题 {湿度,空调} vs 新题 {湿度,空调,温度,
+    光照} → 单向 0.50（漏判），反向 1.00。即「挂几个无关实体」即可绕过判重。
+    双向取大后该例=1.00 → 正确判重。仅当新题实体面基本覆盖旧题（或反之）时才判重，
+    属 fail-safe 方向，对实体面不同的题无影响。
+    """
     if not new_entities:
         return 0.0
     new_set = set(e.lower().strip() for e in new_entities if e)
     exist_set = set(e.lower().strip() for e in existing_entities if e)
-    if not new_set:
+    if not new_set or not exist_set:
         return 0.0
-    return len(new_set & exist_set) / len(new_set)
+    inter = len(new_set & exist_set)
+    return max(inter / len(new_set), inter / len(exist_set))
 
 
 def _text_similarity(text1: str, text2: str) -> float:

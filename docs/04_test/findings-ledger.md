@@ -49,6 +49,7 @@
 | 18 | **FFL F-02** 判重失效（P1） | 根因=判重只扫 locked 题（非竞态，串行即复现）；作用域改 available/in_progress/locked | FFL R1 | commit 07ed982；R2 串行重复 propose 第 2 次 400（`r2-t4-f02-propose-2.json`） |
 | 19 | **FFL F-04~F-07**（P2×4） | F-04 类型校验 500→400（webui+Manager 双层）；F-05 幽灵实体 400+unknown_entities；F-06 标题 2-50/描述≤2000；F-07 stats 增 valid_submissions | FFL R1 | commit 07ed982；R2 回归 4/4 通过（`r2-t4-f0[4567]-*.json`）；test_arena 24→34 |
 | 20 | **FFL R2 真实 flow 验收** | 3 道真题（有人进书房开灯/光照不足开挂灯/关门关空调）全链路 locked+vhass 孪生验证通过 | FFL R2（T5） | `results/t5-flow-*-verify.json`；生产 API 实证 valid_submissions=4 |
+| 21 | **FFL R3 场景扩充 + B20 压测** | 新增 10 道真实场景题（温湿度/人体感应/光照/门窗联动），10/10 有 changed_by_replay=true 真转变证据；B20 三项语义（前置已满足降级 / 零断言降级 / 正常流不误伤）在真实链路全部符合设计 | FFL R3（T8a/T8b/T9/T10） | 生产 API 实证：15 locked / 15 valid_sub / 93.8%；`results/t8a-*.json`、`t8b-*`、`r3-t9-*` |
 
 ---
 
@@ -77,6 +78,8 @@
 | **B18** | **A23 — e2e 错误文案环境错乱，缺守卫** | round5 工单（A23/A24/A26）要求补测试。实测：`test_decision_id_consistency.py`（A24）✅、`test_templates_brightness.py`（A26）✅、**A23 的文案断言测试在 `tests/` 下零命中**（grep `e2e_msg`/`e2e_reason`/`error_msg`/`a23` 均无）。优先级 LOW 但确实未闭环 | `AutoTest/WORKORDER_DEV_round5_cheap_fixes.md` §1 | 补一个纯字符串构造的最小单测，断言 `target` 进入 reasons 文案 |
 | **B19** | `AutoTest/` 缺陷目录 A1–A31 未逐条核验 | 冷存阶段才发现该目录：`gateway-bug-report-20260808.md`（opencode 13 轮报告，A1–A31）+ `gateway-arch-optimization-report-20260810.md` + `architecture-landing-plan-20260809.md`。**只核验了 round5 工单的 A23/A24/A26，其余 28 项未核** | `AutoTest/*.md` | 与 B16 合并为「历史缺陷目录核验」专项 |
 | **B17** | 子流程「安装到 NR」缺解释弹窗 | 需求原文：点击前需**弹提示向用户解释「安装」是做什么**（推送到用户自己的 NR 实例）。实测：安装按钮（`data-sf-ensure` → `/subflows/{key}/ensure`）已实现且幂等、删除按钮有 `confirm` 二次确认，**但安装按钮无解释弹窗** | `FEEDBACK_backlog_2026-08-02.md` §2 | UX 收尾项，归 dw 的文案/UX 工作 |
+| **B22（已修，待部署）** | **外部子流程返回值驱动的分支 → 断言被「未激活分支」跳过 → 假绿放行**（P1，复核新发现） | 竞技场 DSL 可用 `调用子流程: history_state_at(...)`（编译通过、外部调用被记录），但 **vhass 不建模 HA 历史**（`vhass.py` 零命中 history）→ 分支取 `payload.found` 恒不可求值 → 走 else 分支。实测：DSL「历史有记录则**开灯**否则关灯」+ 预期 on → 实际重放 **`light.turn_off`**，断言却被标 `[跳过]（该后置条件来自未激活分支，按 P3-F1/P3-F2 跳过）` → `passed=True, fully_verified=True, verdict=放行`。**flow 做了与期望相反的动作却判放行** | 负责人 R4 前置探针（生产容器内 `arena._verify_flow` 实跑 A/A2/B 三组对照） | 改法：`inactive_effects` 跳过逻辑加前提——**该分支的判定依据必须可求值**；若分支条件引用 vhass 未建模的外部子流程返回值（history_* / http / 外部 link），不得静默 skip，应降级 `未充分验证` 或 fail-closed。与 B5/B20 同族（缺真 oracle），需守卫 + 部署一轮。**在修好前，竞技场禁止把外部子流程返回值当分支判据** |
+| **B21（已修，待部署）** | **判重实体层不对称 → 超集可绕过**（P2，复核发现） | `_entity_overlap(new, existing) = "|new ∩ existing| / |new|"` **只按新题实体数做分母**：新题是旧题实体的**超集**时被稀释到阈值下。实况证据：「高湿自动开空调除湿」({湿度,空调}) vs 「高湿自动开空调除湿模式」({湿度,空调,温度,光照}) → overlap=**0.50**（≤0.6 漏判），但反向=1.00。即**挂 2 个无关传感器即可绕过实体层**；文本层该对仅 0.765，落 0.6-0.85 模糊区交 LLM 考官，LLM 不可用则 fail-open 放行 | 负责人 R3 复核（生产 tasks.json 实测 + arena.py:541-563） | 改法：`overlap = max(|∩|/|new|, |∩|/|existing|)`（双向取大，即任一方向覆盖率 >60% 即判重）。副作用面小：仅当新题实体面基本覆盖旧题时判重，属 fail-safe。需守卫 + 部署一轮 |
 | **B20** | **竞技场验收 oracle 弱验证**（F-R2-01，P3） | ① state 断言在目标实体**已处于期望状态**时空转通过（`pre_state=on`、`changed_by_replay=false` 仍 ok，R2 T5 case1 实录）；② 自指 DSL **零断言**也放行。与 B5 同根：验收判分 ≠ 真行为改变 | FFL R2 `FINDINGS.md` R2 节 | **已修（待部署）**：`run_staging_gate` 沿 A22 诚实降级模式——①`pre_satisfied` 标记 + 全部 state 断言前置已满足时 fully_verified 降级 / require_change 硬失败；②零断言 fully_verified 降级。守卫 `tests/test_b20_vacuous_assertions.py`（4 例）；与 B1/B5 的深整合（真机转变验证）仍排期 |
 
 ---
