@@ -12,10 +12,10 @@
 
 | 占位符 | 填什么 | 状态 |
 |---|---|---|
-| `【GATEWAY】` | 网关 WebUI 地址，如 `http://<NAS_IP>:8000` | ❌ 待填 |
-| `【API_KEY】` | 给测试团队专用、权限受限的 Pro API Key（`af_pro_...`） | ❌ 待填 |
-| `【AREA_NAME】` | HA 里书房区域的准确名称（以 `/api/arena/ha_areas` 返回为准） | ❌ 待填 |
-| `【DEVICES】` | 已同步进 `study_room` 的真实设备清单（entity_id + 名称 + domain） | ❌ 待填 |
+| `【GATEWAY】` | 网关 WebUI 地址：`http://<NAS_IP>:8000` | ✅ 已填 |
+| `【API_KEY】` | 测试专用 API Key（`af_pro_...`，30 天有效） | ⚠️ **不写入本文件**，由项目负责人面交，发送前替换 |
+| `【AREA_NAME】` | HA 里书房区域名：`书房` | ✅ 已填 |
+| `【DEVICES】` | 已同步的真实设备清单（11 个，见下） | ✅ 已填 |
 
 > 填完把这几行删掉，正文里就不该再有 `【】`。
 
@@ -47,19 +47,37 @@
 - 目录：`E:\NAS\autoflow`
 - 架构文档（唯一权威）：`docs/02_architecture/ARCHITECTURE.md`（重点看 §18.2 竞技场）
 - 缺陷台账：`docs/04_test/findings-ledger.md`
-- 网关地址：`【GATEWAY】`
+- 网关地址：`【GATEWAY】` → `http://<NAS_IP>:8000`
 - 认证：所有请求带 `Authorization: Bearer 【API_KEY】`
+  （key 由项目负责人在会话里单独提供，**不要写进任何文件或 commit**）
 
 ## 验收场地：书房竞技场（环境已由项目负责人预置好）
 
 - 分区 id：`study_room`（书房竞技场）
-- 区域名：`【AREA_NAME】`
+- 区域名：`【AREA_NAME】` → **`书房`**
 - 阈值：`phase2_threshold=20`、`creativity_threshold=0.3`
-- **已同步的真实设备清单**（全部来自真实 HA，均带 `synced_from_ha: true`）：
+- **已同步的真实设备清单**（11 个，全部来自真实 HA，均带 `synced_from_ha: true`，
+  占位设备已全部移除）：
 
 ```
-【DEVICES】
+light.philips_cn_249518489_rwread_s_2_light                 书房台灯（light）
+light.yeelink_cn_555003624_lamp22_s_2                       米家智能显示器挂灯1S（light）
+light.xiaomi_cn_822413342_lamp35_s_2_light                  米家桌面学习灯（light）
+switch.lemesh_cn_1088333045_sw0a04_on_p_2_1                 书房电脑（switch）
+climate.lumi_cn_84159632_v2                                 书房空调（climate）
+binary_sensor.xiaomi_cn_blt_3_1hsett9ug4k01_03_occupancy_status_p_2_1078   小米人在传感器
+binary_sensor.lumi_cn_lumi_158d0001a2520d_aq2_motion_state_p_2_1           书房人体传感器
+binary_sensor.isa_cn_blt_3_145qeam4s5o00_dw2hl_contact_state_p_2_2         书房门窗传感器
+sensor.duka_cn_blt_3_1orsfvt24cc01_th2_temperature_p_2_1001                温度（°C）
+sensor.duka_cn_blt_3_1orsfvt24cc01_th2_relative_humidity_p_2_1008          湿度（%）
+sensor.ainice_cn_1008528932_rd_status_p_5_2                                光照度（lux）
 ```
+
+- **选型说明**（出题时参考）：已刻意排除 `unavailable` 设备、门锁与摄像头；
+  覆盖 6 个 domain（light / switch / climate / binary_sensor / sensor），足够写出
+  「人到灯亮」「光照不足补光」「离家关空调」「湿度异常提醒」这类有意义的自动化。
+  ★ `switch.lemesh_cn_1088333045_sw0a04_on_p_2_1` 是**真实电脑电源**，
+  出题允许引用它，但验收只在 vhass 孪生里跑，**绝不会真的开关你的电脑**。
 
 - 相关 API：
   - `GET  /api/arena/arenas`
@@ -153,15 +171,28 @@ agent 用真实 entity_id 写 DSL ──▶ 在 vhass 孪生上验收 ──▶ 
 
 ## 备注（给项目负责人，不用发给团队）
 
+- **2026-09-08 环境已配置完成**（均经实测验证）：
+  - NAS 上 FFL 留下的弃用副本 `autoflow-v2` 容器 + 目录已清理（数据已备份到
+    `D:\Documents\HAOS\AutoFlow_archive\2026-09-08\nas_cleanup\`），
+    同时清掉 63 个历史备份 tar.gz（162M，规范 §9 点名的堆积），**生产只剩 `autoflow_gateway`**。
+  - 测试 API Key 已签发：key_id `akid_bd0ba5edc280452e`，agent_id `ffl-arena-tester`，
+    权限 `[read, deploy]`（**无 modify**，不能 deploy-raw/rollback），2026-10-08 过期。
+    明文只在签发时返回一次，已面交用户，**未写入任何仓库文件**。
+  - 书房 11 个真实设备已 `sync_devices` 进 `study_room`（11/11 全中，无静默跳过），
+    8 个 `DEFAULT_ARENAS` 占位设备已全部移除，`study_room_seed.json` 已重写含真实 entity_id。
 - **2026-09-08 角色纠偏**：初稿把 T1（`webui.py` 20 处 `gw.*` 改 `asyncio.to_thread`）和
   T2（gateway `__truncated__` 处理）也派给了团队。这是**改 `src/` 网关代码**，
   等于把生产网关交给外部团队 —— 已全部撤回，改由项目负责人自己做或另行安排。
   **FFL 现在的角色是测试员：环境我配好，他们只做验收。**
-- **竞技场设备同步、API Key 发放也是项目负责人的活**，不进团队任务（已从上版 T0 移除）。
-- **待办**：拿到网关 WebUI 访问方式（token 或登录会话）后才能
-  ① 拉书房真实设备 ② `sync_devices` 进 `study_room` + vhass ③ 签发测试专用 API Key。
-  当前阻塞：SSH 到 NAS 被拒（host key 校验失败），HTTP arena 接口返回 401。
 - **为什么设备必须真实**：分区自带的 8 个（`switch.computer` 等）是
   `arena.py::DEFAULT_ARENAS` 占位种子，真实 HA 里不存在 → 对它们写的 flow 是「假可用」
   （编译过、孪生跑通、部署即失效）。陷阱：`sync_devices` 对不存在的 entity_id **静默跳过**，
   必须逐个核对 `added_ids`。
+- **合规发现（待办，未动）**：本地 `docker-compose.yml` 的端口映射写的是 `"8000:8000"`（= 0.0.0.0），
+  违反《NAS 开发规范》§6.1「必须绑定 192.168.2.200」。线上实际已绑对（`192.168.2.200:8000->8000`），
+  说明**线上 compose 与仓库不一致**，需要对齐后一并修。改 compose 会重建容器（规范 §2.7 警告
+  容器 churn 触发 trim 死锁），需选低峰期并走部署 skill。
+- **SSH 通道**：Git Bash 自带 ssh 读 `~/.ssh/known_hosts` 会报 Permission denied，
+  系统自带 `C:\Windows\System32\OpenSSH\ssh.exe` 在非交互 shell 下无输出；
+  **可用的是便携版** `C:\Users\lidicn\.ssh\openssh\OpenSSH-Win64\ssh.exe`
+  + `-i C:\Users\lidicn\.ssh\id_ed25519 -o StrictHostKeyChecking=no`。
