@@ -45,6 +45,10 @@
 | 14 | R10 lint 末端误报 | `debug`/`link out` 被当 1 输出，合法 flow 被拒 | T011 Findings#2 | T012§4 CLOSED：`_SINGLE_OUTPUT_TYPES` 移除二者 |
 | 15 | MCP schema 漂移 A20/A27 | 手工 schema 与实现漂移 | T006 S5 | **结构性缓解**：62 处 `@mcp.tool()` 由函数签名自动生成，0 处手工 `inputSchema` |
 | 16 | delegate 后端接线 | T006 标「后端接线待确认」 | T006 S5c | 已接线：`acp_client.py:152` + `config.py:130/239` |
+| 17 | **FFL F-01** submit 并发竞态（P0） | 守卫「in_progress 且 locked_by≠agent」被同 agent 并发绕过，后写覆盖前写；修法=只允许 available 进入 + 写回前复核 | FFL R1（`D:\Documents\WorkSpace\Test\FINDINGS.md`） | commit 07ed982；R2 回归 200/400 实证（`r2-t4-f01-concurrent-submit.json`） |
+| 18 | **FFL F-02** 判重失效（P1） | 根因=判重只扫 locked 题（非竞态，串行即复现）；作用域改 available/in_progress/locked | FFL R1 | commit 07ed982；R2 串行重复 propose 第 2 次 400（`r2-t4-f02-propose-2.json`） |
+| 19 | **FFL F-04~F-07**（P2×4） | F-04 类型校验 500→400（webui+Manager 双层）；F-05 幽灵实体 400+unknown_entities；F-06 标题 2-50/描述≤2000；F-07 stats 增 valid_submissions | FFL R1 | commit 07ed982；R2 回归 4/4 通过（`r2-t4-f0[4567]-*.json`）；test_arena 24→34 |
+| 20 | **FFL R2 真实 flow 验收** | 3 道真题（有人进书房开灯/光照不足开挂灯/关门关空调）全链路 locked+vhass 孪生验证通过 | FFL R2（T5） | `results/t5-flow-*-verify.json`；生产 API 实证 valid_submissions=4 |
 
 ---
 
@@ -73,6 +77,7 @@
 | **B18** | **A23 — e2e 错误文案环境错乱，缺守卫** | round5 工单（A23/A24/A26）要求补测试。实测：`test_decision_id_consistency.py`（A24）✅、`test_templates_brightness.py`（A26）✅、**A23 的文案断言测试在 `tests/` 下零命中**（grep `e2e_msg`/`e2e_reason`/`error_msg`/`a23` 均无）。优先级 LOW 但确实未闭环 | `AutoTest/WORKORDER_DEV_round5_cheap_fixes.md` §1 | 补一个纯字符串构造的最小单测，断言 `target` 进入 reasons 文案 |
 | **B19** | `AutoTest/` 缺陷目录 A1–A31 未逐条核验 | 冷存阶段才发现该目录：`gateway-bug-report-20260808.md`（opencode 13 轮报告，A1–A31）+ `gateway-arch-optimization-report-20260810.md` + `architecture-landing-plan-20260809.md`。**只核验了 round5 工单的 A23/A24/A26，其余 28 项未核** | `AutoTest/*.md` | 与 B16 合并为「历史缺陷目录核验」专项 |
 | **B17** | 子流程「安装到 NR」缺解释弹窗 | 需求原文：点击前需**弹提示向用户解释「安装」是做什么**（推送到用户自己的 NR 实例）。实测：安装按钮（`data-sf-ensure` → `/subflows/{key}/ensure`）已实现且幂等、删除按钮有 `confirm` 二次确认，**但安装按钮无解释弹窗** | `FEEDBACK_backlog_2026-08-02.md` §2 | UX 收尾项，归 dw 的文案/UX 工作 |
+| **B20** | **竞技场验收 oracle 弱验证**（F-R2-01，P3） | ① state 断言在目标实体**已处于期望状态**时空转通过（`pre_state=on`、`changed_by_replay=false` 仍 ok，R2 T5 case1 实录）；② 自指 DSL **零断言**也放行。与 B5 同根：验收判分 ≠ 真行为改变 | FFL R2 `FINDINGS.md` R2 节 | **已修（待部署）**：`run_staging_gate` 沿 A22 诚实降级模式——①`pre_satisfied` 标记 + 全部 state 断言前置已满足时 fully_verified 降级 / require_change 硬失败；②零断言 fully_verified 降级。守卫 `tests/test_b20_vacuous_assertions.py`（4 例）；与 B1/B5 的深整合（真机转变验证）仍排期 |
 
 ---
 

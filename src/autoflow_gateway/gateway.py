@@ -6323,22 +6323,40 @@ class Gateway:
                             "expected": want, "actual": got, "ok": ok,
                             "pre_state": pre, "service_called": serv_called,
                             "changed_by_replay": changed}
-                    # 巧合命中：状态已满足、且本步无针对该实体的服务被重放 → 没证明 flow 副作用。
-                    # require_change=True 时作为真失败（fail）；否则仅告警（不推翻 verdict）。
-                    if ok and not changed and not serv_called:
-                        item["coincidental"] = True
-                        if require_change:
-                            ok = False
-                            item["ok"] = False
-                            item["reason"] = (
-                                (item.get("reason") + "；") if item.get("reason") else ""
-                            ) + ("后置条件在重放前已满足且无针对该实体的服务被重放，"
-                                 "require_change=True 要求状态发生变化 → 未通过")
+                    # 巧合命中 / 前置已满足（B20/F-R2-01①）：状态已满足 → 状态转变未被证明。
+                    #  - 服务未被重放（巧合命中，原逻辑）：连「flow 调用了服务」都无法证明；
+                    #  - 服务被重放但重放前已达目标态（B20①新覆盖）：动作证据有了，转变证据
+                    #    仍缺（重放起点已在目标态，无法区分「flow 使然」与「本来就这样」）。
+                    # require_change=True 时两情形均为真失败（fail）；否则告警（不推翻 verdict）。
+                    if ok and not changed:
+                        if not serv_called:
+                            item["coincidental"] = True
+                            if require_change:
+                                ok = False
+                                item["ok"] = False
+                                item["reason"] = (
+                                    (item.get("reason") + "；") if item.get("reason") else ""
+                                ) + ("后置条件在重放前已满足且无针对该实体的服务被重放，"
+                                     "require_change=True 要求状态发生变化 → 未通过")
+                            else:
+                                warnings.append(
+                                    f"【巧合命中】后置条件 {eid}={want} 在重放前已满足，且本步无针对"
+                                    f"该实体的服务被重放 → 未验证 flow 的副作用（服务未调用 / 已幂等）。"
+                                    f"如需强制验证请传 require_change=true。")
                         else:
-                            warnings.append(
-                                f"【巧合命中】后置条件 {eid}={want} 在重放前已满足，且本步无针对"
-                                f"该实体的服务被重放 → 未验证 flow 的副作用（服务未调用 / 已幂等）。"
-                                f"如需强制验证请传 require_change=true。")
+                            item["pre_satisfied"] = True
+                            if require_change:
+                                ok = False
+                                item["ok"] = False
+                                item["reason"] = (
+                                    (item.get("reason") + "；") if item.get("reason") else ""
+                                ) + ("后置条件在重放前已满足（重放起点已在目标态），"
+                                     "require_change=True 要求状态发生变化 → 未通过")
+                            else:
+                                warnings.append(
+                                    f"【前置已满足】后置条件 {eid}={want} 在重放前已满足：重放虽调用了"
+                                    f"服务，但状态转变未被证明（重放起点已在目标态，无法区分「flow 使然」"
+                                    f"与「本来就这样」）。如需强制验证请传 require_change=true。")
                     if rec is None:
                         # 归因清楚：不是「状态不对」，是这个实体压根不在设备目录里
                         item["reason"] = ("实体不在 vhass staging 设备目录"
@@ -6492,6 +6510,28 @@ class Gateway:
                 "重放归零按 warn_only 策略保留放行（AUTOFLOW_REPLAY_ZERO_POLICY）："
                 "该结论**未经行为验证**，请人工确认。")
 
+        # 【B20/F-R2-01①聚合】全部 state 断言均为「前置已满足」型（无一例证明状态转变）
+        # → 闸门只证明了「调用了服务」，未证明「服务改变了世界」→ fully_verified 诚实降级。
+        _state_asserts = [a for s in step_results for a in s["assertions"]
+                          if a.get("kind") == "state" and not a.get("branch_inactive")]
+        _pre_sat_asserts = [a for a in _state_asserts if a.get("pre_satisfied")]
+        _pre_sat_only = bool(_state_asserts) and len(_pre_sat_asserts) == len(_state_asserts)
+        if _pre_sat_only:
+            warnings.append(
+                "全部 state 断言的重放起点均已处于目标态（前置已满足）→ 没有任何一条断言"
+                "证明「flow 使状态发生转变」，fully_verified 不可视为完整验证（B20/F-R2-01）。")
+
+        # 【B20/F-R2-01②】零断言检测：声明了效果且动作被重放，但 expected 为空/自指 →
+        # 0 断言，all_pass 平凡为真。闸门只证明了「动作被调用」，未证明「动作产生了期望
+        # 的世界态」。沿 A22/V-NEW-1 诚实降级模式（fully_verified=False），不硬拦。
+        _zero_assertion = (has_effect_nodes and bool(step_results)
+                           and not any(s["assertions"] for s in step_results))
+        if _zero_assertion:
+            warnings.append(
+                "【零断言】flow 声明了效果且动作被重放，但没有任何后置断言（expected 为空或自指）"
+                "→ 只证明了「动作被调用」，未证明「动作产生了期望的世界态」。"
+                "fully_verified 不视为完整验证（B20/F-R2-01）。")
+
         # A22：存在「被跳过/未建模/重放归零 warn_only」的验证层时，即便断言全过也不算充分验证，
         # verdict 降级为「未充分验证」（而非「放行」），消除「零验证报 pass」假象。
         # 【V-F1】复杂 JSONata 无法本地求值却「保守命中」→ 条件未经逻辑校验即视为通过，
@@ -6506,6 +6546,8 @@ class Gateway:
             bool(conservative_hits) or
             _function_only or
             _declared_effect_unreplayed or
+            _pre_sat_only or  # 【B20①】全部 state 断言前置已满足，无转变证据
+            _zero_assertion or  # 【B20②】零断言：只证动作被调用，未证世界态
             bool(_domain_mismatch_hits)  # 【WB84·P3-F4】错域 service 不得宣称 fully_verified
         )
         if _function_only:

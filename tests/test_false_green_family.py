@@ -49,6 +49,10 @@ def _mk_shim(seed_states):
         def _check_entities_known(self, scene):
             return []
 
+        # O1 §1.3 增强在产品代码引入了取值实体实时态播种；本桩自管种子，补 no-op 对齐
+        def _seed_read_value_entities_from_ha(self, flow, store):
+            return None
+
         def _build_vhass_from_staging(self):
             from autoflow_gateway import vhass as vh
             store = vh.VHassStore()
