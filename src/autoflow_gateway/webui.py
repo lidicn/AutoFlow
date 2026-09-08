@@ -1653,12 +1653,18 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         """提交题目（审核 + 创造力评分）。"""
         arena_id = request.path_params.get("arena_id", "")
         b = await _body(request)
+        # F-04（FFL 验收）：先做类型校验，非法类型回 400，而不是让 `.strip()` 炸成 500
+        for _f in ("title", "description", "agent_id"):
+            if _f in b and b.get(_f) is not None and not isinstance(b.get(_f), str):
+                return _js({"ok": False, "error": f"{_f} 必须是字符串"}, 400)
         title = (b.get("title") or "").strip()
         description = (b.get("description") or "").strip()
         entity_ids = b.get("entity_ids") or []
         agent_id = (b.get("agent_id") or "arena-agent").strip()
         if isinstance(entity_ids, str):
             entity_ids = [e.strip() for e in entity_ids.split(",") if e.strip()]
+        if not isinstance(entity_ids, list) or not all(isinstance(e, str) for e in entity_ids):
+            return _js({"ok": False, "error": "entity_ids 必须是字符串数组"}, 400)
         try:
             result = await asyncio.to_thread(
                 arena_mgr.propose_task, arena_id, title, description, entity_ids, agent_id
@@ -1671,9 +1677,15 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         """提交 flow 进行验收。"""
         arena_id = request.path_params.get("arena_id", "")
         b = await _body(request)
+        # F-04（FFL 验收）：类型校验，非法类型回 400 而不是 500
+        for _f in ("task_id", "dsl", "agent_id"):
+            if _f in b and b.get(_f) is not None and not isinstance(b.get(_f), str):
+                return _js({"ok": False, "error": f"{_f} 必须是字符串"}, 400)
         task_id = (b.get("task_id") or "").strip()
         dsl = (b.get("dsl") or "").strip()
         agent_id = (b.get("agent_id") or "arena-agent").strip()
+        if not isinstance(task_id, str) or not isinstance(dsl, str):
+            return _js({"ok": False, "error": "task_id / dsl 必须是字符串"}, 400)
         if not task_id:
             return _js({"ok": False, "error": "task_id 不能为空"}, 400)
         if not dsl:

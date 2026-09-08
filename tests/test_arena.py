@@ -238,5 +238,92 @@ class TestBoardAndStats(_ManagerBase):
         self.assertGreaterEqual(stats["total_tasks"], 1)
 
 
+class TestFflRegression(_ManagerBase):
+    """FFL 书房竞技场验收（2026-09-08）炸出的缺陷回归守卫。
+
+    缺陷原始报告在 FFL 工作区 FINDINGS.md（F-01~F-07），
+    本类把其中可在单测层复现的用例钉死，防止修复被回退。
+    """
+
+    def test_f02_serial_duplicate_rejected(self):
+        """F-02：判重必须覆盖 available 题——串行（无并发）重复提交也必须被拦。"""
+        self._propose_ok(title="串行重复实验",
+                         desc="两道完全相同的题，串行提交第二道必须被判重拦截",
+                         entities=STUDY_DEVICES[:2])
+        r = self.mgr.propose_task(
+            "study_room", "串行重复实验",
+            "两道完全相同的题，串行提交第二道必须被判重拦截",
+            STUDY_DEVICES[:2], "agent-2")
+        self.assertFalse(r["ok"], "串行重复题必须被拦（判重作用域须覆盖 available）")
+        self.assertTrue(r.get("is_duplicate"))
+
+    def test_f05_unknown_entity_rejected(self):
+        """F-05：编造实体必须被拒，而不是只扣创意分。"""
+        r = self.mgr.propose_task(
+            "study_room", "编造实体测试",
+            "这个题目引用了不存在于分区设备清单的实体",
+            ["nonexistent.entity123"], "agent-1")
+        self.assertFalse(r["ok"])
+        self.assertIn("不在分区设备清单", r["error"])
+        self.assertEqual(r.get("unknown_entities"), ["nonexistent.entity123"])
+
+    def test_f06_description_length_cap(self):
+        r = self.mgr.propose_task("study_room", "超长描述测试", "长" * 2001,
+                                  STUDY_DEVICES, "agent-1")
+        self.assertFalse(r["ok"])
+        self.assertIn("上限 2000", r["error"])
+
+    def test_f06_title_length_cap(self):
+        r = self.mgr.propose_task("study_room", "标" * 51, "正常描述，只是标题超长",
+                                  STUDY_DEVICES, "agent-1")
+        self.assertFalse(r["ok"])
+        self.assertIn("上限 50", r["error"])
+
+    def test_f06_title_min_length(self):
+        r = self.mgr.propose_task("study_room", "x", "单字符标题应被拒",
+                                  STUDY_DEVICES, "agent-1")
+        self.assertFalse(r["ok"])
+        self.assertIn("至少 2 个字符", r["error"])
+
+    def test_f04_non_string_title_rejected_not_crash(self):
+        r = self.mgr.propose_task("study_room", 12345, "描述", STUDY_DEVICES, "a")
+        self.assertFalse(r["ok"])
+        self.assertIn("字符串", r["error"])
+
+    def test_f04_non_list_entities_rejected(self):
+        r = self.mgr.propose_task("study_room", "标题", "描述", 12345, "a")
+        self.assertFalse(r["ok"])
+        self.assertIn("entity_ids", r["error"])
+
+    def test_f01_submit_rejects_in_progress_even_same_agent(self):
+        """F-01（P0）：同 agent_id 的二次提交也必须被拒——旧守卫只挡不同 agent，
+        同 agent 并发提交两条 DSL 会全部通过并互相覆盖。"""
+        tid = self._propose_ok()
+        with open(self.mgr.tasks_file, encoding="utf-8") as f:
+            tasks = json.load(f)["tasks"]
+        for t in tasks:
+            if t["id"] == tid:
+                t["status"] = "in_progress"
+                t["locked_by"] = "agent-1"
+        self.mgr._save_json(self.mgr.tasks_file, {"tasks": tasks})
+        # 同 agent_id 提交（旧实现此处放行 → 竞态覆盖）
+        r = self.mgr.submit_flow("study_room", tid, "flow: []", "agent-1")
+        self.assertFalse(r["ok"], "同 agent_id 的二次提交也必须被拒")
+        self.assertIn("验收中", r["error"])
+
+    def test_f01_submit_rejects_locked(self):
+        tid = self._propose_ok()
+        self._lock_task(tid)
+        r = self.mgr.submit_flow("study_room", tid, "flow: []", "agent-2")
+        self.assertFalse(r["ok"])
+        self.assertIn("已被锁定", r["error"])
+
+    def test_f07_stats_has_valid_submissions(self):
+        self._propose_ok()
+        s = self.mgr.get_stats()
+        self.assertIn("valid_submissions", s)
+        self.assertEqual(s["valid_submissions"], 0)  # 题目尚无 flow_dsl
+
+
 if __name__ == "__main__":
     unittest.main()

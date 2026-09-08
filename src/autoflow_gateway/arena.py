@@ -493,6 +493,12 @@ class ArenaManager:
         if not arena:
             return {"ok": False, "error": f"分区 {arena_id} 不存在"}
 
+        # F-04（FFL 验收）：类型守卫——非法类型返回 400 语义的干净错误，而不是抛异常变 500
+        if not isinstance(title, str) or not isinstance(description, str) or not isinstance(agent_id, str):
+            return {"ok": False, "error": "title / description / agent_id 必须是字符串"}
+        if not isinstance(entity_ids, list) or not all(isinstance(e, str) for e in entity_ids):
+            return {"ok": False, "error": "entity_ids 必须是字符串数组"}
+
         title = (title or "").strip()
         description = (description or "").strip()
         entity_ids = [e.strip() for e in entity_ids if e.strip()]
@@ -504,9 +510,33 @@ class ArenaManager:
         if not entity_ids:
             return {"ok": False, "error": "至少涉及一个设备"}
 
+        # 输入校验（FFL 验收 F-05/F-06：垃圾题/超长描述/编造实体必须在此拦下）
+        if len(title) < 2:
+            return {"ok": False, "error": "标题至少 2 个字符"}
+        if len(title) > 50:
+            return {"ok": False, "error": f"标题过长（{len(title)} 字符，上限 50）"}
+        if len(description) > 2000:
+            return {"ok": False, "error": f"描述过长（{len(description)} 字符，上限 2000）"}
+        known = {d.get("entity_id") for d in arena.get("devices", []) if d.get("entity_id")}
+        unknown = [e for e in entity_ids if e not in known]
+        if unknown:
+            return {
+                "ok": False,
+                "error": "以下实体不在分区设备清单内: " + ", ".join(unknown[:5])
+                         + ("…" if len(unknown) > 5 else ""),
+                "unknown_entities": unknown,
+            }
+
         with self._lock:
             tasks = self._load_tasks()
-            arena_tasks = [t for t in tasks if t.get("arena_id") == arena_id and t.get("status") == "locked"]
+            # ★ 判重作用域（FFL 验收 F-02）：必须覆盖 available/in_progress/locked。
+            # 旧实现只对比 locked 题——刚提出的题是 available，互相之间不参与比对，
+            # 串行连发重复题即可全部放行（实测：同一道题串行提 2 次全部通过，与并发无关）。
+            arena_tasks = [
+                t for t in tasks
+                if t.get("arena_id") == arena_id
+                and t.get("status") in ("available", "in_progress", "locked")
+            ]
 
             # 第一层：实体重叠度 > 0.6 → 重复
             for t in arena_tasks:
@@ -623,10 +653,14 @@ class ArenaManager:
             task = next((t for t in tasks if t["id"] == task_id and t.get("arena_id") == arena_id), None)
             if not task:
                 return {"ok": False, "error": f"题目 {task_id} 不存在"}
+            # ★ F-01（FFL 验收 P0）：只允许从 available 进入验收。
+            # 旧守卫「in_progress 且 locked_by != agent_id 才拒」会被**同 agent_id** 的并发
+            # 提交绕过：两条 DSL 都通过检查、都验收、后写覆盖前写。题目是一次性的，
+            # in_progress / locked 一律拒绝（验收失败会解锁回 available，重试不受影响）。
             if task.get("status") == "locked":
                 return {"ok": False, "error": "题目已被锁定", "locked_by": task.get("locked_by")}
-            if task.get("status") == "in_progress" and task.get("locked_by") != agent_id:
-                return {"ok": False, "error": "题目正在被其他 Agent 处理"}
+            if task.get("status") != "available":
+                return {"ok": False, "error": f"题目正在验收中（status={task.get('status')}），请稍后再试"}
 
             # 标记为进行中
             task["status"] = "in_progress"
@@ -645,6 +679,13 @@ class ArenaManager:
             tasks = self._load_tasks()
             for t in tasks:
                 if t["id"] == task_id:
+                    # F-01 防御性复核：写回前确认状态仍处于本次验收的 in_progress，
+                    # 状态若已变化则本次结果不得覆盖
+                    if t.get("status") != "in_progress" or t.get("locked_by") != agent_id:
+                        result = {"ok": False,
+                                  "error": "题目状态已变化，本次提交未生效",
+                                  "stage": "race_guard"}
+                        continue
                     if result.get("ok"):
                         t["status"] = "locked"
                         t["flow_dsl"] = dsl
@@ -839,7 +880,11 @@ class ArenaManager:
             "total_arenas": len(arenas),
             "total_tasks": len(tasks),
             "locked_tasks": len(locked),
+            # 语义说明（FFL 验收 F-07）：total_submissions 是 submit 端点的**调用次数**
+            #（含验收失败的尝试），不等于有效提交数；valid_submissions 才是当前
+            # flow_dsl 非空（= 验收通过）的任务数。
             "total_submissions": len(submissions),
+            "valid_submissions": len([t for t in tasks if t.get("flow_dsl")]),
             "success_rate": round(
                 len([s for s in submissions if s.get("success")]) / max(len(submissions), 1) * 100, 1
             ),
