@@ -910,8 +910,15 @@ class ArenaManager:
                     # verdict=拦截 的 flow 也被 locked 并计入 Phase2，还占住题目
                     # （题目一次性，他人无法再提交正确 flow）。与下方「失败后解锁，
                     # 其他 Agent 可以选」的设计意图矛盾。
+                    # ★ F-R5-01（FFL R5）：锁定还必须 fully_verified=true。
+                    # gate.passed 只说明「没抓到反例」；零断言 / 前置已满足 /
+                    # JSONata 保守命中时 fully_verified=false（B20/B22：未充分验证
+                    # 不得视同通过）。此类 flow 落锁会形成永久 locked-not-verified
+                    # 死锁（resubmit 被 F-01 拒、re-propose 被判重拒）。
+                    # 字段缺失时默认 True（兼容旧 gate 结构，不改变旧行为）。
                     _gate = result.get("gate") or {}
-                    if result.get("ok") and _gate.get("passed", True):
+                    if (result.get("ok") and _gate.get("passed", True)
+                            and _gate.get("fully_verified", True)):
                         t["status"] = "locked"
                         t["flow_dsl"] = dsl
                         t["verification"] = result.get("gate", {})

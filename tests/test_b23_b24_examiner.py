@@ -81,6 +81,39 @@ def test_b23_gate_passed_still_locks():
     assert t["status"] == "locked" and t["flow_dsl"], t
 
 
+# ── F-R5-01：gate 放行但 fully_verified=false 不得锁题（零断言/前置已满足死锁）──
+def test_fr501_not_fully_verified_stays_available():
+    """gate.passed=true + fully_verified=false（B20 降级）→ 解锁回 available，可重试。"""
+    mgr = _fresh_mgr()
+    _inject_available(mgr)
+    mgr._verify_flow = lambda *a, **k: {
+        "ok": True, "gate": {"passed": True, "verdict": "未充分验证",
+                             "fully_verified": False,
+                             "warnings": ["【零断言】没有任何后置断言"]}}
+    r = mgr.submit_flow("study_room", "task_test1", "触发: x\n动作: y", "agent-fr501")
+    assert r.get("ok") is True
+    tasks = json.load(open(os.path.join(mgr.data_dir, "tasks.json"), encoding="utf-8"))["tasks"]
+    t = [x for x in tasks if x["id"] == "task_test1"][0]
+    assert t["status"] == "available", t  # ★ 未充分验证 → 不锁题、不占题
+    assert t.get("flow_dsl") is None
+    a = json.load(open(os.path.join(mgr.data_dir, "arenas.json"), encoding="utf-8"))
+    sr = [x for x in (a.get("arenas") if isinstance(a, dict) else a) if x["id"] == "study_room"][0]
+    assert sr["locked_task_count"] == 0, sr  # 不计入 Phase2
+
+
+def test_fr501_missing_fully_verified_field_still_locks():
+    """兼容旧 gate 结构：字段缺失时不改变旧行为（默认 True）。"""
+    mgr = _fresh_mgr()
+    _inject_available(mgr)
+    mgr._verify_flow = lambda *a, **k: {
+        "ok": True, "gate": {"passed": True, "verdict": "放行"}}
+    r = mgr.submit_flow("study_room", "task_test1", "触发: x\n动作: y", "agent-compat")
+    assert r.get("ok") is True
+    tasks = json.load(open(os.path.join(mgr.data_dir, "tasks.json"), encoding="utf-8"))["tasks"]
+    t = [x for x in tasks if x["id"] == "task_test1"][0]
+    assert t["status"] == "locked", t
+
+
 # ── B24①：规则考官 ───────────────────────────────────────────
 def test_b24_rules_catch_entity_face_mismatch():
     """标题开灯、描述关空调（实体面无交集）→ 拦。"""
