@@ -1715,6 +1715,15 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         except Exception as e:
             return _js({"ok": False, "error": str(e)}, 500)
 
+    async def arena_agent_profile(request: Request):
+        """★ 记忆联动②（2026-09-10）：agent 战绩画像——历史强弱项一页看全。"""
+        agent_id = request.path_params.get("agent_id", "")
+        try:
+            profile = await asyncio.to_thread(arena_mgr.get_agent_profile, agent_id)
+            return _js(profile, 200 if profile.get("ok") else 400)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
     async def arena_ha_devices(request: Request):
         """获取真实 HA 设备列表（按区域/domain/关键词筛选），用于同步到竞技场。"""
         try:
@@ -3476,6 +3485,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/arena/arenas/{arena_id}/submit", arena_submit_flow, methods=["POST"]),
         Route("/api/arena/arenas/{arena_id}/leaderboard", arena_leaderboard, methods=["GET"]),
         Route("/api/arena/stats", arena_stats, methods=["GET"]),
+        Route("/api/arena/agents/{agent_id}/profile", arena_agent_profile, methods=["GET"]),
         Route("/api/arena/ha_devices", arena_ha_devices, methods=["GET"]),
         Route("/api/arena/ha_areas", arena_ha_areas, methods=["GET"]),
         Route("/api/arena/arenas/{arena_id}/sync_devices", arena_sync_devices, methods=["POST"]),

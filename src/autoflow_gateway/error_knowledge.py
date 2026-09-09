@@ -27,6 +27,9 @@ def _utcnow_iso() -> str:
 
 # 错误类型分类规则（顺序即优先级：具体特征在前，泛化在后）
 ERROR_PATTERNS = [
+    # 考官校准回路（2026-09-10）：propose_task 被考官拒绝的题目逻辑样本——
+    # 必须最优先，避免落入 other/泛化规则
+    ("examiner_rejected", r"【考官拒绝】"),
     # F-R6-T9-01：竞技场「未充分验证」样本的精确特征——必须先于泛化规则匹配，
     # 否则会被 e2e_failed/lint_error 吞掉
     ("pre_satisfied", r"【前置已满足】"),

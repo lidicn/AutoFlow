@@ -238,10 +238,12 @@ def _llm_dedup_arbitrate(new_task: Dict, existing_task: Dict) -> Optional[Dict]:
 
 
 def _llm_logic_review(title: str, description: str, entity_ids: List[str],
-                      devices: Optional[List[Dict]] = None) -> Optional[Dict]:
+                      devices: Optional[List[Dict]] = None,
+                      calibration: Optional[List[Dict]] = None) -> Optional[Dict]:
     """LLM 考官：语义级审查（标题↔描述↔实体一致性 + 逻辑合理性 + 创新性）。
 
     LLM 未配置/不可用时返回 None（调用方降级为规则考官）。配置 LLM 后自动启用。
+    calibration：历史被拒题目样本（考官校准回路，few-shot 自一致性）。
     """
     try:
         from .llm_client import chat_sync
@@ -270,6 +272,12 @@ def _llm_logic_review(title: str, description: str, entity_ids: List[str],
         "**不需要**清单中有触发设备，不要因此判不成立。\n"
         f"标题：{title}\n描述：{description}\n设备清单：\n" + "\n".join(ent_lines)
     )
+    if calibration:
+        cal_lines = "\n".join(
+            f"- 例：{c.get('example', '')[:100]} → 拒绝原因：{c.get('reason', '')[:80]}"
+            for c in calibration[:3])
+        prompt += ("\n\n历史审题教训（考官近期拒绝的真实题目，同类问题直接判 "
+                   "logic_ok=false）：\n" + cal_lines)
     try:
         raw = chat_sync([{"role": "user", "content": prompt}], max_tokens=300)
         m = re.search(r"\{.*\}", str(raw), re.S)
@@ -360,6 +368,8 @@ class ArenaManager:
         # 失败样本从这里进知识库，get_suggestion() 才能反哺 agent。
         from .error_knowledge import ErrorKnowledgeStore
         self._error_kb = ErrorKnowledgeStore(os.path.join(data_dir, "error_knowledge"))
+        # ★ 记忆联动②③（2026-09-10）：经验管道兜底懒加载（suggest_fix 兜底源）
+        self._exp_logger = None
         os.makedirs(self.data_dir, exist_ok=True)
         self._init_arenas()
 
@@ -385,7 +395,7 @@ class ArenaManager:
         try:
             sug = self._error_kb.get_suggestion(error_msg, stage)
         except Exception:
-            return None
+            sug = None
         if not sug or not sug.get("ok"):
             return None
         cases = []
@@ -396,11 +406,125 @@ class ArenaManager:
                 "agent_id": c.get("agent_id"),
                 "timestamp": c.get("timestamp"),
             })
-        return {
+        feedback = {
             "error_type": sug.get("error_type"),
             "suggestion": sug.get("suggestion"),
             "total_same_type": sug.get("total_same_type", 0),
             "historical_cases": cases,
+            "source": "error_knowledge",
+        }
+        # ★ 单出口合并（2026-09-10）：知识库无同类历史时，兜底到 experience
+        # 管道的 suggest_fix（关键词相似案例 + 通用修复清单），避免 agent 收不到
+        # 任何指引；两者不叠加输出，knowledge_feedback 始终是唯一回读出口。
+        if not feedback["total_same_type"]:
+            try:
+                from .experience import ExperienceLogger
+                if self._exp_logger is None:
+                    self._exp_logger = ExperienceLogger(self.data_dir)
+                sf = self._exp_logger.suggest_fix(error_msg, stage)
+                if sf and sf.get("ok"):
+                    feedback["suggestion"] = "；".join(
+                        str(x) for x in (sf.get("fixes") or sf.get("suggestions")
+                                         or []))[:300] or feedback["suggestion"]
+                    feedback["similar_cases_kw"] = [
+                        {"error": c.get("error", "")[:120],
+                         "similarity": c.get("similarity")}
+                        for c in (sf.get("similar_errors") or [])[:3]]
+                    feedback["source"] = "experience_fallback"
+            except Exception:
+                pass
+        return feedback
+
+    def _examiner_calibration(self) -> List[Dict]:
+        """★ 考官校准回路（2026-09-10）：取最近被考官拒绝的题目样本作 few-shot。
+
+        数据源：propose_task 拒绝时入库的 examiner_rejected 样本（最多取 3 条）。
+        样本为空时返回 []，prompt 不加校准段（零开销）。
+        """
+        try:
+            kb = self._error_kb.list_errors(error_type="examiner_rejected", limit=3)
+            return [{"example": e.get("error", ""), "reason": "同类逻辑缺陷"}
+                    for e in kb.get("errors", [])]
+        except Exception:
+            return []
+
+    def get_agent_profile(self, agent_id: str) -> Dict:
+        """★ 记忆联动②（2026-09-10）：agent 战绩画像——历史强弱项一页看全。
+
+        聚合三源：submissions（提交面）/ tasks（锁题面）/ error_knowledge（错误面）。
+        供开工令按人下发"你的历史强弱项"，让历史记忆影响提交策略。
+        """
+        if not agent_id:
+            return {"ok": False, "error": "agent_id 不能为空"}
+
+        # 提交面
+        subs = [s for s in self._load_submissions()
+                if s.get("agent_id") == agent_id]
+        total = len(subs)
+        ok_n = sum(1 for s in subs if s.get("success"))
+        stage_fail: Dict[str, int] = {}
+        recent_fails = []
+        for s in subs:
+            if not s.get("success"):
+                st = s.get("stage") or "unknown"
+                stage_fail[st] = stage_fail.get(st, 0) + 1
+        for s in [x for x in subs if not x.get("success")][-5:]:
+            recent_fails.append({
+                "task_id": s.get("task_id"),
+                "stage": s.get("stage"),
+                "error": (s.get("error") or "")[:100],
+            })
+
+        # 锁题面
+        locked = [t for t in self._load_tasks()
+                  if t.get("status") == "locked" and t.get("locked_by") == agent_id]
+        avg_creativity = (sum(t.get("creativity_score", 0) for t in locked)
+                          / len(locked)) if locked else None
+        effs = []
+        for t in locked:
+            nc = t.get("node_count")
+            if nc:
+                try:
+                    effs.append(min(1.0, max(0.5, 6.0 / max(int(nc), 1))))
+                except (TypeError, ValueError):
+                    pass
+        avg_eff = (sum(effs) / len(effs)) if effs else None
+
+        # 错误面
+        try:
+            kb = self._error_kb.list_errors(agent_id=agent_id, limit=100)
+            err_types: Dict[str, int] = {}
+            for e in kb.get("errors", []):
+                et = e.get("error_type") or "other"
+                err_types[et] = err_types.get(et, 0) + 1
+        except Exception:
+            err_types = {}
+        dominant_error = (max(err_types, key=err_types.get)
+                          if err_types else None)
+
+        return {
+            "ok": True,
+            "agent_id": agent_id,
+            "submissions": {
+                "total": total,
+                "success": ok_n,
+                "pass_rate": round(ok_n / total * 100, 1) if total else None,
+                "fail_by_stage": stage_fail,
+                "recent_failures": recent_fails,
+            },
+            "locked": {
+                "count": len(locked),
+                "avg_creativity": round(avg_creativity, 3) if avg_creativity is not None else None,
+                "avg_efficiency": round(avg_eff, 3) if avg_eff is not None else None,
+                "titles": [t.get("title") for t in locked][-10:],
+            },
+            "errors": {
+                "by_type": err_types,
+                "dominant": dominant_error,
+            },
+            "hint": ("你的历史主要失败类型是 " + dominant_error + "，提交前先对照 "
+                     "knowledge_feedback 里的同类教训规避")
+                    if dominant_error else "暂无历史失败记录",
         }
 
     # ── 初始化 ──
@@ -821,19 +945,29 @@ class ArenaManager:
                         }
 
             # ★ B24 两级考官：LLM 语义审查（配置后自动启用）→ 规则考官兜底
-            logic = _llm_logic_review(title, description, entity_ids, arena.get("devices", []))
+            # ★ 考官校准回路（2026-09-10）：历史被拒题目样本作 few-shot 注入
+            logic = _llm_logic_review(title, description, entity_ids,
+                                      arena.get("devices", []),
+                                      calibration=self._examiner_calibration())
             examiner = "llm"
             if logic is None:
                 logic = _rule_logic_review(title, description, entity_ids, arena.get("devices", []))
                 examiner = "rules"
             if not logic.get("logic_ok"):
+                # ★ 考官校准回路（2026-09-10）：被考官拒绝的题目逻辑样本入经验库，
+                # 之后经 _examiner_calibration() 作为 few-shot 注入后续审题 prompt——
+                # 考官判过的错题成为它未来的教材（自一致性校准）。
+                _reject_reason = ("考官判定题目逻辑不成立（文不对题 / 无触发无动作）："
+                                  + "；".join(logic.get("issues") or []))
+                self._record_error_kb(None, "",
+                                      f"【考官拒绝】{title}：{_reject_reason[:200]}",
+                                      "examiner_rejected", agent_id)
                 return {
                     "ok": False,
                     "is_duplicate": False,
                     "examiner": examiner,
                     "logic_review": logic,
-                    "reason": "考官判定题目逻辑不成立（文不对题 / 无触发无动作）："
-                              + "；".join(logic.get("issues") or []),
+                    "reason": _reject_reason,
                 }
 
             # 创造力评分（★ B24：创新性优先——novelty 权重 0.5）

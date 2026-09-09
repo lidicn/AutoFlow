@@ -506,7 +506,18 @@ class ExperienceLogger:
     def suggest_fix(self, error_msg: str, stage: str = "", dsl: str = "") -> Dict[str, Any]:
         """根据错误信息提供修复建议。"""
         # 从错误知识库中查找相似错误
-        error_file = os.path.join(os.path.dirname(self.base_dir), "error_knowledge.json")
+        # 布局兼容（2026-09-10）：向上一层层找 error_knowledge.json——
+        # 老布局 <data>/error_knowledge.json 与竞技场新布局
+        # <data>/error_knowledge/error_knowledge.json 都要能找到
+        _d1 = os.path.dirname(self.base_dir)
+        _d2 = os.path.dirname(_d1)
+        _candidates = [
+            os.path.join(_d1, "error_knowledge.json"),
+            os.path.join(_d1, "error_knowledge", "error_knowledge.json"),
+            os.path.join(_d2, "error_knowledge", "error_knowledge.json"),
+        ]
+        error_file = next((p for p in _candidates if os.path.exists(p)),
+                          _candidates[0])
         similar_errors = []
         if os.path.exists(error_file):
             try:
