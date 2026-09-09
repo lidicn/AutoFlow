@@ -202,7 +202,40 @@ def _rule_logic_review(title: str, description: str,
     return {"logic_ok": not issues, "issues": issues, "warnings": warns}
 
 
-def _llm_logic_review(title: str, description: str, entity_ids: List[str]) -> Optional[Dict]:
+def _llm_dedup_arbitrate(new_task: Dict, existing_task: Dict) -> Optional[Dict]:
+    """LLM 判重仲裁（B24）：实体面重叠时判断是否**本质相同**的自动化。
+
+    实体集相同 ≠ 同一道题：「工作日定时开灯开电脑」与「人走关电器」实体面一致但
+    触发/意图完全相反。只有触发条件、动作、意图都一致才算 same。
+    LLM 不可用时返回 None（调用方维持 fail-safe 原判）。
+    """
+    try:
+        from .llm_client import chat_sync
+    except Exception:
+        return None
+    prompt = (
+        "判断两道智能家居自动化题目是否本质相同。判定标准：触发条件、执行动作、"
+        "意图三者都基本一致才算相同；只要触发方式（如人体感应 vs 定时）或动作方向"
+        "（开 vs 关）不同，就是不同的题。只输出 JSON："
+        '{"same": bool, "reason": "一句话理由"}\n'
+        f"【题目A】标题：{new_task.get('title','')}｜描述：{new_task.get('description','')}"
+        f"｜设备：{', '.join(new_task.get('entity_ids', []))}\n"
+        f"【题目B】标题：{existing_task.get('title','')}｜描述：{existing_task.get('description','')}"
+        f"｜设备：{', '.join(existing_task.get('entity_ids', []))}"
+    )
+    try:
+        raw = chat_sync([{"role": "user", "content": prompt}], max_tokens=200)
+        m = re.search(r"\{.*\}", str(raw), re.S)
+        if not m:
+            return None
+        d = json.loads(m.group(0))
+        return {"same": bool(d.get("same", True)), "reason": str(d.get("reason", ""))[:200]}
+    except Exception:
+        return None
+
+
+def _llm_logic_review(title: str, description: str, entity_ids: List[str],
+                      devices: Optional[List[Dict]] = None) -> Optional[Dict]:
     """LLM 考官：语义级审查（标题↔描述↔实体一致性 + 逻辑合理性 + 创新性）。
 
     LLM 未配置/不可用时返回 None（调用方降级为规则考官）。配置 LLM 后自动启用。
@@ -211,13 +244,26 @@ def _llm_logic_review(title: str, description: str, entity_ids: List[str]) -> Op
         from .llm_client import chat_sync
     except Exception:
         return None
+    by_id = {d.get("entity_id"): d for d in (devices or [])}
+    ent_lines = []
+    for e in entity_ids:
+        fn = (by_id.get(e) or {}).get("friendly_name") or ""
+        ent_lines.append(f"- {e}" + (f"（{fn}）" if fn else ""))
     prompt = (
-        "你是智能家居自动化题目的考官。审题并只输出 JSON："
-        '{"logic_ok": bool, "issues": ["..."], "novelty": 0.0~1.0}。'
-        "审查点：①标题与描述说的是同一件事吗（文不对题→logic_ok=false）；"
-        "②触发条件与动作在逻辑上成立吗；③所列设备支撑得起这个场景吗；"
-        "④场景新颖吗（老套的开关灯给低 novelty）。\n"
-        f"标题：{title}\n描述：{description}\n设备：{', '.join(entity_ids)}"
+        "你是智能家居自动化题目的考官，专业且严格于逻辑。审题并只输出 JSON："
+        '{"logic_ok": bool, "issues": ["..."], "novelty": 0.0~1.0}。\n'
+        "审查点：①标题与描述说的是同一件事吗；②触发条件与动作有因果关联吗；"
+        "③所列设备支撑得起这个场景吗；④场景新颖吗。\n"
+        "给 logic_ok=false 的硬标准（满足任一）：\n"
+        "- 触发与动作**缺乏因果关联**（如：温度高→调灯光亮度、门关→开灯）；\n"
+        "- 标题与描述说的不是同一件事；\n"
+        "- 动作所需的执行设备不在清单里。\n"
+        "以下情况**不要**给 false（写进 issues 即可）：设计欠佳、缺前置条件、"
+        "id 长得奇怪。entity_id 前缀即设备类型：light.=灯、switch.=开关/插座、"
+        "climate.=空调、sensor.=传感器、binary_sensor.=有人/门窗探测器、cover.=窗帘。\n"
+        "注意：定时/时间触发的自动化（如每天 22:30）由调度器触发，"
+        "**不需要**清单中有触发设备，不要因此判不成立。\n"
+        f"标题：{title}\n描述：{description}\n设备清单：\n" + "\n".join(ent_lines)
     )
     try:
         raw = chat_sync([{"role": "user", "content": prompt}], max_tokens=300)
@@ -667,16 +713,30 @@ class ArenaManager:
                 and t.get("status") in ("available", "in_progress", "locked")
             ]
 
-            # 第一层：实体重叠度 > 0.6 → 重复
+            # 第一层：实体重叠度 > 0.6 → 疑似重复。
+            # ★ B24：实体面重叠 ≠ 本质相同（「工作日定时开灯」vs「人走关灯」实体面
+            # 可以一致）。LLM 可用时交仲裁：本质相同才拒，不同则放行并记 dedup_note；
+            # LLM 不可用维持原 fail-safe 判拒。
+            dedup_notes: List[str] = []
             for t in arena_tasks:
                 overlap = _entity_overlap(entity_ids, t.get("entity_ids", []))
                 if overlap > 0.6:
+                    arb = _llm_dedup_arbitrate(
+                        {"title": title, "description": description, "entity_ids": entity_ids}, t)
+                    if arb is not None and not arb.get("same"):
+                        dedup_notes.append(
+                            f"与「{t.get('title')}」实体重叠 {overlap:.0%}，但考官判定语义不同："
+                            + arb.get("reason", ""))
+                        continue
+                    reason = f"实体重叠度 {overlap:.0%} 超过 60%，与题目「{t.get('title')}」重复"
+                    if arb is not None and arb.get("same"):
+                        reason += f"（考官确认本质相同：{arb.get('reason', '')}）"
                     return {
                         "ok": False,
                         "is_duplicate": True,
                         "duplicate_of": t["id"],
                         "duplicate_title": t.get("title"),
-                        "reason": f"实体重叠度 {overlap:.0%} 超过 60%，与题目「{t.get('title')}」重复",
+                        "reason": reason,
                     }
 
             # 第二层：文本相似度 > 0.85 → 重复
@@ -711,7 +771,7 @@ class ArenaManager:
                         }
 
             # ★ B24 两级考官：LLM 语义审查（配置后自动启用）→ 规则考官兜底
-            logic = _llm_logic_review(title, description, entity_ids)
+            logic = _llm_logic_review(title, description, entity_ids, arena.get("devices", []))
             examiner = "llm"
             if logic is None:
                 logic = _rule_logic_review(title, description, entity_ids, arena.get("devices", []))
@@ -763,6 +823,7 @@ class ArenaManager:
                 "creativity_score": score,
                 "creativity_breakdown": breakdown,
                 "examiner": examiner,
+                "dedup_notes": dedup_notes,
                 "proposed_by": agent_id,
                 "proposed_at": _utcnow_iso(),
                 "locked_by": None,
@@ -779,6 +840,8 @@ class ArenaManager:
                 "task_id": task_id,
                 "creativity_score": score,
                 "creativity_breakdown": breakdown,
+                "examiner": examiner,
+                "dedup_notes": dedup_notes,
                 "status": "available",
                 "message": "题目审核通过，请提交 DSL flow 进行验收",
             }
