@@ -69,6 +69,9 @@ _LOCK = {"lock": "locked", "unlock": "unlocked"}
 
 # (domain, service) → 固定终态
 _FIXED_STATE = {
+    # F-R7-03（FFL R7）：电视模型「开机即播放」——turn_on 归一到 playing，
+    # 与 media_play 终态一致，断言推 playing 后两条服务路径均可验证
+    ("media_player", "turn_on"): "playing",
     ("media_player", "media_play"): "playing",
     ("media_player", "media_pause"): "paused",
     ("media_player", "media_stop"): "idle",
@@ -285,14 +288,16 @@ class VHassStore:
                     attrs[aname] = data[dkey]
 
         # 2) 终态
-        if service in _ON_OFF:
+        # F-R7-03：域级 _FIXED_STATE 优先于通用 on/off——media_player.turn_on
+        # 归一 playing（电视模型开机即播放），不被 turn_on→on 截胡
+        if key in _FIXED_STATE:
+            e["state"] = _FIXED_STATE[key]
+        elif service in _ON_OFF:
             e["state"] = _ON_OFF[service]
         elif service in _COVER:
             e["state"] = _COVER[service]
         elif service in _LOCK:
             e["state"] = _LOCK[service]
-        elif key in _FIXED_STATE:
-            e["state"] = _FIXED_STATE[key]
         elif key in _STATE_FROM_DATA:
             dkey = _STATE_FROM_DATA[key]
             if dkey in data and data[dkey] is not None:

@@ -1329,9 +1329,19 @@ class ArenaManager:
             # 检查是否提到打开/开启/启动
             open_keywords = ["打开", "开启", "启动", "开灯", "开空调", "开电视", "turn on", "open"]
             close_keywords = ["关闭", "关掉", "关灯", "关空调", "turn off", "close"]
-            if any(kw in combined for kw in open_keywords) and domain in ("light", "switch", "media_player", "climate", "fan"):
+            # F-R7-03（FFL R7）：media_player 语义态——vhass 对 media_play/play_media
+            # 映射 playing（电视模型：开机即播放，turn_on 也归一到 playing），
+            # 断言推 "on" 必然与重放终态错位，团队只能用 on+取值 绕过。
+            # 推断改为 playing/off，与 vhass 终态表对齐。
+            if domain == "media_player":
+                if any(kw in combined for kw in (open_keywords + ["播放", "看"])):
+                    expected.append({"entity_id": eid, "state": "playing"})
+                elif any(kw in combined for kw in close_keywords):
+                    expected.append({"entity_id": eid, "state": "off"})
+                continue
+            if any(kw in combined for kw in open_keywords) and domain in ("light", "switch", "climate", "fan"):
                 expected.append({"entity_id": eid, "state": "on"})
-            elif any(kw in combined for kw in close_keywords) and domain in ("light", "switch", "media_player", "climate", "fan"):
+            elif any(kw in combined for kw in close_keywords) and domain in ("light", "switch", "climate", "fan"):
                 expected.append({"entity_id": eid, "state": "off"})
         return expected
 
