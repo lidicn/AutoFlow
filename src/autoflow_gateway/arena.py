@@ -255,7 +255,9 @@ def _llm_logic_review(title: str, description: str, entity_ids: List[str],
         "审查点：①标题与描述说的是同一件事吗；②触发条件与动作有因果关联吗；"
         "③所列设备支撑得起这个场景吗；④场景新颖吗。\n"
         "给 logic_ok=false 的硬标准（满足任一）：\n"
-        "- 触发与动作**缺乏因果关联**（如：温度高→调灯光亮度、门关→开灯）；\n"
+        "- 触发与动作**缺乏因果关联**（如：温度高→调灯光亮度、门关→开灯、"
+        "光照充足→关闭电脑——环境量只能因果关联同域设备，光照/温湿度不能推断"
+        "电脑等电器开关）；\n"
         "- 标题与描述说的不是同一件事；\n"
         "- 动作所需的执行设备不在清单里。\n"
         "以下情况**不要**给 false（写进 issues 即可）：设计欠佳、缺前置条件、"
@@ -350,8 +352,25 @@ class ArenaManager:
         self._lock = threading.Lock()
         self.gateway = gateway  # Gateway 实例，用于 propose-dsl 验收
         self._vhass_stores = {}  # arena_id -> VHassStore
+        # ★ 经验库写入链路（2026-09-09 接线）：error_knowledge 模块 v1.5 已建但
+        # 从未有写入方（webui 只有读 API）。竞技场是全系统唯一的批量 DSL 验收入口，
+        # 失败样本从这里进知识库，get_suggestion() 才能反哺 agent。
+        from .error_knowledge import ErrorKnowledgeStore
+        self._error_kb = ErrorKnowledgeStore(os.path.join(data_dir, "error_knowledge"))
         os.makedirs(self.data_dir, exist_ok=True)
         self._init_arenas()
+
+    def _record_error_kb(self, task: Optional[Dict], dsl: str, error_msg: str,
+                         stage: str, agent_id: str = "",
+                         proposal_id: str = "") -> None:
+        """把验收失败样本写入错误知识库。经验收集永不影响主流程。"""
+        try:
+            prefix = f"[{task.get('id', '?')}]" if task else ""
+            self._error_kb.record(dsl=dsl, error_msg=prefix + " " + error_msg,
+                                  stage=stage, agent_id=agent_id,
+                                  proposal_id=proposal_id)
+        except Exception:
+            pass
 
     # ── 初始化 ──
 
@@ -893,6 +912,23 @@ class ArenaManager:
         except Exception as e:
             result = {"ok": False, "error": f"验收异常: {e}", "stage": "exception"}
 
+        # ★ 经验库写入（三类失败分类入库）：
+        #   流程失败（编译/实体/异常）→ 验收拦截（verdict=拦截）→ 未充分验证
+        #  （零断言/前置已满足/JSONata 保守命中，B20 降级类，F-R5-01 同源）。
+        _kb_gate = result.get("gate") or {}
+        if not result.get("ok"):
+            self._record_error_kb(task, dsl, str(result.get("error") or "unknown"),
+                                  str(result.get("stage") or "unknown"), agent_id,
+                                  str(result.get("proposal_id") or ""))
+        elif not _kb_gate.get("passed", True):
+            _why = _kb_gate.get("reasons") or _kb_gate.get("detail") or _kb_gate.get("error") or []
+            _msg = "验收拦截: " + "; ".join(str(x) for x in _why) if isinstance(_why, list) else f"验收拦截: {_why}"
+            self._record_error_kb(task, dsl, _msg[:400], "gate_rejected", agent_id)
+        elif not _kb_gate.get("fully_verified", True):
+            _warns = _kb_gate.get("warnings") or []
+            _msg = "未充分验证: " + "; ".join(str(x) for x in _warns)
+            self._record_error_kb(task, dsl, _msg[:400], "not_fully_verified", agent_id)
+
         # 更新题目状态
         with self._lock:
             tasks = self._load_tasks()
@@ -981,6 +1017,8 @@ class ArenaManager:
             )
             return result
         except Exception as e:
+            # 异常路径也喂经验库（兜底调用点）
+            self._record_error_kb(task, dsl, f"验收异常: {e}", "verify_exception")
             return {"ok": False, "error": str(e), "stage": "propose_dsl_exception"}
 
     def _llm_judge_duplicate(self, new_task: Dict, existing_task: Dict) -> Optional[Dict]:

@@ -114,6 +114,54 @@ def test_fr501_missing_fully_verified_field_still_locks():
     assert t["status"] == "locked", t
 
 
+# ── 经验库写入链路：失败样本必须进 error_knowledge ──────────
+def _read_errkb(mgr):
+    p = os.path.join(mgr.data_dir, "..", "error_knowledge", "error_knowledge.json")
+    return json.load(open(p, encoding="utf-8"))
+
+
+def test_error_kb_records_not_fully_verified():
+    """未充分验证（B20 降级类）的提交要喂给错误知识库，供 get_suggestion 反哺。"""
+    mgr = _fresh_mgr()
+    _inject_available(mgr)
+    mgr._verify_flow = lambda *a, **k: {
+        "ok": True, "gate": {"passed": True, "verdict": "未充分验证",
+                             "fully_verified": False,
+                             "warnings": ["【零断言】没有任何后置断言"]}}
+    mgr.submit_flow("study_room", "task_test1", "触发: x\n动作: y", "agent-exp")
+    data = _read_errkb(mgr)
+    assert data["stats"]["_total"] >= 1, data
+    e = data["errors"][-1]
+    assert e["stage"] == "not_fully_verified" and "零断言" in e["error"], e
+    assert e["agent_id"] == "agent-exp" and "task_test1" in e["error"], e
+
+
+def test_error_kb_records_flow_failure():
+    """流程失败（编译/实体/异常类）也要入库。"""
+    mgr = _fresh_mgr()
+    _inject_available(mgr)
+    mgr._verify_flow = lambda *a, **k: {
+        "ok": False, "error": "R_unknown_entity: sensor.foo", "stage": "entity_check"}
+    mgr.submit_flow("study_room", "task_test1", "触发: sensor.foo\n动作: y", "agent-exp2")
+    data = _read_errkb(mgr)
+    e = data["errors"][-1]
+    assert e["stage"] == "entity_check" and "R_unknown_entity" in e["error"], e
+
+
+def test_error_kb_records_gate_rejected():
+    """验收拦截（verdict=拦截）入库，带拦截原因。"""
+    mgr = _fresh_mgr()
+    _inject_available(mgr)
+    mgr._verify_flow = lambda *a, **k: {
+        "ok": True, "gate": {"passed": False, "verdict": "拦截",
+                             "fully_verified": False,
+                             "reasons": ["[未过] climate.ac 期望=on 实测=off"]}}
+    mgr.submit_flow("study_room", "task_test1", "触发: x\n动作: y", "agent-exp3")
+    data = _read_errkb(mgr)
+    e = data["errors"][-1]
+    assert e["stage"] == "gate_rejected" and "期望=on" in e["error"], e
+
+
 # ── B24①：规则考官 ───────────────────────────────────────────
 def test_b24_rules_catch_entity_face_mismatch():
     """标题开灯、描述关空调（实体面无交集）→ 拦。"""
