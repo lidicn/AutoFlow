@@ -933,6 +933,25 @@ def _vg_dead_branch_reach(flow, dead_rules):
     return ents, subs
 
 
+def _sanitize_trigger_state(tstate):
+    """F-R6.5（2026-09-09，命题B 双分支实锤）：数值条件触发（`sensor > 28`）
+    解析出的 state 是**条件原文**（'> 28'），直接 inject_trigger 会把世界态
+    污染成不可 float 的文本 → 取值标签读到垃圾 → 数值分支永远保守命中
+    （连种子态都被覆盖）。改为注入**满足条件的合成值**（>28 → 29）。
+
+    非数值条件（on/off/changed 等）原样返回。
+    """
+    _mnum = re.fullmatch(r"\s*(>=|<=|>|<|==|=|!=|<>|≠)?\s*(-?\d+(?:\.\d+)?)\s*",
+                         str(tstate))
+    if _mnum and _mnum.group(2) is not None:
+        _op, _num = _mnum.group(1), float(_mnum.group(2))
+        _v = {"<": _num - 1, "<=": _num, ">": _num + 1, ">=": _num,
+              "==": _num, "=": _num, "!=": _num + 1, "<>": _num + 1,
+              "≠": _num + 1}.get(_op, _num)
+        return str(int(_v)) if float(_v) == int(_v) else str(_v)
+    return tstate
+
+
 def _vg_evaluate_active_intents(flow, world, virtual_time=None, warnings=None,
                                 dead_rules=None, report=None):
     """分支感知：返回当前世界态下应执行的 api-call-service 节点 id 集合。
@@ -978,7 +997,22 @@ def _vg_evaluate_active_intents(flow, world, virtual_time=None, warnings=None,
             if not ifs:
                 return True
             ent = (node.get("entities") or {}).get("entity", [None])[0]
-            return world(ent) == ifs
+            _w = world(ent)
+            # F-R6.5（2026-09-09）：数值条件触发（ifState='> 28'）不能字面比对——
+            # 世界态注入的是满足条件的合成值（如 '29'），需按数值语义求值。
+            _m = re.fullmatch(r"\s*(>=|<=|>|<|==|=|!=|<>|≠)\s*(-?\d+(?:\.\d+)?)\s*",
+                              str(ifs))
+            if _m:
+                try:
+                    _wv = float(_w)
+                except (TypeError, ValueError):
+                    return False
+                _t = float(_m.group(2))
+                _op = _m.group(1)
+                return {"<": _wv < _t, "<=": _wv <= _t, ">": _wv > _t,
+                        ">=": _wv >= _t, "==": _wv == _t, "=": _wv == _t,
+                        "!=": _wv != _t, "<>": _wv != _t, "≠": _wv != _t}[_op]
+            return _w == ifs
         return False
 
     def _trace(nid, msg, seen=None):
@@ -6196,6 +6230,8 @@ class Gateway:
                 tstate = _ALIAS.get(tstate, tstate)
             except Exception:
                 pass
+            # F-R6.5：数值条件原文净化（>28 → 合成值 29），见 _sanitize_trigger_state
+            tstate = _sanitize_trigger_state(tstate)
             try:
                 store.inject_trigger(trig.entity, tstate)
             except Exception:
@@ -6211,7 +6247,8 @@ class Gateway:
                 _st = nd.get("ifState")
                 if _eid and _st:
                     try:
-                        store.inject_trigger(_eid, _st)
+                        # F-R6.5：白箱直通口同样净化（第二实例，与 scene 路径同根因）
+                        store.inject_trigger(_eid, _sanitize_trigger_state(_st))
                     except Exception:
                         pass
                 break

@@ -17,6 +17,7 @@ from autoflow_gateway.gateway import (
     _vg_eval_jsonata_expr,
     _vg_split_outer,
     _vg_evaluate_active_intents,
+    _sanitize_trigger_state,
 )
 
 PASS = "\033[32mPASS\033[0m"
@@ -159,9 +160,59 @@ def main():
     test_active_intents_branch_true()
     test_active_intents_branch_false()
     test_active_intents_fallback()
+    test_sanitize_trigger_state()
+    test_fires_numeric_condition()
     print(f"\n结果: {n_ok}/{n_total} 通过")
     if n_ok != n_total:
         raise SystemExit(1)
+
+
+# ── 5) F-R6.5：触发条件原文净化（数值条件 → 满足条件的合成值） ──────
+def test_sanitize_trigger_state():
+    print("== F-R6.5 触发态净化：数值条件原文 → 合成值 ==")
+    check("> 28 → '29'", _sanitize_trigger_state("> 28") == "29")
+    check("< 24 → '23'", _sanitize_trigger_state("< 24") == "23")
+    check("<= 24 → '24'（边界）", _sanitize_trigger_state("<= 24") == "24")
+    check(">= 30 → '30'（边界）", _sanitize_trigger_state(">= 30") == "30")
+    check("== on 误形？不——== 数值 → 本值", _sanitize_trigger_state("== 27") == "27")
+    check("!= 26 → '27'", _sanitize_trigger_state("!= 26") == "27")
+    check("裸数值 26.7 原样", _sanitize_trigger_state("26.7") == "26.7")
+    check("字符串 on 原样", _sanitize_trigger_state("on") == "on")
+    check("changed 原样", _sanitize_trigger_state("changed") == "changed")
+    check("小数合成值 25.5", _sanitize_trigger_state("> 24.5") == "25.5")
+
+
+def _make_num_flow(if_state="> 28"):
+    """受控合成 flow：数值条件触发 → 调服务（无中间取值，直测 _fires 语义）。"""
+    svc = {"id": "svc1", "type": "api-call-service", "domain": "light",
+           "service": "turn_on", "entityId": ["light.x"], "data": "{}", "wires": [[]]}
+    trig = {"id": "trg", "type": "server-state-changed", "ifState": if_state,
+            "entities": {"entity": ["sensor.temperature"], "substring": [], "regex": []},
+            "wires": [["svc1"]]}
+    return {"nodes": [trig, svc]}
+
+
+def _temp_world(v):
+    def _w(eid):
+        return v if eid == "sensor.temperature" else None
+    return _w
+
+
+# ── 6) F-R6.5：_fires 数值条件求值（世界态为合成数值时按数值语义判定） ──
+def test_fires_numeric_condition():
+    print("== F-R6.5 _fires 数值求值：'> 28' 触发条件 ==")
+    flow = _make_num_flow("> 28")
+    active = _vg_evaluate_active_intents(flow, _temp_world("29"), None)
+    check("世界态 29 > 28 → 激活", "svc1" in active)
+    active = _vg_evaluate_active_intents(flow, _temp_world("26.7"), None)
+    check("世界态 26.7 不满足 → 不激活", "svc1" not in active)
+    # 修复前实锤形态：世界态被条件原文污染时必须 fail-closed（不激活、不误判）
+    active = _vg_evaluate_active_intents(flow, _temp_world("> 28"), None)
+    check("世界态为条件原文 → fail-closed 不激活", "svc1" not in active)
+    # 字符串条件不受影响（回归保护）
+    flow_on = _make_num_flow("on")
+    active = _vg_evaluate_active_intents(flow_on, _temp_world("on"), None)
+    check("字符串条件 == 原样比对仍有效", "svc1" in active)
 
 
 if __name__ == "__main__":
