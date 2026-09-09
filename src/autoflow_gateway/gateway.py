@@ -505,7 +505,30 @@ def _vg_eval_jsonata_expr(expr, msg):
         except Exception:
             return (False, False)
         return (_vg_jsonata_cmp(val, op, num), True)
-    m = re.match(r"^([\w.]+)\s*(!=|<>|=)\s*[\"']([^\"']*)[\"']$", e)
+    # F-R5-02（2026-09-09）：裸数值比较 `VAR > NUM`（含 msg. 前缀）。R5 实测编译器
+    # 对「分支: 温度 > 28」产出 `msg.温度 > 28`（无 $number 包裹），此前掉兜底
+    # → 保守视为命中 → 未充分验证（F-R5-02-JSONATA）。数值语义明确，本地可求值。
+    m = re.match(r"^(?:msg\.)?([\w.]+)\s*(<=|>=|!=|<>|<|>|=)\s*(-?\d+(?:\.\d+)?)$", e)
+    if m:
+        var, op, num = m.group(1), m.group(2), float(m.group(3))
+        val = _vg_lookup(msg, var)
+        if val is None:
+            return (False, False)
+        try:
+            val = float(val)
+        except Exception:
+            return (False, False)
+        return (_vg_jsonata_cmp(val, op, num), True)
+    m = re.match(r"^(?:msg\.)?([\w.]+)\s*(!=|<>|==|=)\s*[\"']([^\"']*)[\"']$", e)
+    if m:
+        var, op, s = m.group(1), m.group(2), m.group(3)
+        val = _vg_lookup(msg, var)
+        if val is None:
+            return (False, False)
+        eq = str(val) == s
+        return ((not eq) if op in ("!=", "<>") else eq, True)
+    # F-R5-02：无引号字符串 RHS（`状态 == on`，编译器可能不产引号）。
+    m = re.match(r"^(?:msg\.)?([\w.]+)\s*(==|!=|<>|=)\s*([\w][\w.\-]*)$", e)
     if m:
         var, op, s = m.group(1), m.group(2), m.group(3)
         val = _vg_lookup(msg, var)
