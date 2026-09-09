@@ -114,6 +114,44 @@ def test_fr501_missing_fully_verified_field_still_locks():
     assert t["status"] == "locked", t
 
 
+# ── F-R6-A-01：目的从句不得污染期望推导 ─────────────────────
+def test_fr601_purpose_clause_not_flip_postcondition():
+    """task A 实况回归：描述含「避免…被误关、回来还要重新启动空调和电脑」，
+    目的从句中的反向动词（启动）不得把期望翻成 on。"""
+    mgr = _fresh_mgr()
+    task = {
+        "id": "task_a", "title": "人离开书房延时20分钟再关空调电脑",
+        "description": "当人在传感器显示书房无人时，先等待 20 分钟确认不是短暂离开，"
+                       "再自动关闭书房空调和电脑。延时缓冲是为避免有人短暂出门（如取快递）"
+                       "导致空调电脑被误关、回来还要重新启动空调和电脑。",
+        "entity_ids": ["climate.ac", "switch.pc"],
+    }
+    dsl = "触发: x off\n延时: 20 分钟\n动作: climate.turn_off(climate.ac)\n动作: switch.turn_off(switch.pc)"
+    expected = mgr._infer_postconditions(task, dsl)
+    by_id = {e["entity_id"]: e["state"] for e in expected}
+    assert by_id.get("climate.ac") == "off", expected
+    assert by_id.get("switch.pc") == "off", expected
+
+
+def test_fr601_clean_description_still_infer():
+    """无目的从句的干净描述（task C 形态）推导方向不变。"""
+    mgr = _fresh_mgr()
+    task = {"id": "task_c", "title": "湿度回落退出除湿",
+            "description": "当湿度回落到 60% 以下时，自动关闭书房空调、退出除湿强档，"
+                           "避免持续过度除湿损伤设备与家具。",
+            "entity_ids": ["climate.ac"]}
+    expected = mgr._infer_postconditions(task, "触发: x\n动作: climate.turn_off(climate.ac)")
+    assert expected and expected[0]["state"] == "off", expected
+
+
+# ── F-R6-T9-01：经验库精确分类 ───────────────────────────────
+def test_error_kb_precise_classification():
+    from autoflow_gateway.error_knowledge import classify_error
+    assert classify_error("未充分验证: 【零断言】没有任何后置断言") == "zero_assertion"
+    assert classify_error("未充分验证: 【前置已满足】后置条件 switch=on 已满足") == "pre_satisfied"
+    assert classify_error("switch 规则含无法本地求值的 JSONata「msg.温度 > 28」，保守视为命中") == "jsonata_conservative"
+    # 泛化兜底文案（已中性化）不再被误归 JSONata 类
+    assert classify_error("验证存在未覆盖层（存在未经完整证实的执行路径，结论未充分验证）") != "jsonata_conservative"
 # ── 经验库写入链路：失败样本必须进 error_knowledge ──────────
 def _read_errkb(mgr):
     p = os.path.join(mgr.data_dir, "..", "error_knowledge", "error_knowledge.json")

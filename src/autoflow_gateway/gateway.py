@@ -423,6 +423,13 @@ def _vg_lookup(msg, var):
             var = "msg." + var[4:]
     if var in msg:
         return msg[var]
+    # F-R6（2026-09-09）：编译器实际把取值标签写进 **msg.payload.<label>**（A15-b
+    # 容器归一后 outputProperties 为 payload.<label>），而分支 JSONata 引用的是
+    # `msg.<label>` / 裸 `<label>` → 顶层查不到 → known=False → 保守命中 → 含数值
+    # 分支的题永远「未充分验证」（R6 命题B 双分支实测复现）。回退 payload 路径。
+    _payload = msg.get("payload")
+    if isinstance(_payload, dict) and var in _payload:
+        return _payload[var]
     if var == "payload":
         return msg.get("payload")
     if var.startswith("payload."):
@@ -6615,9 +6622,11 @@ class Gateway:
                 "0 个外部调用被重放，且不可归因于恒假分支 / 保守命中 / 不可求值 → 闸门实际"
                 "未验证其效果，fully_verified 不可视为完整验证（V-NEW-1 诚实性缺口）。")
         if _unverified:
-            warnings.append("验证存在未覆盖层（闸跳过/未建模服务/重放归零 warn_only/"
-                            "保守命中 JSONata/function 黑箱副作用），"
-                            "结论未充分验证，请勿视同已通过。")
+            # F-R6-T9-01：文案中性化——这里的具体技术词（如"JSONata"）会被经验库
+            # 关键词粗分类误归（真 JSONata 求值失败 vs 泛化未覆盖层是两类），改用
+            # 中性表述；精确归因已在各触发点单独入 warning。
+            warnings.append("验证存在未覆盖层（存在未经完整证实的执行路径，"
+                            "结论未充分验证），请勿视同已通过。")
 
         # 3) 汇总返回（单步与旧结构兼容；多步额外给 steps）
         if scenario:

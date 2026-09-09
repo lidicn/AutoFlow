@@ -25,11 +25,17 @@ def _utcnow_iso() -> str:
     return _utcnow().isoformat()
 
 
-# 错误类型分类规则
+# 错误类型分类规则（顺序即优先级：具体特征在前，泛化在后）
 ERROR_PATTERNS = [
+    # F-R6-T9-01：竞技场「未充分验证」样本的精确特征——必须先于泛化规则匹配，
+    # 否则会被 e2e_failed/lint_error 吞掉
+    ("pre_satisfied", r"【前置已满足】"),
+    ("zero_assertion", r"【零断言】"),
+    ("coincidental_hit", r"【巧合命中】"),
+    ("jsonata_conservative", r"规则含无法本地求值的 JSONata"),
     ("unknown_entity", r"unknown.entity|R_unknown_entity|entity.*not.*found"),
     ("syntax_error", r"syntax|parse|invalid.*dsl|expected"),
-    ("lint_error", r"lint|warning|style"),
+    ("lint_error", r"lint|style"),
     ("gate_failed", r"gate|blocked|forbidden|security"),
     ("e2e_failed", r"e2e|verify|assert|postcondition"),
     ("deploy_failed", r"deploy|node.?red|nr.*error"),

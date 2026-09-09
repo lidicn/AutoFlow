@@ -218,6 +218,9 @@ def _llm_dedup_arbitrate(new_task: Dict, existing_task: Dict) -> Optional[Dict]:
         "意图三者都基本一致才算相同；只要触发方式（如人体感应 vs 定时）或动作方向"
         "（开 vs 关）不同，就是不同的题。只输出 JSON："
         '{"same": bool, "reason": "一句话理由"}\n'
+        "措辞澄清（R6）：**仅数值参数不同不算语义不同**——亮度 80 vs 100、温度阈值 "
+        "26 vs 28、延时时长 5 vs 20 分钟这类参数差异，触发事件与动作对象一致就判 "
+        "same；「动作方向相反」指开/关互换，不是参数变化。\n"
         f"【题目A】标题：{new_task.get('title','')}｜描述：{new_task.get('description','')}"
         f"｜设备：{', '.join(new_task.get('entity_ids', []))}\n"
         f"【题目B】标题：{existing_task.get('title','')}｜描述：{existing_task.get('description','')}"
@@ -1084,9 +1087,17 @@ class ArenaManager:
 
         MVP 简化版：从题目描述中提取"打开/开启/启动"对应的设备，期望状态为 on。
         更精确的推断在后续版本由 LLM 考官完成。
+
+        F-R6-A-01（FFL R6）：目的从句必须剥离——task A 的「避免…被误关、回来还要
+        重新启动空调和电脑」是**要防止的情形**，不是目标状态；其中「启动」等反向
+        动词混入主描述导致期望推导反转为 on（turn_off 被拦、反向 turn_on 通过）。
+        「避免/防止/以防/以免/是为了」引导的从句一律不计入关键词扫描。
         """
+        import re as _re
         expected = []
         desc = (task.get("title", "") + " " + task.get("description", "")).lower()
+        # 剥离目的从句（到最近的句读为止）
+        desc = _re.sub(r"(避免|防止|以防|以免|是为了)[^，。；\n]*", "", desc)
         dsl_lower = dsl.lower()
         combined = desc + " " + dsl_lower
 
