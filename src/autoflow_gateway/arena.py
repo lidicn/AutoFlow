@@ -375,6 +375,34 @@ class ArenaManager:
         except Exception:
             pass
 
+    def _kb_feedback(self, error_msg: str, stage: str = "") -> Optional[Dict]:
+        """★ 经验库回读闭环（2026-09-09）：失败反馈附历史同类错误「前车之鉴」。
+
+        之前经验库只写不读——失败样本入库后没有回路喂给考生，重试只能盲试。
+        现在拒绝/降级时按 ERROR_PATTERNS 分类查历史同类样本，附进 submit 回执。
+        永不影响主流程（任何异常静默吞掉）。
+        """
+        try:
+            sug = self._error_kb.get_suggestion(error_msg, stage)
+        except Exception:
+            return None
+        if not sug or not sug.get("ok"):
+            return None
+        cases = []
+        for c in (sug.get("similar_cases") or [])[:3]:
+            cases.append({
+                "error": (c.get("error") or "")[:160],
+                "stage": c.get("stage"),
+                "agent_id": c.get("agent_id"),
+                "timestamp": c.get("timestamp"),
+            })
+        return {
+            "error_type": sug.get("error_type"),
+            "suggestion": sug.get("suggestion"),
+            "total_same_type": sug.get("total_same_type", 0),
+            "historical_cases": cases,
+        }
+
     # ── 初始化 ──
 
     def _init_arenas(self):
@@ -918,19 +946,27 @@ class ArenaManager:
         # ★ 经验库写入（三类失败分类入库）：
         #   流程失败（编译/实体/异常）→ 验收拦截（verdict=拦截）→ 未充分验证
         #  （零断言/前置已满足/JSONata 保守命中，B20 降级类，F-R5-01 同源）。
+        # ★ 经验库回读闭环（2026-09-09）：失败同时查历史同类样本，作为
+        #   「前车之鉴」附进回执（result.knowledge_feedback），重试不再盲试。
         _kb_gate = result.get("gate") or {}
+        _kb_fail = None  # (error_msg, stage)
         if not result.get("ok"):
-            self._record_error_kb(task, dsl, str(result.get("error") or "unknown"),
-                                  str(result.get("stage") or "unknown"), agent_id,
-                                  str(result.get("proposal_id") or ""))
+            _kb_fail = (str(result.get("error") or "unknown"),
+                        str(result.get("stage") or "unknown"))
         elif not _kb_gate.get("passed", True):
             _why = _kb_gate.get("reasons") or _kb_gate.get("detail") or _kb_gate.get("error") or []
             _msg = "验收拦截: " + "; ".join(str(x) for x in _why) if isinstance(_why, list) else f"验收拦截: {_why}"
-            self._record_error_kb(task, dsl, _msg[:400], "gate_rejected", agent_id)
+            _kb_fail = (_msg[:400], "gate_rejected")
         elif not _kb_gate.get("fully_verified", True):
             _warns = _kb_gate.get("warnings") or []
             _msg = "未充分验证: " + "; ".join(str(x) for x in _warns)
-            self._record_error_kb(task, dsl, _msg[:400], "not_fully_verified", agent_id)
+            _kb_fail = (_msg[:400], "not_fully_verified")
+        if _kb_fail:
+            self._record_error_kb(task, dsl, _kb_fail[0], _kb_fail[1], agent_id,
+                                  str(result.get("proposal_id") or ""))
+            _fb = self._kb_feedback(_kb_fail[0], _kb_fail[1])
+            if _fb:
+                result["knowledge_feedback"] = _fb
 
         # 更新题目状态
         with self._lock:
@@ -962,6 +998,10 @@ class ArenaManager:
                         t["flow_dsl"] = dsl
                         t["verification"] = result.get("gate", {})
                         t["token_used"] = result.get("_telemetry", {}).get("estimated_tokens", 0)
+                        # ★ 效率激励（2026-09-09）：记录编译产物节点数，排行榜据此
+                        # 给精简结构加分（见 get_leaderboard 效率系数）
+                        if result.get("node_count"):
+                            t["node_count"] = result.get("node_count")
                         # 更新分区锁定计数
                         arenas = self._load_arenas()
                         for a in arenas:
@@ -1010,6 +1050,12 @@ class ArenaManager:
         # 从题目描述推断期望的后置状态（简单规则：提到的设备如果是"打开/开启"则期望 on）
         expected = self._infer_postconditions(task, dsl)
 
+        # ★ 种子态健康检查（2026-09-09）：把 B20「种子必须是断言反态」纪律固化成
+        # 代码守卫。注意此时 _reset_vhass 已跑，store 态 == 种子态。
+        # 非阻塞（只附 seed_health 警告，不拦截）——期望推断仍是关键词扫描（F-R6-A-01
+        # 残余），硬拦会放大误判；B20 的 require_change 硬约束仍在闸门层兜底。
+        _seed_issues = self._seed_health_check(vhass_store, expected)
+
         try:
             result = self.gateway.propose_dsl(
                 dsl=dsl,
@@ -1018,6 +1064,13 @@ class ArenaManager:
                 vhass_store=vhass_store,
                 strict=False,
             )
+            if _seed_issues and isinstance(result, dict):
+                result["seed_health"] = {
+                    "issues": _seed_issues,
+                    "hint": "种子态与断言方向同态或断言目标不可用。验收种子应取断言"
+                            "目标的反态（期望 on → 种子 off），否则前置已满足会降级 "
+                            "fully_verified（B20）。",
+                }
             return result
         except Exception as e:
             # 异常路径也喂经验库（兜底调用点）
@@ -1082,6 +1135,41 @@ class ArenaManager:
             print(f"[arena] LLM 考官调用失败: {e}")
             return None  # LLM 调用失败，fail-open 不判重
 
+    def _seed_health_check(self, vhass_store, expected) -> List[Dict]:
+        """种子态健康检查：断言目标是否离线、种子是否已是断言期望态（B20 死区）。
+
+        返回 issues 列表（空 = 健康）。任何单条检查异常静默跳过——
+        健康检查永不阻塞验收主流程。
+        """
+        issues: List[Dict] = []
+        for pc in (expected or []):
+            if not isinstance(pc, dict):
+                continue
+            ent = pc.get("entity_id") or pc.get("entity")
+            want = pc.get("state")
+            if not ent or not want:
+                continue
+            try:
+                rec = vhass_store.get_state(ent)
+            except Exception:
+                continue
+            cur = (rec or {}).get("state") if isinstance(rec, dict) else None
+            if cur in (None, "", "unavailable", "unknown"):
+                issues.append({
+                    "entity_id": ent, "seed_state": cur,
+                    "issue": "assertion_target_unavailable",
+                    "detail": f"断言目标 {ent} 种子态为 {cur}（设备离线或未同步），"
+                              "状态断言可靠性受限",
+                })
+            elif str(cur) == str(want):
+                issues.append({
+                    "entity_id": ent, "seed_state": cur, "expected": want,
+                    "issue": "pre_satisfied_seed",
+                    "detail": f"种子态已等于断言期望 {want}——会触发 B20 前置已满足"
+                              "降级，种子应取断言反态",
+                })
+        return issues
+
     def _infer_postconditions(self, task: Dict, dsl: str) -> List[Dict]:
         """从题目和 DSL 推断期望后置状态。
 
@@ -1132,19 +1220,41 @@ class ArenaManager:
                     "locked_tasks": 0,
                     "total_creativity": 0.0,
                     "total_token": 0,
+                    "_effs": [],
                 }
             agents[agent]["locked_tasks"] += 1
             agents[agent]["total_creativity"] += t.get("creativity_score", 0)
             agents[agent]["total_token"] += t.get("token_used", 0)
+            # ★ 效率激励（2026-09-09）：per-task efficiency = clamp(6/node_count,
+            # 0.5, 1.0)。≤6 节点满分（触发→取值→change→switch→动作 的典型结构），
+            # >6 节点线性衰减，≥12 节点触底 0.5。历史题无 node_count 不计入。
+            _nc = t.get("node_count")
+            if _nc:
+                try:
+                    agents[agent]["_effs"].append(
+                        min(1.0, max(0.5, 6.0 / max(int(_nc), 1))))
+                except (TypeError, ValueError):
+                    pass
 
         # 排序：锁定题目数降序，然后平均创造力降序
         leaderboard = []
         for agent, stats in agents.items():
             avg_creativity = stats["total_creativity"] / max(stats["locked_tasks"], 1)
+            # 效率系数 = 0.9 + 0.2 × avg_efficiency ∈ [1.0, 1.1]：
+            # 臃肿结构不罚（保持中性 1.0），精简结构最高 +10%——
+            # 激励「结构创新」而不扭曲「正确性优先」。
+            _effs = stats.pop("_effs")
+            if _effs:
+                _avg_eff = sum(_effs) / len(_effs)
+                _factor = 0.9 + 0.2 * _avg_eff
+            else:
+                _avg_eff, _factor = None, 1.0
             leaderboard.append({
                 **stats,
                 "avg_creativity": round(avg_creativity, 3),
-                "score": round(stats["locked_tasks"] * avg_creativity, 3),
+                "avg_efficiency": round(_avg_eff, 3) if _avg_eff is not None else None,
+                "efficiency_factor": round(_factor, 3),
+                "score": round(stats["locked_tasks"] * avg_creativity * _factor, 3),
             })
         leaderboard.sort(key=lambda x: x["score"], reverse=True)
         return leaderboard

@@ -174,6 +174,17 @@ class ErrorKnowledgeStore:
                    if e.get("error_type") == error_type][-5:]  # 最近5条
 
         suggestions = {
+            # F-R6-T9-01：精确类别（B20 降级族）必须有专门建议，不能落 other
+            "pre_satisfied": "种子态已处于断言期望状态（断言空转）。检查题面种子：验收种"
+                             "子必须取断言目标的**反态**（期望 on 则种子应为 off），否则"
+                             "前置已满足会降级 fully_verified",
+            "zero_assertion": "flow 未产生可断言的实体状态变化（如只调 mode/scene 类服务）"
+                              "或断言为空。确保 DSL 含至少一个可观测的状态转变动作",
+            "coincidental_hit": "断言在重放前已满足（巧合命中）。确认 flow 的动作真正改"
+                                "变了目标实体状态，而不是依赖其现有状态",
+            "jsonata_conservative": "分支条件含无法本地求值的表达式。数值比较写成 "
+                                    "`msg.温度 > 28` 形式（$number 包裹可选），避免使用"
+                                    "网关无法求值的复杂 JSONata 函数",
             "unknown_entity": "检查 entity_id 是否正确，先用 resolve-entity 获取真实 entity_id",
             "syntax_error": "检查 DSL 语法，参考 SKILL.md 中的 DSL 语法速查表",
             "lint_error": "DSL 有 lint 警告，检查节点连接和参数格式",
