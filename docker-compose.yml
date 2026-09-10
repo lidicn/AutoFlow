@@ -4,7 +4,11 @@ services:
     container_name: autoflow_gateway
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      # ★ 必须绑定局域网 IP，禁止 0.0.0.0（NAS 开发规范 §6.1）：
+      # Tailscale Serve 在 Tailscale 接口 IP 上监听同端口，绑 0.0.0.0 会
+      # `bind() failed: Address already in use` 导致容器反复重启（§7.5 血的教训）。
+      # 默认绑 NAS 局域网 IP（见 AF_BIND_IP 的默认值），可用环境变量覆盖以适配其他部署环境。
+      - "${AF_BIND_IP:-192.168.2.200}:8000:8000"
     environment:
       # 环境分级：staging / prod（仅 data/ 子目录隔离；NR 默认 1880）
       # bare 部署直接填真实 HA/NR，固定 prod（连接设置落盘 data/prod/connections.json）
