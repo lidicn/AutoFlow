@@ -29,7 +29,7 @@
 |---|---|---|---|---|
 | 4 | **memory-agent 联动消费点** | 竞技场战报/agent 画像自动落 memory-agent（旧名 memory-worker，2026-09 改名交接 1549e5a，生态口径统一）；agent 经 ACP 查"我上轮学到什么"。网关侧 `delegate_to_memory_worker` 通道已存在，只缺竞技场消费点 | agent 能跨轮查到自己的历史经验，且**有真实读取行为**（不做只写不读） | ACP WebUI 前端落地 |
 | 5 | **94 历史测试红清帐** | 期望漂移修复专项（修测试不改产品代码）；完成后 A/B 基线克隆回归流程退役 | 全量回归 failed=0，或每条失败附归属注释；回归判定零成本 | 无 |
-| 6 | **竞技场教程** | 新 agent 入场引导（DSL 速查 / 机制说明 / T0 流程 / 常见拒绝原因） | 新 agent **只靠教程**完成 T0 并成功提交一题 | 无 |
+| 6 | ✅ **竞技场教程**（`skills/arena.md` v2.0.0） | 重写入场引导：12 节 + 提交前自检清单——含三层判重作用域（全状态）、考官校准回路、创造力权重（novelty 0.5）、**落锁三条件（fully_verified）**、种子反态纪律（B20/seed_health）、战绩画像端点、排行榜效率系数、live 分区现状（study_room/living_room 真实、master_bedroom 占位勿用）、常见失败对策表 | ✅ 新 agent 只靠教程完成 T0 并成功提交一题（R8 续跑轮实测） | 无 |
 
 ## v2.2+ —— 条件触发（不主动排期）
 
@@ -52,7 +52,7 @@
 
 - ✅ **v2.0.11-beta**：竞技场七轮迭代——B20/B22/B23/B24 诚实性修复、F-R5-01 死锁、F-R6.5 数值链路三层修复、JSONata 求值器补全
 - ✅ **2026-09-09**：三回路闭环（knowledge_feedback 回读 / seed_health 守卫 / 效率系数）
-- ✅ **2026-09-10**：记忆联动②③（agent 战绩画像端点 / 考官校准回路 / suggest_fix 单出口合并）；F-R7-03 media_player 语义对齐；F-R7-02 seed_health 正例实测闭环
+- ✅ **2026-09-10**：记忆联动②③（agent 战绩画像端点 / 考官校准回路 / suggest_fix 单出口合并）；F-R7-03 media_player 语义对齐；F-R7-02 seed_health 正例实测闭环；**竞技场教程 v2.0.0（`skills/arena.md` 重写）**
 
 ## 开发节奏约定
 
