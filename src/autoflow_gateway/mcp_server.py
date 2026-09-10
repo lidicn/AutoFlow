@@ -2094,22 +2094,56 @@ _ACP_SESSIONS: "dict[str, _ACPSession]" = {}
 _ACP_SESSIONS_LOCK = threading.Lock()
 _ACP_VERSION = "1.0.0"
 
-# ACP /acp 首版工具面（工单范围默认保守只读；写/变更类不进默认 ACP 工具面）。
-_ACP_TOOLS = [
-    {"name": "list_entities", "description": "列出全屋 Home Assistant 实体目录（按域/区域/关键词过滤），只读。",
-     "input_schema": {"type": "object",
-                       "properties": {"domain": {"type": "string"}, "area": {"type": "string"},
-                                      "keyword": {"type": "string"}, "limit": {"type": "integer"}}}},
-    {"name": "get_entity_state", "description": "查询单个实体的实时状态（直连 HA，只读）。",
-     "input_schema": {"type": "object", "properties": {"entity_id": {"type": "string"}}}},
-    {"name": "list_automations", "description": "列出本网关已建/待审的自动化（flow 注册表），只读。",
-     "input_schema": {"type": "object",
-                       "properties": {"keyword": {"type": "string"}, "only": {"type": "string"}}}},
-    {"name": "delegate_to_memory_worker",
-     "description": "反向委派给 memory-worker（取家庭记忆/知识检索），跨容器 HTTP。",
-     "input_schema": {"type": "object",
-                       "properties": {"task": {"type": "string"}, "context": {"type": "object"}}}},
-]
+# ── ACP /acp 工具面：从 MCP 工具注册表派生（★单一真相源，v2.0.12-2）──
+# 历史教训（A20/A27）：ACP 曾**手写**一份 JSON schema 与本端 MCP 实现并行维护，
+# 结果漂移（实证：手写 `delegate_to_memory_worker` 参数写 `context`，真实实现是
+# `context_json`——手写账本骗了调用方）。现改为「ACP 工具面 = MCP 注册表的投影」：
+# name/description 按映射取自 MCP，input_schema **逐字**取 FastMCP 为 /mcp 生成的
+# parameters（与 /mcp 的 tools/list 同源），杜绝二次维护再漂移。
+# 只暴露「只读 + 反向委派」子集；写/变更类不进默认 ACP 工具面。
+_ACP_TOOL_MAP = {
+    # ACP 暴露名（对端稳定契约，勿轻改） → MCP 工具名（唯一真相源）
+    "list_entities": "autoflow_list_entities",
+    "get_entity_state": "autoflow_get_entity_state",
+    "list_automations": "autoflow_list_automations",
+    "delegate_to_memory_worker": "autoflow_delegate_to_memory_worker",
+}
+
+
+def _acp_doc_summary(doc: str) -> str:
+    """docstring 首段（到第一个空行）作 ACP 描述——精简，且与 MCP 同源不再重复维护。"""
+    d = (doc or "").strip()
+    return d.split("\n\n", 1)[0].strip() if d else ""
+
+
+def _build_acp_tools() -> list:
+    """构建 ACP 工具面（从 MCP 注册表派生）。
+
+    ★失败即抛：映射里的 MCP 工具被改名/删除时**不静默降级**（静默=假绿），
+    直接 RuntimeError 让问题在启动期暴露；守卫测试 test_acp_tool_schema_single_source
+    在 CI 期更早拦截。"""
+    by_name = {t.name: t for t in mcp._tool_manager.list_tools()}
+    out = []
+    for acp_name, mcp_name in _ACP_TOOL_MAP.items():
+        t = by_name.get(mcp_name)
+        if t is None:
+            raise RuntimeError(
+                f"ACP 工具面引用了不存在的 MCP 工具 {mcp_name!r}——"
+                f"工具被改名/删除？请同步 mcp_server._ACP_TOOL_MAP 后再启动。")
+        out.append({
+            "name": acp_name,
+            "description": _acp_doc_summary(t.description),
+            "input_schema": t.parameters,   # ← 与 /mcp tools/list 同源，非手写
+            # ⚠️ 未决（F-ACP-KEY，见 findings-ledger）：本端字段名是 `input_schema`（snake），
+            #   而对端 memory-agent 的 ACP 用 `inputSchema`（camel，同 MCP 惯例）。两端互不读
+            #   对方 schema，故当前无实际故障；但属跨项目契约不一致，改动需与 memory-agent 同步，
+            #   故本轮**不改**，仅登记待裁决。
+        })
+    return out
+
+
+_ACP_TOOLS = _build_acp_tools()
+
 
 
 def _acp_now() -> str:

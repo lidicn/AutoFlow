@@ -171,7 +171,14 @@ AutoFlow 网关是 **agent 与「Home Assistant + Node-RED」之间的唯一中�
 
 - 需要完整清单时，让 agent 调 **`autoflow_whoami`** —— 它实时取自网关注册表，
   返回「你此刻的身份 + 本 mode 能力 + 当前面板实际可调用的工具清单」，不会过期。
-- MCP tool schema **已由函数签名装饰器自动生成**，不手工维护 `inputSchema`。
+- MCP tool schema **已由函数签名装饰器自动生成**（FastMCP 从 `@mcp.tool()` 的签名 + docstring 生成
+  `parameters`），不手工维护 `inputSchema`。
+- **ACP 工具面（v2.0.12-2）**：`/acp` 的 `tools` 不再手写 JSON schema——`_ACP_TOOLS` 由
+  `_build_acp_tools()` 从上述 MCP 注册表**投影**生成（schema 逐字取自 `/mcp` 的 `parameters`）。
+  历史漂移点（A20/A27）已收口：旧手写账本把 delegate 参数写成 `context`，实现实为 `context_json`。
+  守卫 `tests/test_acp_tool_schema_single_source.py`（投影 diff=0 / 签名一致性 / 失败即抛）。
+- **子流程 / Link API 参数 schema** 由 `api_specs.API_SPECS` 派生（`_schema_from_params`），
+  守卫 `tests/test_api_specs.py`。→ 三处（MCP / ACP / 子流程）schema 均单一真相源，无手写副本。
 
 > **设计铁律**：批准 / 升格 / 管理身份**只在 WebUI（人）**，MCP 不暴露 `approve`——杜绝 agent 自己批准自己。
 > 部署刀只在 `/mcp-white`，运维刀只在 `/mcp-admin`。
