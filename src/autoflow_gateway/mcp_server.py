@@ -2098,8 +2098,10 @@ _ACP_VERSION = "1.0.0"
 # 历史教训（A20/A27）：ACP 曾**手写**一份 JSON schema 与本端 MCP 实现并行维护，
 # 结果漂移（实证：手写 `delegate_to_memory_worker` 参数写 `context`，真实实现是
 # `context_json`——手写账本骗了调用方）。现改为「ACP 工具面 = MCP 注册表的投影」：
-# name/description 按映射取自 MCP，input_schema **逐字**取 FastMCP 为 /mcp 生成的
+# name/description 按映射取自 MCP，schema **逐字**取 FastMCP 为 /mcp 生成的
 # parameters（与 /mcp 的 tools/list 同源），杜绝二次维护再漂移。
+# 字段名用 `inputSchema`（camel）——与对端 memory-agent 的 ACP 及 MCP 惯例一致
+# （F-ACP-KEY，2026-09-10 裁决跟随 memory-agent，两端对齐）。
 # 只暴露「只读 + 反向委派」子集；写/变更类不进默认 ACP 工具面。
 _ACP_TOOL_MAP = {
     # ACP 暴露名（对端稳定契约，勿轻改） → MCP 工具名（唯一真相源）
@@ -2133,12 +2135,11 @@ def _build_acp_tools() -> list:
         out.append({
             "name": acp_name,
             "description": _acp_doc_summary(t.description),
-            "input_schema": t.parameters,   # ← 与 /mcp tools/list 同源，非手写
-            # ⚠️ 未决（F-ACP-KEY，见 findings-ledger）：本端字段名是 `input_schema`（snake），
-            #   而对端 memory-agent 的 ACP 用 `inputSchema`（camel，同 MCP 惯例）。两端互不读
-            #   对方 schema，故当前无实际故障；但属跨项目契约不一致，改动需与 memory-agent 同步，
-            #   故本轮**不改**，仅登记待裁决。
+            # ★字段名 `inputSchema`（camel）：对齐对端 memory-agent 的 ACP 与 MCP 惯例。
+            #   历史是 `input_schema`（snake），两端不一致（F-ACP-KEY，2026-09-10 已裁决对齐）。
+            "inputSchema": t.parameters,   # ← 与 /mcp tools/list 同源，非手写
         })
+
     return out
 
 

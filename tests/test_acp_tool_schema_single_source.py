@@ -2,15 +2,18 @@
 """ACP 工具面「单一真相源」守卫（v2.0.12-2，收尾 A20/A27）。
 
 背景：/acp 的工具面曾**手写**一份 JSON schema，与本端 MCP 实现并行维护，
-结果漂移——手写 `delegate_to_memory_worker.input_schema` 写的是 `context`，
+结果漂移——手写 `delegate_to_memory_worker` 的参数写的是 `context`，
 真实实现参数是 `context_json`（手写账本骗了调用方）。
 
 现改为：ACP 工具面 = MCP 注册表（FastMCP `_tool_manager`）的**投影**，
-schema 逐字取自 /mcp 生成的 `parameters`。本文件把三条不变量锁死：
+schema 逐字取自 /mcp 生成的 `parameters`，字段名用 `inputSchema`（camel，
+对齐对端 memory-agent 与 MCP 惯例；F-ACP-KEY 2026-09-10 裁决）。
+本文件把四条不变量锁死：
 
-1. **投影一致性**：ACP 每个工具的 input_schema 与 MCP 注册表 diff=0（防再漂移）。
-2. **签名一致性**：schema 的 property 名 == 原始函数签名参数名；required == 无默认值参数。
-3. **失败即抛**：映射引用不存在的 MCP 工具时 _build_acp_tools 必须 RuntimeError（不静默降级）。
+1. **投影一致性**：ACP 每个工具的 inputSchema 与 MCP 注册表 diff=0（防再漂移）。
+2. **字段名**：必须是 `inputSchema`（camel），不得回退到 `input_schema`。
+3. **签名一致性**：schema 的 property 名 == 原始函数签名参数名；required == 无默认值参数。
+4. **失败即抛**：映射引用不存在的 MCP 工具时 _build_acp_tools 必须 RuntimeError（不静默降级）。
 
 运行：pytest tests/test_acp_tool_schema_single_source.py
 """
@@ -47,9 +50,17 @@ def test_acp_schema_is_mcp_registry_projection():
         mcp_name = m._ACP_TOOL_MAP[acp["name"]]
         t = reg[mcp_name]
         # 逐字一致（diff=0）——这是防漂移的核心断言
-        assert acp["input_schema"] == t.parameters, \
+        assert acp["inputSchema"] == t.parameters, \
             f"{acp['name']} 的 schema 与 MCP 注册表漂移"
         assert acp["description"] == _first_paragraph(t.description)
+
+
+def test_acp_uses_camelcase_inputschema_key():
+    """F-ACP-KEY（2026-09-10 裁决）：字段名统一为 inputSchema，跟随 memory-agent + MCP 惯例。"""
+    for acp in m._ACP_TOOLS:
+        assert "inputSchema" in acp, f"{acp['name']} 缺 inputSchema"
+        assert "input_schema" not in acp, \
+            f"{acp['name']} 仍用旧 snake 字段名 input_schema（已裁决对齐 camel）"
 
 
 def test_acp_tools_names_stable():
@@ -71,17 +82,17 @@ def test_acp_schema_matches_raw_function_signature():
         names = {p.name for p in params}
         required = {p.name for p in params
                     if p.default is inspect.Parameter.empty}
-        props = set(acp["input_schema"].get("properties", {}).keys())
+        props = set(acp["inputSchema"].get("properties", {}).keys())
         assert props == names, \
             f"{acp['name']} schema 属性名 {props} != 签名参数 {names}"
-        assert set(acp["input_schema"].get("required", [])) == required, \
+        assert set(acp["inputSchema"].get("required", [])) == required, \
             f"{acp['name']} required 与签名默认值不一致"
 
 
 # ── 3. 历史漂移点锁死：delegate 参数必须是 context_json ──────────────
 def test_delegate_exposes_context_json_not_context():
     d = next(t for t in m._ACP_TOOLS if t["name"] == "delegate_to_memory_worker")
-    props = set(d["input_schema"].get("properties", {}))
+    props = set(d["inputSchema"].get("properties", {}))
     assert "context_json" in props, "delegate 应暴露 context_json（真实实现参数）"
     assert "context" not in props, "`context` 是已修复的历史漂移写法，不得回归"
 
@@ -89,7 +100,7 @@ def test_delegate_exposes_context_json_not_context():
 def test_list_entities_exposes_pagination():
     # 手写版本漏了 offset，投影后必须与实现一致
     e = next(t for t in m._ACP_TOOLS if t["name"] == "list_entities")
-    props = set(e["input_schema"].get("properties", {}))
+    props = set(e["inputSchema"].get("properties", {}))
     assert {"domain", "area", "keyword", "limit", "offset"} <= props
 
 

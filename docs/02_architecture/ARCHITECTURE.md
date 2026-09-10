@@ -174,9 +174,10 @@ AutoFlow 网关是 **agent 与「Home Assistant + Node-RED」之间的唯一中�
 - MCP tool schema **已由函数签名装饰器自动生成**（FastMCP 从 `@mcp.tool()` 的签名 + docstring 生成
   `parameters`），不手工维护 `inputSchema`。
 - **ACP 工具面（v2.0.12-2）**：`/acp` 的 `tools` 不再手写 JSON schema——`_ACP_TOOLS` 由
-  `_build_acp_tools()` 从上述 MCP 注册表**投影**生成（schema 逐字取自 `/mcp` 的 `parameters`）。
+  `_build_acp_tools()` 从上述 MCP 注册表**投影**生成（schema 逐字取自 `/mcp` 的 `parameters`，
+  字段名 `inputSchema`，与对端 memory-agent 一致）。
   历史漂移点（A20/A27）已收口：旧手写账本把 delegate 参数写成 `context`，实现实为 `context_json`。
-  守卫 `tests/test_acp_tool_schema_single_source.py`（投影 diff=0 / 签名一致性 / 失败即抛）。
+  守卫 `tests/test_acp_tool_schema_single_source.py`（投影 diff=0 / 字段名 / 签名一致性 / 失败即抛）。
 - **子流程 / Link API 参数 schema** 由 `api_specs.API_SPECS` 派生（`_schema_from_params`），
   守卫 `tests/test_api_specs.py`。→ 三处（MCP / ACP / 子流程）schema 均单一真相源，无手写副本。
 
