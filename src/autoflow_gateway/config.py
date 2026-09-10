@@ -136,6 +136,14 @@ class GatewayConfig:
     memory_worker_acp_token: str = field(default_factory=lambda: os.environ.get("MEMORY_WORKER_ACP_TOKEN")
                                                               or os.environ.get("MEMORY_AGENT_ACP_TOKEN", ""))
 
+    # ── 竞技场 ↔ memory-agent 消费点（ROADMAP #4）──
+    # 网关用**独立的 arena_ 令牌**访问对端窄接口：HTTP 读快照 + ACP 取灵感/落战报。
+    # 三套令牌隔离（acp_ / arena_ / WebUI JWT），arena_ 只能碰 /api/arena/* 与 3 个
+    # 竞技场工具，越权由对端 403。令牌只走 env/连接设置落盘，绝不入仓库（P-2 门禁）。
+    # URL 缺省沿用上面 /acp 的基址（同一实例）——仅在竞技场接口是另一实例时才需显式填。
+    memory_agent_arena_url: str = field(default_factory=lambda: os.environ.get("MEMORY_AGENT_ARENA_URL", ""))
+    memory_agent_arena_token: str = field(default_factory=lambda: os.environ.get("MEMORY_AGENT_ARENA_TOKEN", ""))
+
     # ── LLM 钩子（autoflow 自带大模型能力，OpenAI 兼容 /chat/completions，多后端 fallback）──
     # 优先 llm_backends（JSON 数组：[{url,api_key,model,name?}...]）；缺失回落单 llm_api_key/url/model。
     # 仅 env 驱动，绝不硬编码密钥（P-2 门禁）；未配置时 configured=False，ask_llm 返回友好错误不崩。

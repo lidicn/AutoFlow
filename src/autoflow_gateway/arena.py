@@ -448,6 +448,9 @@ class ArenaManager:
         self._error_kb = ErrorKnowledgeStore(os.path.join(data_dir, "error_knowledge"))
         # ★ 记忆联动②③（2026-09-10）：经验管道兜底懒加载（suggest_fix 兜底源）
         self._exp_logger = None
+        # ★ 记忆联动（ROADMAP #4）：A/B 遥测——记录哪些 (分区, agent) 真的取过灵感，
+        # 落战报时作为 used_memory_tools 上报（对端据此分析「用了洞察的 Agent」）。
+        self._memory_inspiration_seen = set()
         os.makedirs(self.data_dir, exist_ok=True)
         self._init_arenas()
 
@@ -1136,6 +1139,91 @@ class ArenaManager:
 
     # ── 提交与验收 ──
 
+    # ── 记忆联动（ROADMAP #4）：读灵感 / 落战报 ──────────────────────────
+    @staticmethod
+    def _inspiration_from_snapshot(snap: Dict) -> List[Dict]:
+        """由对端快照自建灵感（与 memory-agent get_arena_inspiration 同构输出）。
+
+        对端快照的 entities[].original 即真实 entity_id，label 为脱敏别名——
+        两条都给出：label 供散文叙述，entity_ids 供 agent 落地 DSL。
+        """
+        try:
+            data = json.loads(((snap or {}).get("snapshot") or {}).get("snapshot_json") or "{}")
+        except Exception:
+            return []
+        items = []
+        for idx, ent in enumerate(data.get("entities") or [], 1):
+            busy = ent.get("busy_hours") or []
+            busy_str = "、".join(f"{h}:00" for h in busy) or "全天"
+            label = ent.get("label") or f"设备{idx}"
+            items.append({
+                "id": f"ins_{idx:03d}",
+                "type": "device",
+                "title": f"{label} 高频使用模式",
+                "description": (f"过去 {data.get('history_days')} 天，{label} 共触发 "
+                                f"{ent.get('count', 0)} 次，主要在 {busy_str} 时段活跃。"),
+                "suggested_flow": (f"为 {label} 编写一个自动化 flow：在 {busy_str} 执行对应场景"
+                                   f"（如联动灯光 / 提醒 / 节能调度）。"),
+                "entity_hints": [label],
+                "entity_ids": ([ent["original"]] if ent.get("original") else []),
+                "creativity_score": round(min(1.0, (ent.get("count") or 0) / 40.0), 3),
+            })
+        return items
+
+    def fetch_memory_inspiration(self, arena_id: str, limit: int = 5,
+                                 agent_id: str = "") -> Dict:
+        """★ 记忆联动（读侧）：向 memory-agent 取本分区灵感。
+
+        首选对端 ACP 工具 get_arena_inspiration（设计即为「洞察 + LLM 包装」）；
+        对端未配置 / 调用失败 / 返回空时，**降级用确定性 HTTP 快照自建灵感**，
+        保证读侧永不空转（ROADMAP 验收：有真实读取行为，不做只写不读）。
+        """
+        from . import acp_client
+        limit = max(1, int(limit or 5))
+        out = acp_client.arena_fetch_inspiration(arena_id, limit=limit)
+        items = out.get("items") or []
+        if out.get("ok") and items:
+            if agent_id:
+                self._memory_inspiration_seen.add((arena_id, agent_id))
+            return {"ok": True, "source": "memory-agent", "arena_id": arena_id,
+                    "count": out.get("count", len(items)), "items": items}
+        fallback = self._inspiration_from_snapshot(acp_client.arena_fetch_snapshot(arena_id))
+        if fallback:
+            if agent_id:
+                self._memory_inspiration_seen.add((arena_id, agent_id))
+            return {"ok": True, "source": "snapshot-fallback", "arena_id": arena_id,
+                    "count": len(fallback[:limit]), "items": fallback[:limit],
+                    "degraded_reason": out.get("error") or "对端灵感为空"}
+        return {"ok": False, "arena_id": arena_id, "items": [],
+                "error": out.get("error") or "灵感不可用",
+                "hint": "对端竞技场联动未配置（MEMORY_AGENT_ARENA_TOKEN 缺失）"
+                        "或该分区尚无快照（POST /api/arena/snapshot 创建）"}
+
+    def _push_memory_report(self, arena_id: str, task: Dict, dsl: str,
+                            result: Dict, agent_id: str) -> None:
+        """★ 记忆联动（写侧）：把战报落 memory-agent。永不影响主流程。"""
+        try:
+            from . import acp_client
+            if not acp_client.arena_configured():
+                return
+            gate = result.get("gate") or {}
+            success = bool(result.get("ok") and gate.get("passed", True)
+                           and gate.get("fully_verified", True))
+            used = (["get_arena_inspiration"]
+                    if (arena_id, agent_id) in self._memory_inspiration_seen else [])
+            acp_client.arena_record_result(
+                arena_id=arena_id,
+                task_title=str(task.get("title") or ""),
+                task_description=str(task.get("description") or ""),
+                flow_dsl=dsl,
+                success=success,
+                token_used=int((result.get("_telemetry") or {}).get("estimated_tokens") or 0),
+                agent_id=agent_id,
+                used_memory_tools=used,
+            )
+        except Exception:
+            pass
+
     def submit_flow(
         self,
         arena_id: str,
@@ -1271,6 +1359,14 @@ class ArenaManager:
                 "created_at": _utcnow_iso(),
             })
             self._save_json(self.submissions_file, {"submissions": submissions})
+
+        # ★ 记忆联动（ROADMAP #4 写侧）：异步把战报落 memory-agent（不阻塞提交回执，
+        #   未配置通道时内部直接 no-op）。失败静默——经验联动永不影响验收主流程。
+        threading.Thread(
+            target=self._push_memory_report,
+            args=(arena_id, dict(task), dsl, dict(result), agent_id),
+            daemon=True,
+        ).start()
 
         return result
 

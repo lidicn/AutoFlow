@@ -15,6 +15,7 @@ AutoFlow Gateway — ACP 客户端（autoflow 侧调用对端 memory-worker 的 
 """
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
@@ -169,3 +170,131 @@ def delegate_to_memory_worker(task: str,
         url = url + "/acp"
     messages = [{"role": "user", "content": task}]
     return prompt_acp(url, token, messages, context=context)
+
+
+# ── 竞技场 ↔ memory-agent 消费点（ROADMAP #4）──────────────────────────────
+# 网关用**独立的 arena_ 令牌**访问对端窄接口，与 acp_ 委派链路隔离：
+#   · 读灵感：ACP 工具 get_arena_inspiration（对端「洞察 + LLM 包装」）
+#   · 落战报：ACP 工具 record_arena_result（带 used_memory_tools 遥测）
+#   · 读快照：HTTP GET /api/arena/snapshots/{id}（确定性，作灵感降级源）
+# 三条路径共用同一 arena_ 令牌；令牌只从 config/env 读，绝不入仓库（P-2 门禁）。
+
+# 对端 prompt 是 LLM 中介（设计即为「洞察 + LLM 包装」）：不加约束时模型可能改写
+# 结果。这里要求逐字回传工具 JSON，便于网关确定性解析；解析失败则上层降级。
+_VERBATIM = "只把工具返回的原始 JSON 完整贴出来，不要任何解释、不要改写、不要增删字段。"
+
+
+def _arena_ctx(cfg: Any = None):
+    """返回 (base_url, token)。base 优先 arena_url，缺省由 acp_url 推导（同一实例）。"""
+    from .config import get_config
+    cfg = cfg or get_config()
+    url = (getattr(cfg, "memory_agent_arena_url", "") or "").strip().rstrip("/")
+    if not url:
+        url = (getattr(cfg, "memory_worker_acp_url", "") or "").strip().rstrip("/")
+        if url.endswith("/acp"):
+            url = url[: -len("/acp")]
+    token = (getattr(cfg, "memory_agent_arena_token", "") or "").strip()
+    return url, token
+
+
+def arena_configured(cfg: Any = None) -> bool:
+    """竞技场联动通道是否已配置（base + arena_ 令牌齐备）。"""
+    base, token = _arena_ctx(cfg)
+    return bool(base and token)
+
+
+def _tool_result(blocks: List[Dict[str, Any]], name: str) -> Optional[Any]:
+    """从 ACP blocks 取指定工具最后一次 tool_call 的 result，并尝试解析 JSON。"""
+    found = None
+    for blk in blocks or []:
+        if blk.get("type") == "tool_call" and blk.get("name") == name:
+            found = blk
+    if not found:
+        return None
+    res = found.get("result")
+    if isinstance(res, (dict, list)):
+        return res
+    if isinstance(res, str):
+        try:
+            return json.loads(res)
+        except Exception:  # noqa: BLE001
+            # 模型可能包了 ```json 围栏或加了前后缀，退一步做首尾大括号截取
+            s = res.strip()
+            i, j = s.find("{"), s.rfind("}")
+            if 0 <= i < j:
+                try:
+                    return json.loads(s[i:j + 1])
+                except Exception:  # noqa: BLE001
+                    return None
+            return None
+    return None
+
+
+def arena_fetch_inspiration(arena_id: str, limit: int = 5, cfg: Any = None,
+                            timeout: float = 180.0) -> Dict[str, Any]:
+    """读对端灵感：ACP get_arena_inspiration。未配置/失败返回 {ok:False,...}（不抛）。"""
+    base, token = _arena_ctx(cfg)
+    if not base or not token:
+        return {"ok": False, "error": "未配置竞技场联动通道（MEMORY_AGENT_ARENA_TOKEN 缺失）", "items": []}
+    ask = (f'请调用工具 get_arena_inspiration，参数 arena_id="{arena_id}"，limit={int(limit)}。' + _VERBATIM)
+    res = prompt_acp(base + "/acp", token, [{"role": "user", "content": ask}], timeout=timeout)
+    if not res.get("ok"):
+        return {"ok": False, "error": res.get("error") or "ACP 调用失败", "items": [],
+                "blocks": res.get("blocks") or []}
+    data = _tool_result(res.get("blocks") or [], "get_arena_inspiration")
+    if not isinstance(data, dict) or not data.get("items"):
+        return {"ok": False, "error": "对端未返回可用灵感", "items": [],
+                "text": res.get("text") or ""}
+    items = data.get("items") or []
+    return {"ok": True, "arena_id": arena_id, "items": items,
+            "count": data.get("count", len(items))}
+
+
+def arena_record_result(arena_id: str, task_title: str, task_description: str,
+                        flow_dsl: str, success: bool, token_used: int, agent_id: str,
+                        used_memory_tools: Optional[List[str]] = None,
+                        cfg: Any = None, timeout: float = 180.0) -> Dict[str, Any]:
+    """落战报到对端：ACP record_arena_result。未配置/失败返回 {ok:False,...}（不抛）。"""
+    base, token = _arena_ctx(cfg)
+    if not base or not token:
+        return {"ok": False, "error": "未配置竞技场联动通道（MEMORY_AGENT_ARENA_TOKEN 缺失）"}
+    args = {
+        "arena_id": arena_id,
+        "task_title": task_title,
+        "task_description": task_description,
+        "flow_dsl": flow_dsl,
+        "success": bool(success),
+        "token_used": int(token_used or 0),
+        "agent_id": agent_id,
+        "used_memory_tools": list(used_memory_tools or []),
+    }
+    ask = ("请调用工具 record_arena_result，参数为下面这个 JSON 对象（8 个字段缺一不可，逐字照传）：\n"
+           + json.dumps(args, ensure_ascii=False) + "\n" + _VERBATIM)
+    res = prompt_acp(base + "/acp", token, [{"role": "user", "content": ask}], timeout=timeout)
+    if not res.get("ok"):
+        return {"ok": False, "error": res.get("error") or "ACP 调用失败"}
+    data = _tool_result(res.get("blocks") or [], "record_arena_result")
+    if isinstance(data, dict) and data.get("ok"):
+        return {"ok": True, "insight_id": data.get("insight_id"), "raw": data}
+    return {"ok": False,
+            "error": (data or {}).get("error") if isinstance(data, dict) else "对端未确认落库",
+            "raw": data}
+
+
+def arena_fetch_snapshot(arena_id: str, cfg: Any = None, timeout: float = 15.0) -> Dict[str, Any]:
+    """读对端快照（**确定性 HTTP**，非 LLM 中介）：GET /api/arena/snapshots/{arena_id}。
+
+    返回对端原始体 {ok, snapshot:{...}}；snapshot["snapshot_json"] 为 JSON 字符串，
+    其 entities[].original 即真实 entity_id（label 为脱敏别名）。
+    """
+    base, token = _arena_ctx(cfg)
+    if not base or not token:
+        return {"ok": False, "error": "未配置竞技场联动通道（MEMORY_AGENT_ARENA_TOKEN 缺失）"}
+    url = f"{base}/api/arena/snapshots/{urllib.parse.quote(arena_id)}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"}, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+        return json.loads(raw)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"读取快照失败：{exc}"}

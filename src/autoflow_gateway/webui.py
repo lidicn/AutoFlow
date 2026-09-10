@@ -1698,6 +1698,26 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         except Exception as e:
             return _js({"ok": False, "error": str(e)}, 500)
 
+    async def arena_inspiration(request: Request):
+        """★ 记忆联动（读侧，ROADMAP #4）：取本分区灵感。
+
+        首选 memory-agent 的 ACP 工具（洞察 + LLM 包装）；对端未配置/失败时
+        网关自动降级为「快照自建灵感」，故本端点始终能给出可用结果（除非分区无快照）。
+        """
+        arena_id = request.path_params.get("arena_id", "")
+        try:
+            limit = int(request.query_params.get("limit") or 5)
+        except Exception:
+            limit = 5
+        agent_id = (request.query_params.get("agent_id") or "").strip()
+        try:
+            result = await asyncio.to_thread(
+                arena_mgr.fetch_memory_inspiration, arena_id, limit, agent_id
+            )
+            return _js(result, 200 if result.get("ok") else 503)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
     async def arena_leaderboard(request: Request):
         """获取排行榜。"""
         arena_id = request.path_params.get("arena_id", "")
@@ -3543,6 +3563,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/arena/arenas/{arena_id}/tasks", arena_tasks, methods=["GET"]),
         Route("/api/arena/arenas/{arena_id}/propose", arena_propose_task, methods=["POST"]),
         Route("/api/arena/arenas/{arena_id}/submit", arena_submit_flow, methods=["POST"]),
+        Route("/api/arena/arenas/{arena_id}/inspiration", arena_inspiration, methods=["GET"]),
         Route("/api/arena/arenas/{arena_id}/leaderboard", arena_leaderboard, methods=["GET"]),
         Route("/api/arena/stats", arena_stats, methods=["GET"]),
         Route("/api/arena/agents/{agent_id}/profile", arena_agent_profile, methods=["GET"]),

@@ -83,6 +83,13 @@ FIELD_SPECS: List[FieldSpec] = [
               "memory-agent 实例的 /acp 端点。填基址（如 http://host:port）或带 /acp 均可，网关自动补 /acp。改名前叫 memory-worker，变量兼容 MEMORY_AGENT_ACP_URL。"),
     FieldSpec("memory", "MEMORY_WORKER_ACP_TOKEN", "acp_ 令牌", "secret", "memory_worker_acp_token", "",
               "memory-agent 为网关签发的 acp_ 令牌（Bearer）。仅本机落盘，界面只回显掩码，绝不回传明文。"),
+    FieldSpec("memory", "MEMORY_AGENT_ARENA_TOKEN", "arena_ 令牌（竞技场联动）", "secret",
+              "memory_agent_arena_token", "",
+              "memory-agent 为网关签发的 arena_ 令牌（Bearer），用于竞技场联动：读快照 + 取灵感 + 落战报。"
+              "与 acp_ 令牌隔离，只能访问 /api/arena/* 与 3 个竞技场工具（越权对端 403）。仅本机落盘，不回传明文。"),
+    FieldSpec("memory", "MEMORY_AGENT_ARENA_URL", "竞技场接口地址（可选）", "url",
+              "memory_agent_arena_url", "",
+              "缺省沿用上面的 /acp 地址基址（同一实例，网关自动推导）。仅在竞技场接口与 ACP 不同实例时才需填。"),
 ]
 
 _SPEC_BY_KEY: Dict[str, FieldSpec] = {f.key: f for f in FIELD_SPECS}
