@@ -260,7 +260,7 @@ NR flow JSON
   （NR 若经 WS 订阅状态变化则收不到）。验证闭环改用 `inject` 节点或 `POST /api/trigger` 注入后断言。
 - **`mock_docker_api.py`** — staging 非实体能力（Docker/业务 API）模拟。
 - **`sync.py`** — 固定方向 1990(dev)→1880(prod) 的版本号驱动同步（写前快照+子流程预检+版本防重推）。
-- **`acp_client.py`** — 调用对端 memory-worker `/acp`（JSON-RPC 2.0 over HTTP+SSE，`Bearer acp_xxx`）。
+- **`acp_client.py`** — 调用对端 memory-agent `/acp`（旧名 memory-worker，2026-09 改名；JSON-RPC 2.0 over HTTP+SSE，`Bearer acp_xxx`）。
 - **`llm_client.py`** — 自带 LLM 客户端（OpenAI 兼容 `/chat/completions`，多后端 fallback + 日志脱敏）。
 - **`self_update.py`** — 受控自更新（见 §7 护栏）；WebUI 自更新只识别 `v*` tag。
 - **`debug_bridge.py`** — NR 5.x 原生 debug 事件旁路采集（见 §8）。
@@ -341,7 +341,7 @@ NR flow JSON
 |---|---|
 | `vhass.py` / `mock_docker_api.py` | 虚拟孪生 / mock API |
 | `sync.py` | 1990→1880 同步 |
-| **`acp_client.py`** | **ACP 客户端（对接 memory-worker `/acp`）** |
+| **`acp_client.py`** | **ACP 客户端（对接 memory-agent `/acp`，旧名 memory-worker）** |
 | **`llm_client.py`** | **自带 LLM 客户端（多后端 fallback + 脱敏）** |
 | **`self_update.py`** | **受控自更新（allowlist ref + 备份 + 回滚）** |
 | **`debug_bridge.py`** | **NR 5.x debug 事件旁路采集（不插节点）** |
