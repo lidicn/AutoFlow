@@ -92,6 +92,41 @@
 | **B24（已修，已部署 94563e6 + 7c62ccd；LLM 已配置上线）** | **判重严格化后组合空间结构性耗尽 + 创意考官从未生效**（设计裁决：创新性优先） | ①原「LLM 考官」从未生效——网关未配置 LLM（`AUTOFLOW_LLM_*` 全空，chat_sync 抛 LLMError），判重 LLM fail-open 直通，创意分是纯字面算术（相似度/设备数/描述长度）→ 文不对题的题 0.8+ 通过（用户截图实锤：标题查台灯时长、描述说温度超28°C）；②判重严格化后实体组合空间耗尽（34 题时仅剩 9 对可用） | 用户裁决「优先考虑创新性」+ 负责人实测 | 两级考官：规则考官（描述须提设备 / 标题提设备与描述错位即拦 + 触发动作语义检查 + 纯监测豁免，2-gram 中文匹配）+ LLM 考官（`autoflow-chat` 已配置，WebUI `llm_config.json` 注入，**实锤生效**：NEG 因果谬误题 `examiner=llm, logic_ok=false` 拦下、理由含物理因果分析；POS 语义新题放行）。判重实体重叠>60% 时加 **LLM 三要素仲裁**（触发+动作+意图一致才判 same，7c62ccd）→ 实体面相同语义不同的题可共存，组合耗尽缓解。考官 prompt 校准：设备类型图例、硬标准三条、**定时触发无需触发设备**。创意权重 novelty 0.5。**守卫 `test_b23_b24_examiner.py` 6 例，回归 51 passed**。R5 种子 4 道（0.65~0.875）已入场，开工令 `Test/KICKOFF_R5.md` |
 | **B21（已修，待部署）** | **判重实体层不对称 → 超集可绕过**（P2，复核发现） | `_entity_overlap(new, existing) = "|new ∩ existing| / |new|"` **只按新题实体数做分母**：新题是旧题实体的**超集**时被稀释到阈值下。实况证据：「高湿自动开空调除湿」({湿度,空调}) vs 「高湿自动开空调除湿模式」({湿度,空调,温度,光照}) → overlap=**0.50**（≤0.6 漏判），但反向=1.00。即**挂 2 个无关传感器即可绕过实体层**；文本层该对仅 0.765，落 0.6-0.85 模糊区交 LLM 考官，LLM 不可用则 fail-open 放行 | 负责人 R3 复核（生产 tasks.json 实测 + arena.py:541-563） | 改法：`overlap = max(|∩|/|new|, |∩|/|existing|)`（双向取大，即任一方向覆盖率 >60% 即判重）。副作用面小：仅当新题实体面基本覆盖旧题时判重，属 fail-safe。需守卫 + 部署一轮 |
 | **B20** | **竞技场验收 oracle 弱验证**（F-R2-01，P3） | ① state 断言在目标实体**已处于期望状态**时空转通过（`pre_state=on`、`changed_by_replay=false` 仍 ok，R2 T5 case1 实录）；② 自指 DSL **零断言**也放行。与 B5 同根：验收判分 ≠ 真行为改变 | FFL R2 `FINDINGS.md` R2 节 | **已修（待部署）**：`run_staging_gate` 沿 A22 诚实降级模式——①`pre_satisfied` 标记 + 全部 state 断言前置已满足时 fully_verified 降级 / require_change 硬失败；②零断言 fully_verified 降级。守卫 `tests/test_b20_vacuous_assertions.py`（4 例）；与 B1/B5 的深整合（真机转变验证）仍排期 |
+| **F-R8-04（负责人复核新定的主根因，P1 阻塞）** | **静态种子极性冲突 → 整类题目结构性不可验（R8「8×B20 死路」真根因）** | 实测 NAS `study_room_seed.json`：书房台灯/挂灯/学习灯=**off**、空调=**off**、电脑 switch=**on**（**手工调过**，有 `.bak_b_retest`/`.bak_20260908` 备份），与设备清单态（灯=on、空调=cool）**不一致**。turn_off(灯) 类题期望=off，而重放起点已 off → `pre_satisfied` → `fv=false` → 不落锁。**单一静态种子无法同时服务 turn_on 与 turn_off 两类题**：种子置 off 则 turn_off 全废、置 on 则 turn_on 全废。团队正确识别 B20 现象，但归因「死路」——实为可修 | 负责人复核（容器内直读种子 + live `tasks.verification.reasons` 逐条核对 8 道） | **修法（产品改进）**：`_verify_flow` 重放前按断言目标**自动把种子翻成反态**（expected=off→置 on，反之亦然），B20 类从此按构造消失，不再依赖 curator 手调种子。需守卫 + 部署一轮。**这是解 13 道死路的主刀** |
+| **F-R8-02（P2，F-R6-A-01 残余第二实例）** | **期望推断扫描 DSL 文本 → flow 可自证语义（文不对题反被判通过）** | `_infer_postconditions` 的 `combined = 题面 + dsl.lower()`。实例 `task_c9d44c51afde`「人在书房且门关闭时开学习灯」：题面「开学习灯」**不含任何 open 关键词**（表内仅 开灯/开空调/开电视/打开/开启/启动），题面贡献 0 → 若提交 `turn_off` flow，close 关键词命中 → 推断期望=**off** → **反向 flow 反而通过**。实测该题 verification：`期望=off 实测=off` 且 `pre_satisfied`，与题面「开灯」矛盾。即 oracle 既可被 flow 自证、又因关键词表窄而漏判 | FFL R8（F-R8-02）+ 负责人复核（`arena.py:1307-1346` + 该题 `verification.reasons`） | 修法：`_infer_postconditions` **只从题面推导**（剥离目的从句后），**不再并入 DSL 文本**；扩充关键词/模式（`开/关`+设备名、开启/点亮/关闭/熄灭）；域级兜底（entity_ids 含可控域却推不出期望 → 题目缺陷告警）。与 F-R8-03 合并做 |
+| **F-R8-03（P2）** | **propose 未校验 entity_ids 完备性 → 产出零断言死题** | 实例 `task_fe065fafa172`「工作时段光照不足并行开启台灯与挂灯」`entity_ids` 只含两个 `binary_sensor`，**动作目标（台灯/挂灯）不在内** → 推断不出断言目标 → 零断言 → `fv=false`；`task_4acd3b517da0` 同类。`propose_task` 只校验实体在分区清单内，**未校验题面动作目标 ⊆ entity_ids** | FFL R8（F-R8-03） | 修法：propose 要求 entity_ids **至少含 1 个可控域设备**（light/switch/climate/fan/media_player/cover/input_boolean），否则拒题并提示「动作目标需入 entity_ids」。存量此类题由 curator 修正 entity_ids 或下架 |
+| **F-R8-05（P3）** | **规则考官「环境量只能控制同域设备」过严 → 跨域合理题被误拒** | `_rule_logic_review` 硬规则把「温度→灯」类（传感器触发 + 执行器动作）判逻辑不成立；LLM 考官可用时不触发，LLM 不可用回退 rules 时误拒。传感器驱动执行器是家居自动化主流形态，不应硬拒 | FFL R8（F-R8-05） | 修法：环境量只作为**触发**允许跨域；仅当环境量出现在**动作侧**才拒。需守卫 |
+| **F-R8-01（复核修正，P3）** | **报告称「`require_change=true` 参数未实现」——不准确：网关已实现，是 arena 未接线** | `gateway.propose_dsl(..., require_change: bool = False)` 存在且分支完整（`gateway.py:6132/6424/6438`）；但 `arena._verify_flow` 调 `propose_dsl` 时**未传**该参，submit body 也无此字段 → 从竞技场口子看「不存在」。`arena.py:1190` 注释「B20 的 require_change 硬约束仍在闸门层兜底」**表述失真**（未接线） | 负责人复核（grep + 读 gateway.py 分支） | 低优先（F-R8-04 落地后 `pre_satisfied` 按构造消失，该参对竞技场失去意义）。可选：submit body 暴露该字段，或修正 `arena.py:1190` 注释措辞 |
+| **R8 账目订正** | **团队报告「cac07 已清」「首轮 7 道」不准确** | live 核实锁定数：`ffl-r8-pm-chat` 3、`ffl-r8-t1` 4、`ffl-r8-tester-2` 1 = **8 道**（报告自列清单亦合计为 8）。报告列为已清的 `cac07` = `task_cac072ae24c2` **仍在 available**（曾尝试：`passed=true` 但 `pre_satisfied` → `fv=false` → 解锁），**未清**。机制分类（B20×8 / B22×2 / 零断言×2 / 语义失配×1）与实况**吻合**，仅账目 1 处误记 | 负责人 live 核对 `tasks.json`（49 题：locked 36 / available 13） | 无需团队返工；账目以本台账为准 |
+
+> **R8 存量 13 题的处置定性（负责人）**：并非报告所称「13 道全死路」。
+> - **8 道 turns-off/极性类**（df6d/c9d4/fa65/da8b/cac07/63b3/e398/dd3d/b4a6 一族）→ 修 F-R8-04/02 后**可解**；
+> - **2 道 JSONata/历史量**（`2dda` 空调今日运行时长超3h、`1e4f` 历史分支取证2）→ vhass **不建模 HA 历史**，题本身超出孪生能力 → 由 curator **下架或改题**（非团队问题）；
+> - **2 道 entity_ids 缺陷**（`fe065`/`4acd`）→ 修 F-R8-03 后，**改 entity_ids 补入动作目标**即可解；
+> - **1 道语义失配**（`c9d4`）→ 修 F-R8-02 后题面/flow 语义即可对齐。
+> 结论：**「清题 ≥10」在修复后可达**，团队「死路非测试问题」的判断方向对、但结论过于悲观（他们无仓库、无法定位到种子与推断器）。
+
+### R8 修复落地（F-R8-01/02/03/04/05，代码已改 + 守卫已加，待部署）
+
+| 项 | 落地位置 | 内容 |
+|---|---|---|
+| **F-R8-04（主刀）** | `gateway.run_staging_gate(seed_overrides=…)` + `propose_dsl(seed_overrides=…)`；`arena._verify_flow` / `_seed_overrides_for_reverse`；`arena._reverse_state_for` | 验收入口按断言目标把种子翻成**反态**（on↔off、playing↔off、open↔closed、locked↔unlocked），在**触发注入之后、`_pre_states` 采样之前**生效（触发事件与初始态互不覆盖）；只覆盖已存在实体，**不造幽灵实体**。种子健康检查里被翻转的 `pre_satisfied_seed` 项标 `auto_corrected=true` + `corrected_seed_state`。gate 回执带 `seed_overrides` 便于审计 |
+| **F-R8-02** | `arena._infer_postconditions` + `_infer_direction_from_text` + `_desired_state` | 期望只从**题面**推导（**不再并入提交的 DSL**——flow 不得自证语义）；方向取**最右方向标记**（题面＝「触发条件＋动作」语序），单字 开/关 排除「离开/开始/开关/展开…」假阳性；题面无方向 → 返回空断言集（gate 按零断言 fail-closed）。`dsl` 形参保留但忽略（兼容旧调用） |
+| **F-R8-03** | `arena.propose_task` | `entity_ids` 必须含 ≥1 个**可控域**设备（light/switch/climate/fan/media_player/cover/input_boolean/humidifier/lock），否则拒题（`reason=no_controllable_device`）；题面无可推断方向时附 `warnings`（不拒题） |
+| **F-R8-05** | `arena._llm_logic_review` prompt | 删除错误绝对规则「环境量只能因果关联同域设备」；改为只有**环境量出现在动作侧**（试图去设置只读量）才算硬伤，并显式声明「环境量触发执行器不得判 false」 |
+| **F-R8-01（复核修正）** | `arena._verify_flow` 注释 | 原注释「B20 的 require_change 硬约束仍在闸门层兜底」失真 → 改为如实说明：网关已实现该参，但**翻转落地后竞技场无需接线**（pre_state ≡ 反态 ≠ 期望态 → `changed_by_replay` 恒真；flow 什么都不做则断言直接落空） |
+
+**证据（离线，零 NAS 副作用）**：
+- 守卫 `tests/test_fr8_arena_lockable.py` **31 passed**（方向表含 R8 全部 13 道真题面；反向/幽灵实体/接线/auto_corrected/LLM prompt 逐条覆盖）。
+- 竞技场＋闸门相关 16 个测试文件 **200 passed / 4 failed**，4 红经 `git archive HEAD` **干净树对照复现** → 全部为**既有陈旧测试**（A14 未建模服务语义、G3 死分支标记漂移），与本次改动无关。
+- 本地孪生端到端（复刻 NAS 实况种子：灯/空调=off、电脑=on）：R8 代表 5 题
+  （`dd3d` 关门关台灯 / `cac07` 人走关台灯 / `c9d4` 门关开学习灯 / `fa65` 高湿关学习灯 / `da8b` 进房开电脑）
+  **全部 `passed=true, fully_verified=true`（可落锁）且 `changed_by_replay=true`**。
+- 反向对照（防「一律放行」）：题面「开学习灯」提交 `turn_off` → **passed=false**（旧实现在此反被判过，F-R8-02 实锤已闭合）；题面「关台灯」提交 `turn_on` → false；只注入触发零动作 → false。
+- 仍不可解的 3 题（存量数据问题，非代码问题）：`1e4f`（T12 取证垃圾题，无方向 → 零断言）、`fe065`/`4acd`（`entity_ids` 只列传感器、缺动作目标 → 零断言）→ 由 curator **补 entity_ids 或下架**；`2dda`/`1e4f` 依赖 HA 历史量，vhass 不建模 → 下架/改题。
+
+> 部署后 R8 剩余 13 题的预期：**8 道 turns-off/极性族可解 + 1 道语义失配（`c9d4`）可解 = 9 道**；
+> 补 `entity_ids` 后再 +2（`fe065`/`4acd`）= **11 道**；`2dda`/`1e4f` 下架。
 
 ---
 

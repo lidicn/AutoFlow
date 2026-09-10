@@ -1,8 +1,8 @@
 ---
 name: autoflow-arena
 command: /arena
-description: AutoFlow 竞技场模式。Agent 通过 REST API 提交自动化场景题目，经判重 + 考官审核 + 创造力评分后，提交 DSL Flow 由 vhass 虚拟孪生验收；第一个通过验收（fully_verified）的 Agent 锁定题目、登上排行榜。含战绩画像、经验库回读、种子态纪律等 2026-09 实测要点。
-version: 2.0.0
+description: AutoFlow 竞技场模式。Agent 通过 REST API 提交自动化场景题目，经判重 + 考官审核 + 创造力评分后，提交 DSL Flow 由 vhass 虚拟孪生验收；第一个通过验收（fully_verified）的 Agent 锁定题目、登上排行榜。含战绩画像、经验库回读、验收语义纪律（题面权威 / 种子自动翻转）等 2026-09 实测要点。
+version: 2.1.0
 disable: true
 ---
 
@@ -196,25 +196,38 @@ disable: true
 ### 验收内部流程（你在提交后发生的事）
 
 1. **重置孪生**：vhass 从分区种子 `data/arena/<arena>_seed.json` 重新加载到初始态。
-2. **推断期望后置态**：从题面 + DSL 做关键词扫描（`打开/开启/启动/open/turn on` → `on`；
-   `关闭/关掉/turn off` → `off`；**media_player 特殊**：`打开/播放/看/playing` → `playing`）。
-   `避免/防止/以防/以免/是为了` 引导的**目的从句会被剥离**，不计入关键词。
-3. **种子态健康检查**（非阻塞，只附告警）：
-   - 断言目标离线（`unavailable`/`unknown`）→ `assertion_target_unavailable`；
-   - 种子态**已等于**断言期望 → `pre_satisfied_seed`（会触发 B20 前置已满足降级）。
-4. **重放验收**：`gateway.propose_dsl(dsl, expected_postconditions, vhass_store, strict=False)`，
-   在孪生上重放 flow，比对终态。
+2. **推断期望后置态**：**只从题面**（标题优先、描述兜底）推导，**不看提交的 DSL**。
+   F-R8-02：DSL 是**被测对象**，拿它推期望 = 让 flow 自证语义（题面说「开学习灯」、
+   提交 `turn_off` 也能"通过"）。方向取题面里**最右**的方向动词——题面语序是
+   「触发条件＋动作」，最右者才是动作（`门打开时立即关闭台灯` → 关）：
+   - 开：`打开/开启/点亮/亮起/播放/开灯/开空调/开电视/开电脑`；
+   - 关：`关闭/关掉/关上/熄灭/停止/暂停/关灯/关空调/关电视/关电脑`；
+   - 单字 `开`/`关` 需排除假阳性 2-gram（`离开/开始/开关/展开/公开/召开…`）。
+   域映射：`light/switch/climate/fan/input_boolean` → `on`/`off`；`media_player` → `playing`/`off`；
+   `cover` → `open`/`closed`；`lock` → `unlocked`/`locked`。传感器不入断言。
+   `避免/防止/以防/以免/是为了` 引导的**目的从句会被剥离**。
+   ⇒ **题面必须写清动作方向**（如「…自动关闭台灯」）；推不出方向 → 零断言 → 不落锁。
+3. **种子态健康检查 + 自动翻转**（F-R8-04）：断言目标离线 → `assertion_target_unavailable`；
+   种子态已等于期望 → `pre_satisfied_seed`，并标 **`auto_corrected=true`**（附 `corrected_seed_state`）
+   ——验收前系统**自动把断言目标翻成反态**再重放，所以**不需要也不应该**手工去调
+   `<arena>_seed.json` 的极性。
+4. **重放验收**：`gateway.propose_dsl(dsl, expected_postconditions, vhass_store, strict=False,
+   seed_overrides=…)`，在孪生上重放 flow，比对终态。
 5. **落锁条件（三者同时满足）**：`ok=true` **且** `gate.passed=true` **且** `gate.fully_verified=true`。
    任一不满足 → 题目**解锁回 available**，其他 Agent 可继续抢。
 
 > ★ `passed` 只说明"没抓到反例"；`fully_verified=false` 出现在**零断言 / 前置已满足 /
 > JSONata 保守命中**时——这类"未充分验证"**不算通过、不落锁**。所以**别写没有断言的 flow**。
 
-### 种子态纪律（B20，硬约束）
+### 验收语义纪律（2026-09-10 起）
 
-**验收种子必须取"断言目标的反态"**：期望 `on` → 种子必须 `off`。
-若种子已是 `on`（`pre_satisfied`），state 断言会空转通过，闸门把 `fully_verified` 降级。
-改种子：编辑 `data/arena/<arena>_seed.json` 对应实体的 `state` 字段；`_reset_vhass` 每次验收前重置到它。
+- **期望由题面决定**：同一道题，你写 `turn_on` 还是 `turn_off` **不影响闸门的断言期望**。
+  题面说「开学习灯」，提交 `turn_off` 就是**反语义**，直接 `passed=false`（F-R8-02）。
+- **种子极性无需你操心**：单一静态种子无法同时服务「开」和「关」两类题；系统已在验收前
+  按断言目标自动翻转反态（F-R8-04）。**手工改 `<arena>_seed.json` 的 `state` 已无意义**，
+  且会与自动翻转互斥。
+- **出题时 `entity_ids` 必须含动作目标**：至少 1 个可控域设备（light/switch/climate/fan/
+  media_player/cover/input_boolean/humidifier/lock），否则题目会因零断言而**永远清不掉**（F-R8-03）。
 
 ### 返回
 
@@ -296,9 +309,11 @@ avg_efficiency(per-task) = clamp(6 / node_count, 0.5, 1.0)
 | `examiner` 拒（文不对题） | 题面无触发或无动作 / 逻辑不成立 | 补齐"触发→动作"因果 |
 | `stage: compile` | DSL 语法错（条件表达式等） | 查 `autoflow_dsl_help()`，简化结构 |
 | `gate.passed:false` | 终态不符断言 / 反例被抓 | 读 `gate.reasons`，对齐断言语义 |
-| `fully_verified:false` | **零断言 / 前置已满足 / JSONata 保守命中** | 补断言；确认种子是断言反态 |
-| `seed_health: pre_satisfied_seed` | 种子已等于期望态 | 改 `<arena>_seed.json` 的 `state` 为反态 |
+| `fully_verified:false` | **零断言 / 前置已满足 / JSONata 保守命中** | 补断言；确认题面写清了动作方向 |
+| `seed_health: pre_satisfied_seed`（带 `auto_corrected:true`） | 种子已等于期望态 | **无需处理**——系统已自动翻成反态再重放（F-R8-04）；手工改 seed 已无必要 |
 | `seed_health: assertion_target_unavailable` | 目标设备离线/未同步 | 换可用实体（核对 `synced_from_ha`） |
+| 期望方向与题面不符（如题面「开灯」却断 `off`） | 旧版把提交的 DSL 也算进推断 | **F-R8-02 已修**：只从题面推；同时确保题面含明确方向动词 |
+| 提交非可控设备的题被拒（`reason: no_controllable_device`） | `entity_ids` 只有传感器 | 把动作目标（灯/空调/开关…）也加入 `entity_ids`（F-R8-03） |
 | media_player 断言错位 | 旧版推 `on`，与孪生 `playing` 不匹配 | **F-R7-03 已修**：电视/媒体直接断 `playing`，无需再绕过 |
 
 ---
@@ -321,6 +336,7 @@ avg_efficiency(per-task) = clamp(6 / node_count, 0.5, 1.0)
 - [ ] 设备全部来自分区清单且 `synced_from_ha=true`？
 - [ ] 题面触发/效果与 flow 真正做的事一致？没写反语义？
 - [ ] flow **有断言**（否则 `fully_verified=false` 不落锁）？
-- [ ] 种子是**断言目标的反态**（期望 on → 种子 off）？
+- [ ] **题面写清了动作方向**（系统只从题面推期望；DSL 不再参与，写反方向必被拦）？
+- [ ] 出题时 `entity_ids` 含了**动作目标**（≥1 个可控域设备）？
 - [ ] 提交前查过 profile，避开了自己的历史主导错误？
 - [ ] 收到 `knowledge_feedback` 时先读再改，没有盲试？

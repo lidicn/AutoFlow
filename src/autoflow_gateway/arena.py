@@ -128,6 +128,81 @@ _ACTION_CUES = ("开", "关", "调", "发", "通知", "播报", "记录", "监�
                 "推送", "查询", "启动", "停止")
 
 
+# ── 可控域状态对（F-R8-03）：(开态, 关态) ─────────────────────────────
+# 与 vhass 服务映射表对齐：media_player 的「开」是 playing（电视模型开机即播放，
+# vhass `_FIXED_STATE` 把 turn_on 归一 playing，F-R7-03）。
+_CONTROLLABLE_STATES = {
+    "light": ("on", "off"), "switch": ("on", "off"), "climate": ("on", "off"),
+    "fan": ("on", "off"), "input_boolean": ("on", "off"), "humidifier": ("on", "off"),
+    "media_player": ("playing", "off"), "cover": ("open", "closed"),
+    "lock": ("unlocked", "locked"),
+}
+_CONTROLLABLE_DOMAINS = tuple(_CONTROLLABLE_STATES)
+
+
+# ── 方向标记（F-R8-02）：题面权威，绝不被提交的 DSL 自证 ────────────────
+# 中文自动化题面普遍是「<触发条件> <动作>」语序，动作动词落在**最后** →
+# 取最右方向标记，比「命中即 on」更能抗触发侧反向动词污染：
+# 「门打开时立即关闭台灯」里 打开 属触发侧，最右的 关闭 才是动作。
+_DIR_OPEN_MULTI = ("打开", "开启", "启动", "点亮", "亮起", "播放",
+                   "开灯", "开空调", "开电视", "开电脑")
+_DIR_CLOSE_MULTI = ("关闭", "关掉", "关上", "关断", "熄灭", "停止", "暂停",
+                    "关灯", "关空调", "关电视", "关电脑")
+# 单字 开/关 的假阳性 2-gram（「离开/开始/开关/展开」里的 开、关 不是动作词）
+_SOLO_FALSE_2GRAM = ("离开", "开始", "开关", "展开", "公开", "召开", "开会",
+                     "开通", "开口", "分开")
+
+
+def _infer_direction_from_text(text: str) -> Optional[str]:
+    """取题面中**最右**方向动词的方向（'open'/'close'），无方向信号返回 None。
+
+    多字标记优先；单字 开/关 需排除假阳性 2-gram（离开/开始/开关…）。
+    """
+    if not text:
+        return None
+    best_pos, best_dir = -1, None
+    for kw in _DIR_OPEN_MULTI + _DIR_CLOSE_MULTI:
+        d = "open" if kw in _DIR_OPEN_MULTI else "close"
+        p = text.rfind(kw)
+        if p > best_pos:
+            best_pos, best_dir = p, d
+    for ch, d in (("开", "open"), ("关", "close")):
+        p = text.rfind(ch)
+        while p != -1:
+            grams = (text[max(0, p - 1):p + 1], text[p:p + 2])
+            if not any(g in _SOLO_FALSE_2GRAM for g in grams):
+                break
+            p = text.rfind(ch, 0, p)
+        if p > best_pos:
+            best_pos, best_dir = p, d
+    return best_dir
+
+
+def _desired_state(domain: str, direction: str) -> Optional[str]:
+    """方向 + 域 → 期望终态。非可控域返回 None（不参与断言）。"""
+    pair = _CONTROLLABLE_STATES.get(domain)
+    if not pair:
+        return None
+    return pair[0] if direction == "open" else pair[1]
+
+
+def _reverse_state_for(entity_id: str, want) -> Optional[str]:
+    """给定期望态，返回其在 vhass 里的**反态**（F-R8-04 种子翻转用）。
+
+    非可控域 / want 为空 → None（不翻转）。语义：断言目标必须先处于反态，
+    重放才有转变可证；否则前置已满足 → B20 降级 → 题目结构性不可落锁。
+    """
+    dom = entity_id.split(".", 1)[0] if "." in entity_id else ""
+    pair = _CONTROLLABLE_STATES.get(dom)
+    if not pair:
+        return None
+    w = str(want).strip().lower() if want is not None else ""
+    if not w:
+        return None
+    return pair[1] if w == pair[0] else pair[0]
+
+
+
 def _entity_labels(entity_ids: List[str], devices: List[Dict]) -> Dict[str, List[str]]:
     """entity_id -> 候选中文标签（友好名 + 域中文名）的全部 2-gram 片段。
 
@@ -260,11 +335,14 @@ def _llm_logic_review(title: str, description: str, entity_ids: List[str],
         "审查点：①标题与描述说的是同一件事吗；②触发条件与动作有因果关联吗；"
         "③所列设备支撑得起这个场景吗；④场景新颖吗。\n"
         "给 logic_ok=false 的硬标准（满足任一）：\n"
-        "- 触发与动作**缺乏因果关联**（如：温度高→调灯光亮度、门关→开灯、"
-        "光照充足→关闭电脑——环境量只能因果关联同域设备，光照/温湿度不能推断"
-        "电脑等电器开关）；\n"
+        "- **动作侧不可控**：动作要操作的对象不是可控设备（如「打开温度传感器」"
+        "「关闭湿度读数」——传感器只读，环境量只能当触发条件，绝不能当动作目标）；\n"
         "- 标题与描述说的不是同一件事；\n"
         "- 动作所需的执行设备不在清单里。\n"
+        "★ 校准（F-R8-05）：环境量**作为触发条件**去驱动任意执行器，是家居自动化的"
+        "主流形态（「湿度>70%→关灯」「温度<20℃→关空调」「光照不足→开灯」「人走→关电器」），"
+        "**不得**因为触发量与受控设备不同域就判 false。只有把环境量放在**动作侧**"
+        "（试图去「设置」一个只读量）才算硬伤。\n"
         "以下情况**不要**给 false（写进 issues 即可）：设计欠佳、缺前置条件、"
         "id 长得奇怪。entity_id 前缀即设备类型：light.=灯、switch.=开关/插座、"
         "climate.=空调、sensor.=传感器、binary_sensor.=有人/门窗探测器、cover.=窗帘。\n"
@@ -876,6 +954,29 @@ class ArenaManager:
                 "unknown_entities": unknown,
             }
 
+        # ★ F-R8-03：题面的**动作目标**必须落在 entity_ids 里，否则验收推不出断言目标
+        #   → 零断言 → fully_verified=false → 该题永远不可落锁（死题）。
+        #   实测 R8：`fe065`（动作目标=台灯/挂灯，却只列了两个 binary_sensor）、
+        #   `4acd`（要关空调，却没列 climate）都是这一类。最低限度的守卫：至少一个可控域。
+        if not any(e.split(".", 1)[0] in _CONTROLLABLE_DOMAINS for e in entity_ids):
+            return {
+                "ok": False,
+                "error": "entity_ids 至少需含一个**可控设备**（light/switch/climate/fan/"
+                         "media_player/cover/input_boolean 等）。当前只有传感器类实体，"
+                         "验收无法推断动作目标（会产出零断言死题）——请把动作要操作的"
+                         "设备也加入 entity_ids。",
+                "reason": "no_controllable_device",
+            }
+
+        # ★ F-R8-05（P3）：题面动作方向必须能被推断——题面完全无「开/关」方向信号时
+        #   同样会产出零断言。此处**只警告不拒题**（方向可由 LLM 考官在语义层确认，
+        #   且描述兜底路径较宽），避免误杀。
+        _dir_warn = None
+        if not (_infer_direction_from_text(str(title))
+                or _infer_direction_from_text(str(description))):
+            _dir_warn = ("题面未出现明确的方向动词（开/关/打开/关闭…），验收可能推不出"
+                         "期望状态。建议在标题里写清动作方向（如「…自动关闭台灯」）。")
+
         with self._lock:
             tasks = self._load_tasks()
             # ★ 判重作用域（FFL 验收 F-02）：必须覆盖 available/in_progress/locked。
@@ -1019,7 +1120,7 @@ class ArenaManager:
             tasks.append(task)
             self._save_json(self.tasks_file, {"tasks": tasks})
 
-            return {
+            _resp = {
                 "ok": True,
                 "task_id": task_id,
                 "creativity_score": score,
@@ -1029,6 +1130,9 @@ class ArenaManager:
                 "status": "available",
                 "message": "题目审核通过，请提交 DSL flow 进行验收",
             }
+            if _dir_warn:
+                _resp["warnings"] = [_dir_warn]
+            return _resp
 
     # ── 提交与验收 ──
 
@@ -1181,14 +1285,30 @@ class ArenaManager:
         if not vhass_store:
             return {"ok": False, "error": "vhass 初始化失败", "stage": "vhass"}
 
-        # 从题目描述推断期望的后置状态（简单规则：提到的设备如果是"打开/开启"则期望 on）
+        # 从题面推断期望的后置状态（F-R8-02：题面权威，不看提交的 DSL）
         expected = self._infer_postconditions(task, dsl)
 
         # ★ 种子态健康检查（2026-09-09）：把 B20「种子必须是断言反态」纪律固化成
         # 代码守卫。注意此时 _reset_vhass 已跑，store 态 == 种子态。
         # 非阻塞（只附 seed_health 警告，不拦截）——期望推断仍是关键词扫描（F-R6-A-01
-        # 残余），硬拦会放大误判；B20 的 require_change 硬约束仍在闸门层兜底。
+        # 残余），硬拦会放大误判。
         _seed_issues = self._seed_health_check(vhass_store, expected)
+
+        # ★ F-R8-04（P1，R8 死路主刀）：静态种子无法同时服务 turn_on / turn_off 两类题
+        #（种子置 off 则 turn_off 全废、置 on 则 turn_on 全废——实测 study_room 种子被
+        #  手工调成「灯=off」，于是「关门关灯」族恒前置已满足）。验收前把每个断言目标
+        #  翻到「期望的反态」，让重放必须真正改变状态：B20 前置已满足按构造消失，
+        #  不再依赖 curator 手调种子文件。翻转由闸门侧在**触发注入之后、重放采样之前**
+        #  生效（触发事件与初始态是两件事，互不覆盖）。
+        # ★ require_change：网关侧已实现（gateway.propose_dsl 参数），但翻转落地后对本
+        #  竞技场**不再需要接线**——翻转后 pre_state ≡ 反态 ≠ 期望态，changed_by_replay
+        #  恒为真；若 flow 什么都没做，断言直接落空（状态停在反态）。见 F-R8-01 复核修正。
+        _seed_overrides = self._seed_overrides_for_reverse(vhass_store, expected)
+        for _iss in _seed_issues:
+            if (_iss.get("issue") == "pre_satisfied_seed"
+                    and _iss.get("entity_id") in _seed_overrides):
+                _iss["auto_corrected"] = True
+                _iss["corrected_seed_state"] = _seed_overrides[_iss["entity_id"]]
 
         try:
             result = self.gateway.propose_dsl(
@@ -1197,13 +1317,14 @@ class ArenaManager:
                 expected_postconditions=expected if expected else None,
                 vhass_store=vhass_store,
                 strict=False,
+                seed_overrides=_seed_overrides or None,
             )
             if _seed_issues and isinstance(result, dict):
                 result["seed_health"] = {
                     "issues": _seed_issues,
-                    "hint": "种子态与断言方向同态或断言目标不可用。验收种子应取断言"
-                            "目标的反态（期望 on → 种子 off），否则前置已满足会降级 "
-                            "fully_verified（B20）。",
+                    "hint": "验收前已自动把断言目标翻成反态（auto_corrected 项）以消除 "
+                            "B20 前置已满足；标 assertion_target_unavailable 的目标无法"
+                            "翻转，请确认设备已同步。",
                 }
             return result
         except Exception as e:
@@ -1304,45 +1425,64 @@ class ArenaManager:
                 })
         return issues
 
-    def _infer_postconditions(self, task: Dict, dsl: str) -> List[Dict]:
-        """从题目和 DSL 推断期望后置状态。
+    def _seed_overrides_for_reverse(self, vhass_store, expected) -> Dict[str, str]:
+        """为每个断言目标构造「期望的反态」初始态覆盖（F-R8-04）。
 
-        MVP 简化版：从题目描述中提取"打开/开启/启动"对应的设备，期望状态为 on。
-        更精确的推断在后续版本由 LLM 考官完成。
+        仅在目标**确实存在于 vhass**（避免制造幽灵实体）且域可控时给出覆盖。
+        返回 {entity_id: state}；空 dict 表示无需/无法翻转。
+        """
+        overrides: Dict[str, str] = {}
+        for pc in (expected or []):
+            if not isinstance(pc, dict):
+                continue
+            ent = pc.get("entity_id") or pc.get("entity")
+            want = pc.get("state")
+            if not ent or not want:
+                continue
+            rev = _reverse_state_for(ent, want)
+            if not rev:
+                continue
+            try:
+                if vhass_store.get_state(ent) is None:
+                    continue
+            except Exception:
+                continue
+            overrides[ent] = rev
+        return overrides
 
-        F-R6-A-01（FFL R6）：目的从句必须剥离——task A 的「避免…被误关、回来还要
-        重新启动空调和电脑」是**要防止的情形**，不是目标状态；其中「启动」等反向
-        动词混入主描述导致期望推导反转为 on（turn_off 被拦、反向 turn_on 通过）。
-        「避免/防止/以防/以免/是为了」引导的从句一律不计入关键词扫描。
+    def _infer_postconditions(self, task: Dict, dsl: Optional[str] = None) -> List[Dict]:
+        """从**题面**推断期望后置状态（F-R8-02：不再并入提交的 DSL）。
+
+        为什么不能看 DSL：DSL 是**被测对象**，拿它推断断言的期望 = 让 flow 自证语义。
+        实测（F-R8-02）「人在书房且门关闭时开学习灯」：题面不含旧关键词表里的任何
+        open 词，题面贡献 0 → 若提交 turn_off flow，close 词命中 → 期望被推成 off
+        → **反向 flow 反而通过**。故改为：期望只由题面决定，标题优先、描述兜底。
+
+        方向判定取「最右方向标记」（`_infer_direction_from_text`）：中文自动化题面是
+        「<触发条件> <动作>」语序，最右者才是动作。这同时解掉触发侧反向动词污染——
+        「门打开时立即关闭台灯」里的 打开 属触发侧，不得把期望推成 on（F-R6-A-01 同族）。
+
+        目的从句（避免/防止/以防/以免/是为了…）在**描述兜底路径**上先行剥离。
+        题面推不出方向时返回空断言集（不猜）——由闸门按零断言 fail-closed 处置，
+        宁可不给断言，也不给 submitted DSL 自证的机会。
         """
         import re as _re
-        expected = []
-        desc = (task.get("title", "") + " " + task.get("description", "")).lower()
-        # 剥离目的从句（到最近的句读为止）
+        _ = dsl  # 兼容旧调用签名；F-R8-02：DSL 不再参与期望推断
+        title = str(task.get("title") or "")
+        desc = str(task.get("description") or "")
         desc = _re.sub(r"(避免|防止|以防|以免|是为了)[^，。；\n]*", "", desc)
-        dsl_lower = dsl.lower()
-        combined = desc + " " + dsl_lower
 
+        direction = (_infer_direction_from_text(title)
+                     or _infer_direction_from_text(desc))
+        if not direction:
+            return []
+
+        expected: List[Dict] = []
         for eid in task.get("entity_ids", []):
-            domain = eid.split(".")[0] if "." in eid else ""
-            entity_name = eid.split(".")[-1] if "." in eid else eid
-            # 检查是否提到打开/开启/启动
-            open_keywords = ["打开", "开启", "启动", "开灯", "开空调", "开电视", "turn on", "open"]
-            close_keywords = ["关闭", "关掉", "关灯", "关空调", "turn off", "close"]
-            # F-R7-03（FFL R7）：media_player 语义态——vhass 对 media_play/play_media
-            # 映射 playing（电视模型：开机即播放，turn_on 也归一到 playing），
-            # 断言推 "on" 必然与重放终态错位，团队只能用 on+取值 绕过。
-            # 推断改为 playing/off，与 vhass 终态表对齐。
-            if domain == "media_player":
-                if any(kw in combined for kw in (open_keywords + ["播放", "看"])):
-                    expected.append({"entity_id": eid, "state": "playing"})
-                elif any(kw in combined for kw in close_keywords):
-                    expected.append({"entity_id": eid, "state": "off"})
-                continue
-            if any(kw in combined for kw in open_keywords) and domain in ("light", "switch", "climate", "fan"):
-                expected.append({"entity_id": eid, "state": "on"})
-            elif any(kw in combined for kw in close_keywords) and domain in ("light", "switch", "climate", "fan"):
-                expected.append({"entity_id": eid, "state": "off"})
+            domain = eid.split(".", 1)[0] if "." in eid else ""
+            state = _desired_state(domain, direction)
+            if state:
+                expected.append({"entity_id": eid, "state": state})
         return expected
 
     # ── 排行榜 ──

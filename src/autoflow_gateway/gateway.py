@@ -2289,7 +2289,8 @@ class Gateway:
                     resolved_entities: Optional[List[str]] = None,
                     vhass_store=None, strict: bool = False,
                     require_e2e: bool = False,
-                    deploy_token: Optional[str] = None) -> Dict[str, Any]:
+                    deploy_token: Optional[str] = None,
+                    seed_overrides: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """经 DSL 提案场景：解析 → 静态校验 → 编译 → staging 闸门(vhass 重放断言) → 落提案(raw)。
 
         - dsl：agent 输出的语义 DSL 文本（见 docs/dsl_design.md）。
@@ -2300,6 +2301,10 @@ class Gateway:
           deploy_proposal 会真正先跑一次 run_e2e_trace_raw 实机验证闸（verdict≠通过则拦截部署）。
           默认 False（沿用 env AUTOFLLOW_WHITEBOX_REQUIRE_E2E）。修复 iss_8d3cffaa96：此前该意图
           被 JSON-RPC 静默吞掉、且主部署路径 deploy_proposal 从不调 e2e 闸。
+        - seed_overrides：{entity_id: state}，在触发注入之后、重放采样之前覆盖这些实体的
+          **初始态**。供竞技场等「先置反态再验收」的调用方使用（F-R8-04：断言目标必须先处于
+          期望的反态，否则前置已满足 → B20 降级 → 无法判定 flow 是否真的改变了世界）。
+          缺省 None = 完全不动传入 store（保持既有语义）。
         - 返回 {ok, proposal_id, scene_name, gate:{passed,...}, flow}；编译失败 ok=False(stage=compile)。
         """
         from .dsl_engine import parse, compile, DSLError, set_entity_resolver, set_entity_attributes_resolver
@@ -2475,7 +2480,8 @@ class Gateway:
         # 编译产物连线正确，分支感知可顺线评估门控、只重放命中分支的意图，不再误杀。
         gate = self.run_staging_gate(dsl, expected_postconditions,
                                       resolved_entities=resolved_entities,
-                                      vhass_store=vhass_store)
+                                      vhass_store=vhass_store,
+                                      seed_overrides=seed_overrides)
 
         # 【WB92·O2 收口】黑箱 propose 对「未知实体」fail-open 修复（P3-F3 闭环）
         # 背景：run_staging_gate 能检出未知实体（stage=entity_check），但 propose_dsl 对
@@ -6129,7 +6135,8 @@ class Gateway:
                          branch_aware: bool = True,
                          target: str = "staging",
                          flow: Optional[Dict[str, Any]] = None,
-                         require_change: bool = False) -> Dict[str, Any]:
+                         require_change: bool = False,
+                         seed_overrides: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """staging 闸门：编译 DSL → 把 flow 的 HA 意图重放到 vhass → 断言后置条件。
 
         不依赖真实 NR/HA：编译产物的 api-call-service 节点即『这个 flow 要对 HA 做的意图』，
@@ -6139,6 +6146,11 @@ class Gateway:
         - flow：白箱直通口。给了就跳过 DSL 解析/编译，直接重放这份 NR flow。
           （旧实现逼白箱路径伪造一段「注释 + JSON」的假 DSL，parse 必失败 →
            闸门等于从未运行，是 A18 假 pass 的直接成因。）
+
+        - seed_overrides（F-R8-04）：{entity_id: state}，在触发注入之后、`_pre_states`
+          采样之前把指定实体置为给定初始态。用于「断言目标必须是重放才被改变的」验收语义
+          （竞技场静态种子无法同时服务 turn_on / turn_off 两类题，改由调用方按断言目标
+          传反态）。不创造幽灵实体：仅覆盖 store 中已存在的实体。
 
         - 返回 {passed, replayed_services, external_calls, assertions, failures, entity_count}
         """
@@ -6252,6 +6264,20 @@ class Gateway:
                     except Exception:
                         pass
                 break
+
+        # 1.5) 验收种子覆盖（F-R8-04）：调用方可指定断言目标的**初始态**（通常是期望的反态）。
+        #      置于触发注入之后——触发态与初始态是两件事（「门开」事件 + 「灯原本关着」），
+        #      后置者不得被前者覆盖；置于 _pre_states 采样之前——闸门据此判定
+        #      changed_by_replay（前置已满足即无法证明 flow 改变了世界，B20）。
+        #      只覆盖已存在的实体，绝不借道创建幽灵实体。
+        if seed_overrides:
+            for _so_eid, _so_state in seed_overrides.items():
+                try:
+                    if store.get_state(_so_eid) is None:
+                        continue
+                    store.inject_trigger(_so_eid, _so_state)
+                except Exception:
+                    pass
 
         # 2) 重放（分支感知）：单步 = 一个 step；scenario = 多步时间线
         steps = scenario if scenario else [{"expected": expected}]
@@ -6679,6 +6705,7 @@ class Gateway:
                 "dead_branches": dead_branches,
                 "replay_zero_steps": replay_zero_steps,
                 "replay_zero_policy": _rz_policy,
+                "seed_overrides": dict(seed_overrides) if seed_overrides else None,
                 "entity_count": len(store.entities),
             }
         sr = step_results[0]
@@ -6723,6 +6750,7 @@ class Gateway:
             "dead_branches": dead_branches,
             "replay_zero": bool(replay_zero_steps),
             "replay_zero_policy": _rz_policy,
+            "seed_overrides": dict(seed_overrides) if seed_overrides else None,
             "entity_count": len(store.entities),
         }
 
