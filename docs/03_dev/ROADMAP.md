@@ -2,8 +2,8 @@
 
 > ## ⛔ 已作废（2026-09-08）—— 内容停在 v1.5.6
 >
-> 当前版本已到 **v2.0.11-beta**，路线图已被 [`../05_handoff/PROJECT_HANDOFF_20260907.md`](../05_handoff/PROJECT_HANDOFF_20260907.md)
-> 的「下一步建议」和 [`../02_architecture/ARCHITECTURE.md`](../02_architecture/ARCHITECTURE.md) §18 取代。
+> 当前版本已到 **v2.0.11-beta**，现行路线图：**[`../ROADMAP.md`](../ROADMAP.md)**（2026-09-10 起
+> 唯一有效版本）；架构见 [`../02_architecture/ARCHITECTURE.md`](../02_architecture/ARCHITECTURE.md)。
 > 保留仅为历史留档。
 > **负责人**：dw
 > **当前版本**：v1.5.6

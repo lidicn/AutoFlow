@@ -7,7 +7,8 @@
 
 - **版本**：v2.0.11-beta（竞技场 beta）｜分支：仅 `main`
 - **三条产品线**：Core（nr_client 直连）／Standard（MCP + 网关）／Pro（nr_client `--gateway`）
-- **活跃方向**：Arena 竞技场（后端 + 前端已落地，待真实部署验证与教程）
+- **活跃方向**：Arena 竞技场（R7 客厅轮 6/6 全 fv；记忆联动已上线）
+- **路线图**：[`ROADMAP.md`](ROADMAP.md)（2026-09-10 起**唯一有效版本**，含版本计划与验收门）
 - **架构真相源**：[`02_architecture/ARCHITECTURE.md`](02_architecture/ARCHITECTURE.md)
   （⚠️ `00_overview/` 与 `03_dev/ROADMAP.md` 是**已作废的重复文档**，别读）
 
@@ -65,7 +66,7 @@ docs/
 | `autoflow_core_usage_feedback.md` | **Core 版实测反馈**（2026-09-02，TV Cam 保活 flow 实战）。含 NR 的 OAuth2 Password Grant 取 token 细节，接手 Core 版前建议先读 |
 | `PLAN_v1.5_pro_and_experience.md` | Pro 版 + 经验库的设计与实现计划 |
 | `PLAN_webui_password_login.md` | WebUI 登录改造（令牌 → 账号密码 + 会话）的设计与 D1–D5 决策记录 |
-| `ROADMAP.md` | ⛔ **已作废**（停在 v1.5.6），路线图见 `05_handoff/PROJECT_HANDOFF_20260907.md` |
+| `ROADMAP.md` | ⛔ **已作废**（停在 v1.5.6）。现行路线图：[`../ROADMAP.md`](../ROADMAP.md) |
 
 ## 04_ideas — 想法草稿
 
