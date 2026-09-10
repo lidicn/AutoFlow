@@ -3412,9 +3412,69 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             )
         return _handler
 
+    # ── OAuth 2.0 资源发现（v2.0.12-1，RFC 9728 / RFC 8414，只读 + 匿名）──
+    # 目的：MCP 客户端探测鉴权方式时不再收到 404；resource / scopes 机器可读，
+    #       三面板（normal/expert/admin）映射一次声明清楚，客户端零手工发现鉴权方式。
+    # ★诚实声明（对齐产品诚实不变量）：AutoFlow 不运行交互式 OAuth 授权服务器——
+    #   身份码(af_)由人类在 WebUI「Agents」面板签发；此处只声明「预签发 Bearer 令牌」模型，
+    #   绝不虚构 authorization_endpoint / token_endpoint，以免诱导客户端发起注定失败的 DCR/OAuth 流程。
+    def _origin(request: Request) -> str:
+        """推导外部可见 origin（反代后优先 X-Forwarded-*，逗号列表取首项）。"""
+        hdr = {k.decode("latin-1").lower(): v.decode("latin-1", "ignore")
+               for k, v in request.scope.get("headers", [])}
+        proto = (hdr.get("x-forwarded-proto") or request.url.scheme or "http").split(",")[0].strip()
+        host = (hdr.get("x-forwarded-host") or hdr.get("host")
+                or request.url.netloc or "localhost").split(",")[0].strip()
+        return f"{proto}://{host}"
+
+    _OAUTH_SCOPES = ["normal", "expert", "admin"]
+
+    async def oauth_protected_resource(request: Request):
+        """RFC 9728：受保护资源元数据（MCP 客户端据此发现鉴权方式与 scope）。"""
+        origin = _origin(request)
+        return _js({
+            "resource": f"{origin}{cfg.mcp_path}",
+            "resource_name": "AutoFlow Gateway",
+            "resource_documentation": f"{origin}/",
+            "scopes_supported": list(_OAUTH_SCOPES),
+            "bearer_methods_supported": ["header"],
+            # ★不声明 authorization_servers：不存在交互式 OAuth AS，声明它会诱导客户端
+            #   尝试注定失败的 OAuth 流程；用 autoflow_auth_model 明确「预签发令牌」模型。
+            "autoflow_auth_model": "pre-issued-bearer-token",
+            "autoflow_panels": {
+                "normal": cfg.mcp_path,
+                "expert": cfg.mcp_white_path,
+                "admin": cfg.mcp_admin_path,
+            },
+        })
+
+    async def oauth_authorization_server(request: Request):
+        """RFC 8414：授权服务器元数据。AutoFlow 无交互式 OAuth AS，此处仅诚实声明
+        「预签发 Bearer 令牌」模型并指向 WebUI 令牌签发处（消除客户端 404 探测噪声）。"""
+        origin = _origin(request)
+        return _js({
+            "issuer": origin,
+            "scopes_supported": list(_OAUTH_SCOPES),
+            "bearer_methods_supported": ["header"],
+            "service_documentation": f"{origin}/",
+            "autoflow_auth_model": "pre-issued-bearer-token",
+            "autoflow_authorization": "none",
+            "autoflow_note": (
+                "AutoFlow 不提供交互式 OAuth 授权/令牌端点。身份码由人类在 WebUI「Agents」"
+                "面板签发，随后以 `Authorization: Bearer <身份码>` 调用 /mcp 系列端点。"
+            ),
+        })
+
     routes = [
         Route("/manifest.webmanifest", _serve_static_root("manifest.webmanifest", "application/manifest+json")),
         Route("/sw.js", _serve_static_root("sw.js", "application/javascript")),
+        # OAuth 资源发现（只读 + 匿名；MCP 客户端探测入口）
+        Route("/.well-known/oauth-protected-resource", oauth_protected_resource, methods=["GET"]),
+        # RFC 9728 §3.1：resource 带路径时，发现 URL 为
+        # /.well-known/oauth-protected-resource/<resource-path>（如 /mcp），同处理器兜住。
+        Route("/.well-known/oauth-protected-resource/{resource_path:path}",
+              oauth_protected_resource, methods=["GET"]),
+        Route("/.well-known/oauth-authorization-server", oauth_authorization_server, methods=["GET"]),
         Route("/api/health", health, methods=["GET"]),
         Route("/api/debug", debug_read_global, methods=["GET"]),
         Route("/api/debug/{flow_id}", debug_read, methods=["GET"]),

@@ -2012,7 +2012,7 @@ class AgentAuthMiddleware:
                 if tok:
                     agent = self.store.resolve_by_code(tok)
             if agent is None:
-                await self._unauthorized(send_with_cors)
+                await self._unauthorized(send_with_cors, scope)
                 return
             # 端点级零信任门禁：
             #  · /mcp-admin 仅开发者身份(mode=developer)可进；普通/专家均 403。
@@ -2036,7 +2036,7 @@ class AgentAuthMiddleware:
                 get_current_agent_var().reset(t)
         return middleware
 
-    async def _unauthorized(self, send):
+    async def _unauthorized(self, send, scope=None):
         body = json.dumps({
             "jsonrpc": "2.0",
             "error": {
@@ -2045,13 +2045,28 @@ class AgentAuthMiddleware:
             },
             "id": None,
         }).encode("utf-8")
+        headers = [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ]
+        # RFC 9728 §5：用 WWW-Authenticate 告知客户端资源元数据发现地址（消除 /.well-known 盲探 404）。
+        if scope is not None:
+            try:
+                hdr = {k.decode("latin-1").lower(): v.decode("latin-1", "ignore")
+                       for k, v in scope.get("headers", [])}
+                proto = (hdr.get("x-forwarded-proto") or scope.get("scheme") or "http").split(",")[0].strip()
+                host = (hdr.get("x-forwarded-host") or hdr.get("host") or "").split(",")[0].strip()
+                if host:
+                    meta = f"{proto}://{host}/.well-known/oauth-protected-resource"
+                    headers.append(
+                        (b"www-authenticate",
+                         f'Bearer resource_metadata="{meta}"'.encode("latin-1")))
+            except Exception:
+                pass
         await send({
             "type": "http.response.start",
             "status": 401,
-            "headers": [
-                (b"content-type", b"application/json"),
-                (b"content-length", str(len(body)).encode()),
-            ],
+            "headers": headers,
         })
         await send({"type": "http.response.body", "body": body})
 

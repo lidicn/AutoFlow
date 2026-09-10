@@ -51,6 +51,7 @@
 | 20 | **FFL R2 真实 flow 验收** | 3 道真题（有人进书房开灯/光照不足开挂灯/关门关空调）全链路 locked+vhass 孪生验证通过 | FFL R2（T5） | `results/t5-flow-*-verify.json`；生产 API 实证 valid_submissions=4 |
 | 22 | **FFL R4 历史子流程 + 复合场景** | T11 历史子流程正向 3/3（duration/state_at/occurred 均 fully_verified，external_calls 正确记录）、T12 B22 假绿取证 2/2、T13a/b 复合原语（延时/时间段/否则/并行）验证；**Phase2 已触发**（locked 25 ≥ 20，phase=challenge） | FFL R4（T11~T14） | 生产实证 25 locked / 25 valid_sub；`results/r4-t1*.json`；负责人已清理 11 道探针/失败残留（36→25），备份 `*.json.bak_r4cleanup_20260909_004439` |
 | 21 | **FFL R3 场景扩充 + B20 压测** | 新增 10 道真实场景题（温湿度/人体感应/光照/门窗联动），10/10 有 changed_by_replay=true 真转变证据；B20 三项语义（前置已满足降级 / 零断言降级 / 正常流不误伤）在真实链路全部符合设计 | FFL R3（T8a/T8b/T9/T10） | 生产 API 实证：15 locked / 15 valid_sub / 93.8%；`results/t8a-*.json`、`t8b-*`、`r3-t9-*` |
+| 23 | **OAuth 资源发现端点（v2.0.12-1）** | MCP 客户端 401 后盲探 `/.well-known` 端点 → 此前 404 噪声。补 RFC 9728 `oauth-protected-resource`（含 `/mcp` 后缀变体）+ RFC 8414 `oauth-authorization-server` 两个只读匿名端点；`scopes_supported` 映射三面板；401 补 `WWW-Authenticate: Bearer resource_metadata=...` | 通用 MCP 成熟度框架对照（发现类缺口） | 守卫 `test_oauth_discovery.py`（5 例：元数据字段 / 后缀变体 / **诚实锁：AS 元数据不得出现 authorization_endpoint/token_endpoint/registration_endpoint** / 令牌模式下仍匿名 / 401 带 resource_metadata）。NAS 生产实测：三端点 200、`/mcp` 401 带 `www-authenticate`、`/mcp*` 三端点 401（非 5xx）、日志零异常 |
 
 ---
 

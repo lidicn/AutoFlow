@@ -150,6 +150,20 @@ AutoFlow 网关是 **agent 与「Home Assistant + Node-RED」之间的唯一中�
 
 `/mcp-white` 是 `/mcp` 的**兼容别名**（专家身份旧端点不失效）。普通/专家身份连 `/mcp-admin` 会被中间件直接 403。
 
+**鉴权发现（v2.0.12-1）**：网关暴露两个只读匿名端点，供 MCP 客户端零手工发现鉴权方式
+（消除 `/mcp` 401 后客户端盲探 `/.well-known` 的 404 噪声）：
+
+- `GET /.well-known/oauth-protected-resource`（RFC 9728，含 `/mcp` 后缀变体）→
+  `{resource, scopes_supported:[normal,expert,admin], bearer_methods_supported:[header], autoflow_panels{normal,expert,admin}}`。
+- `GET /.well-known/oauth-authorization-server`（RFC 8414）→ 诚实声明 `autoflow_authorization:"none"`。
+- `401` 响应带 `WWW-Authenticate: Bearer resource_metadata="<origin>/.well-known/oauth-protected-resource"`。
+
+> **诚实铁律（不可违背）**：AutoFlow **不运行交互式 OAuth 授权服务器**——身份码由人类在 WebUI 签发。
+> 因此上述元数据**绝不虚构** `authorization_endpoint` / `token_endpoint` / `registration_endpoint`，
+> 只声明「预签发 Bearer 令牌」模型（`autoflow_auth_model:"pre-issued-bearer-token"`）。
+> `tests/test_oauth_discovery.py` 已把「不得出现这些字段」锁死，防止后人「顺手补全」把客户端
+> 诱导进注定失败的 OAuth 流程。
+
 ### ★ 工具清单为什么不写在这里
 
 `mcp_server.py` 定义了 **47 个** `autoflow_*` 工具，且随版本增减。**把清单抄进文档必然过期**
@@ -280,7 +294,7 @@ NR flow JSON
 |---|---|
 | `gateway.py` (9172 行) | 核心门面，聚合一切；`_GOLDEN_JOBS` + `_TRACE_RING` |
 | `mcp_server.py` | MCP 服务 + Bearer 中间件；47 个 `autoflow_*` 工具 |
-| `webui.py` (3701 行) | WebUI ASGI 应用（治理/控制面，无业务逻辑） |
+| `webui.py` (3789 行) | WebUI ASGI 应用（治理/控制面，无业务逻辑）+ OAuth 发现端点 |
 | **`webui_auth.py`** | **WebUI 账号密码登录 + 服务端会话（三套令牌隔离）** |
 | `cli.py` | 无 MCP 客户端的 JSON 入口 |
 
