@@ -17,7 +17,7 @@
 
 | # | 项 | 内容 | 验收门 | 规模 |
 |---|---|---|---|---|
-| 1 | **OAuth 资源发现端点** | 补 `/.well-known/oauth-protected-resource` 与 authorization-server metadata 两个只读端点；resource=autoflow，scopes 映射三面板（normal/expert/admin） | MCP 客户端**零手工配置**发现鉴权方式；日志中 `/.well-known` 404 消失 | ~半天 |
+| 1 | ✅ **OAuth 资源发现端点**（commit 40cbed4） | 补 `/.well-known/oauth-protected-resource`（RFC 9728，含 `/mcp` 后缀变体）与 authorization-server metadata（RFC 8414）两个只读匿名端点；resource=autoflow，scopes 映射三面板（normal/expert/admin）；401 补 `WWW-Authenticate: Bearer resource_metadata=...` | ✅ MCP 客户端**零手工配置**发现鉴权方式（三端点 200 + 401 带发现头）；`/.well-known` 404 消失。★诚实铁律：不虚构 OAuth 端点（守卫锁死） | ~半天 |
 | 2 | **Schema 单一真相源**（A20/A27 收尾） | 工具 schema 从函数签名自动生成；`_ACP_TOOLS` 手写 JSON schema 退役；两套账并一套 | 手写 schema 删除；新增**一致性守卫测试**（tools/list 与签名生成结果 diff=0，防漂移回归） | 1~2 天 |
 | 3 | **每身份限流/超时** | 反代层按 token 令牌桶 + 请求超时（**零网关代码改动**） | 单 token 连发打满被 429；正常使用无感 | ~2 小时 |
 
