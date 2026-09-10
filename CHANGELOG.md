@@ -1,3 +1,11 @@
+## 2.1.0-beta (2026-09-10)
+- 【竞技场·清题主刀】验收前**按断言目标自动把孪生种子翻成反态**（网关新增 `seed_overrides` 通道，在触发注入之后、重放采样之前生效；只覆盖已存在实体，不造幽灵实体）。静态种子无法同时服务 turn_on / turn_off 两类题，此前 turn_off 族恒「前置已满足」→ `fully_verified=false` → 题目结构性不可落锁（R8 报告为「13 道死路」的真根因）。`pre_satisfied_seed` 告警改标 `auto_corrected`；**手工调 `<arena>_seed.json` 极性已无意义**。
+- 【竞技场·语义诚实性】期望后置态推断**只从题面**（标题优先、描述兜底）推导，**不再并入提交的 DSL** —— 旧实现让 flow 自证语义（题面「开学习灯」提交 `turn_off` 反被判过）。方向取题面**最右方向动词**（题面语序＝「触发条件＋动作」），单字 `开/关` 排除「离开/开始/开关/展开」假阳性；媒体域仍断 `playing/off`；题面推不出方向 → 空断言集（fail-closed）。
+- 【竞技场·出题校验】`propose_task` 要求 `entity_ids` 至少含 1 个可控域设备（light/switch/climate/fan/media_player/cover/input_boolean/humidifier/lock），否则拒题并回 `reason=no_controllable_device`（此前只列传感器的题会因零断言永远清不掉）；题面缺方向动词时附 `warnings`（不拒题）。
+- 【竞技场·考官校准】LLM 考官删除错误绝对规则「环境量只能因果关联同域设备」——环境量**触发**执行器是家居自动化主流形态；改为只有环境量出现在**动作侧**（试图设置只读量）才算硬伤。
+- 【技能】`skills/arena.md` v2.1.0：新增「验收语义纪律（题面权威 / 种子自动翻转 / entity_ids 需含动作目标）」，替换已失效的「种子态纪律」。
+- 守卫 `tests/test_fr8_arena_lockable.py`（31 例）；回归：竞技场/闸门 16 文件 200 passed / 4 failed（4 红经 `git archive HEAD` 干净树对照确认为既有陈旧测试）。
+
 ## 2.0.11-beta (2026-09-07)
 - 【改进】同步设备弹窗加宽至 860px，改为左侧 friendly_name / 右侧 entity_id 的双列布局。
 - 【改进】补齐 v1.4–v2.0 三个新模块的测试覆盖（wb1 接手后补）：`test_api_keys.py`(16) / `test_deploy_tokens.py`(19) / `test_arena.py`(24)，共 59 项。
