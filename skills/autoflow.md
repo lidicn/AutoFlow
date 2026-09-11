@@ -80,7 +80,7 @@ disable: true
 触发: <entity_id> <状态值>        # 例 binary_sensor.study_motion on
 触发: 定时 每天 22:30            # 或定时
 触发: inject                     # 或手动
-取值: <entity_id> <字段名>       # 读实体 state 进 msg.<字段名>，供下面「分支」做数值判断
+取值: <entity_id> <字段名>       # 读实体 state 进 msg.<字段名>，供下面「分支」判断（数值或状态比较都用它）
 条件: <jsonata 表达式>           # 可选
 动作: <domain>.<service>(<entity_id>, k=值)   # 例 light.turn_on(light.study, brightness_pct=80)
 构建: <JSON对象 或 JSONata表达式>   # 把 msg.payload 设为请求体；动态值用反引号 `payload`
@@ -89,8 +89,8 @@ disable: true
 分支: <jsonata 条件>
   动作: ...
 否则:
-  动作: ...
-时间段: [工作日|周末] HH:MM-HH:MM   # 仅在时段内才继续执行缩进块
+  注释: 无事可做时用 注释: 占位（不要留空、不要写 null）
+时间段: 工作日 HH:MM-HH:MM        # 星期限定直接写中文词（工作日/周末/每天/周一..周日），不加方括号；无星期限定可省略
   动作: ...
 延时: 3 秒
 并行:
@@ -186,6 +186,24 @@ disable: true
 - 漏了 `分支:` → 动作变成无条件执行，**编译器入口（`autoflow_propose_dsl`）现在对自由 DSL 也会硬拦**：只要 DSL 含条件语义（如果/才/超过/当…则/只有…才 等）但编译产物不含任何分支/条件门节点，直接返回 `ok=False` + `stage=lint_branch_required` + `error=R_branch_required`，**不落提案**，白干。这是修复「静默无条件执行」的硬闸（iss_ebfe742222），无论是否 `strict` 都生效。
 - 不确定怎么写分支 → 看上方第⑤类范例，或直接 `autoflow_dsl_help()` 查 `examples.数值条件`。
 - 想让闸门「零容忍任何反模式」自动挡下 → 提交时加 `strict=True`（见上方 `autoflow_propose_dsl` 说明）：任何 lint error/warning 都会升格为阻断、不落提案，比靠肉眼扫 DSL 更稳。
+
+**⑥ 判断实体当前状态必须先 `取值:`（★ 高频陷阱，会导致整题「未充分验证」）**：
+想知道「灯现在是不是亮着」，**不能**写 `分支: light.study.state = "on"` —— 这种「实体.属性」写法
+在虚拟孪生重放时**求值不出来**，闸门会把该分支判为「未激活」并**跳过依赖它的断言**，
+最终 `passed=true` 但 `fully_verified=false`（结论：未充分验证，不落锁）。
+✅ 正确做法：先用 `取值:` 把状态读进 msg，再对 msg 判断。
+```
+场景: 门开且台灯亮着才关灯
+触发: binary_sensor.front_door_contact on
+取值: light.study_desk_lamp state          # ← 先读进 msg.state
+分支: state = "on"                          # ← 再对 msg 字段判断
+  动作: light.turn_off(light.study_desk_lamp)
+否则:
+  注释: 灯已关，无需动作
+```
+⚠️ **能不加这层防御就别加**：如果题面只要求「门开就关灯」，直接写
+`触发 + 动作: light.turn_off(...)` 即可（`turn_off` 对已关的灯是幂等操作）。
+多加一个判断实体状态的分支，反而容易因写法不当被判未充分验证。
 
 ## 编译器路径交付（给用户）
 完成后只回三样：`proposal_id`、闸门摘要（replayed_services + assertions）、一句话结论
