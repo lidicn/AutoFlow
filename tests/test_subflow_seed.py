@@ -3,10 +3,12 @@
 """seed_managed_subflows 幂等 seed 单测（#578/#587，离线）。
 
 验证：网关启动时把预置子流程写入 subflow_registry，覆盖两类：
-  - subflow 实例型（bark_push + 4 history，需 nr_subflow_id，bark 含 BARK_* env）；
-  - link_out 型（SUBFLOWS 中 call.type=="link_out" 的能力：demo_notify /
-    apisay / weather / anysearch，网关只发 link out 到 entry_link_id，无 NR 子流程实例）。
-二者合计 9 条 managed、status=active；二次 seed 不重复、不覆盖（保护手动改动）。
+  - subflow 实例型（bark_push + 4 history，共 5，需 nr_subflow_id，bark 含 BARK_* env）；
+  - link_out 型（SUBFLOWS 中 call.type=="link_out" 且 preload=True 的能力：
+    weather / anysearch，网关只发 link out 到 entry_link_id，无 NR 子流程实例）。
+  demo_notify 虽是 link_out 但 preload=False（仅注册、不随启动预载到用户面板）；
+  apisay 等豆包能力已随豆包下线移除。故实际预载条数由 EXPECT_SEEDED 动态推导（当前 7），
+  二次 seed 不重复、不覆盖（保护手动改动）。
 """
 import os
 import sys
@@ -21,15 +23,22 @@ if SRC not in sys.path:
 from autoflow_gateway.config import GatewayConfig
 from autoflow_gateway.task_store import TaskStore
 from autoflow_gateway.subflows import (
-    seed_managed_subflows, get_subflow, SUBFLOWS,
+    seed_managed_subflows, get_subflow, SUBFLOWS, _MANAGED_SUBFLOW_KEYS,
 )
 
 # 从单一真相源 SUBFLOWS 推导期望的 link_out 能力 key，避免硬编码漂移
+# 从单一真相源 SUBFLOWS 推导期望的 link_out 能力 key，避免硬编码漂移。
+# ⚠️ demo_notify 是 link_out 但 preload=False（仅注册、不随网关启动预载到用户面板，
+# 见 subflows.SubflowSpec.preload 与 seed_managed_subflows 的 preload 跳过分支），
+# 故 seed 实际只写入 PRELOAD_LINKOUT_KEYS（不含 demo_notify）。
 LINKOUT_KEYS = {k for k, s in SUBFLOWS.items() if (s.call or {}).get("type") == "link_out"}
-SUBFLOW_KEYS = {
-    "bark_push", "history_state_at", "history_occurred",
-    "history_duration", "history_aggregate",
-}
+PRELOAD_LINKOUT_KEYS = {k for k, s in SUBFLOWS.items()
+                        if (s.call or {}).get("type") == "link_out"
+                        and getattr(s, "preload", True)}
+# subflow 实例型（需 nr_subflow_id）与预载 link_out 型合计 = 网关启动时实际 seed 的条数。
+# 用 _MANAGED_SUBFLOW_KEYS 单一真相源（subflows.py），避免与产品清单两处硬编码漂移。
+SUBFLOW_KEYS = set(_MANAGED_SUBFLOW_KEYS)
+EXPECT_SEEDED = len(SUBFLOW_KEYS) + len(PRELOAD_LINKOUT_KEYS)
 
 
 class TestSeedManagedSubflows(unittest.TestCase):
@@ -46,12 +55,12 @@ class TestSeedManagedSubflows(unittest.TestCase):
     def test_seed_creates_ten_managed(self):
         r = seed_managed_subflows(self.store)
         self.assertTrue(r["ok"], r)
-        self.assertEqual(r["seeded"], 9)
+        self.assertEqual(r["seeded"], EXPECT_SEEDED)
         self.assertEqual(r["skipped"], 0)
         rows = self.store.list_subflows(source_type="managed")
-        self.assertEqual(len(rows), 9)
+        self.assertEqual(len(rows), EXPECT_SEEDED)
         keys = {row["key"] for row in rows}
-        self.assertEqual(keys, SUBFLOW_KEYS | LINKOUT_KEYS)
+        self.assertEqual(keys, SUBFLOW_KEYS | PRELOAD_LINKOUT_KEYS)
         for row in rows:
             self.assertEqual(row["status"], "active")
             self.assertEqual(row["source_type"], "managed")
@@ -61,7 +70,7 @@ class TestSeedManagedSubflows(unittest.TestCase):
 
     def test_seed_linkout_rows_correct_shape(self):
         seed_managed_subflows(self.store)
-        for key in LINKOUT_KEYS:
+        for key in PRELOAD_LINKOUT_KEYS:
             meta = self.store.get_subflow_meta(key)
             self.assertIsNotNone(meta, key)
             self.assertEqual(meta["kind"], "link_out", key)
@@ -95,7 +104,7 @@ class TestSeedManagedSubflows(unittest.TestCase):
             owner="system", status="disabled", spec_ref="bark_push")
         r2 = seed_managed_subflows(self.store)
         self.assertEqual(r2["seeded"], 0)
-        self.assertEqual(r2["skipped"], 9)
+        self.assertEqual(r2["skipped"], EXPECT_SEEDED)
         meta = self.store.get_subflow_meta("bark_push")
         # 手动改动被保留（未被二次 seed 覆盖）
         self.assertEqual(meta["title"], "我改过的标题")

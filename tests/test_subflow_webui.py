@@ -3,7 +3,8 @@
 """WebUI 子流程注册表端点单测（#579，离线 starlette TestClient）。
 
 验证：
-  - GET  /api/subflows        → 返回网关 seed 的 9 条 managed（5 subflow：bark_push + 4 history；4 link_out）
+  - GET  /api/subflows        → 返回网关 seed 的 EXPECT_SEEDED 条 managed
+                                （5 subflow：bark_push + 4 history；2 预载 link_out：weather + anysearch）
   - POST /api/subflows/import → 自省（离线 stub）+ 注册，列表新增 imported 一条
 不触真实 NR/HA；introspect_nr_subflow 以离线 stub 替换。
 """
@@ -21,13 +22,18 @@ if SRC not in sys.path:
 from autoflow_gateway.config import GatewayConfig
 from autoflow_gateway.gateway import Gateway
 from autoflow_gateway import webui as webui_mod
-from autoflow_gateway.subflows import SUBFLOWS
+from autoflow_gateway.subflows import SUBFLOWS, _MANAGED_SUBFLOW_KEYS
 
+# 从单一真相源 SUBFLOWS 推导期望的 link_out 能力 key，避免硬编码漂移。
+# ⚠️ demo_notify 是 link_out 但 preload=False（仅注册、不随网关启动预载到用户面板），
+# 故 seed 实际只写入 PRELOAD_LINKOUT_KEYS（不含 demo_notify）；apisay 等豆包能力已随豆包下线移除。
 LINKOUT_KEYS = {k for k, s in SUBFLOWS.items() if (s.call or {}).get("type") == "link_out"}
-SUBFLOW_KEYS = {
-    "bark_push", "history_state_at", "history_occurred",
-    "history_duration", "history_aggregate",
-}
+PRELOAD_LINKOUT_KEYS = {k for k, s in SUBFLOWS.items()
+                        if (s.call or {}).get("type") == "link_out"
+                        and getattr(s, "preload", True)}
+# subflow 实例型（需 nr_subflow_id）与预载 link_out 型合计 = 网关启动时实际 seed 的条数。
+SUBFLOW_KEYS = set(_MANAGED_SUBFLOW_KEYS)
+EXPECT_SEEDED = len(SUBFLOW_KEYS) + len(PRELOAD_LINKOUT_KEYS)
 
 try:
     from starlette.testclient import TestClient
@@ -78,13 +84,13 @@ class TestSubflowWebUI(unittest.TestCase):
         r = self.client.get("/api/subflows")
         self.assertEqual(r.status_code, 200)
         body = r.json()
-        self.assertEqual(body["count"], 9)    # 5 subflow + 4 link_out
+        self.assertEqual(body["count"], EXPECT_SEEDED)    # 5 subflow + 2 预载 link_out
         keys = {s["key"] for s in body["subflows"]}
-        self.assertEqual(keys, SUBFLOW_KEYS | LINKOUT_KEYS)
+        self.assertEqual(keys, SUBFLOW_KEYS | PRELOAD_LINKOUT_KEYS)
         for s in body["subflows"]:
             self.assertEqual(s["source_type"], "managed")
             self.assertEqual(s["status"], "active")
-            if s["key"] in LINKOUT_KEYS:
+            if s["key"] in PRELOAD_LINKOUT_KEYS:
                 self.assertEqual(s["kind"], "link_out")
                 self.assertTrue(s["entry_link_id"])
                 self.assertIsNone(s["nr_subflow_id"])
@@ -105,9 +111,9 @@ class TestSubflowWebUI(unittest.TestCase):
         self.assertEqual(body["key"], "my_dummy")
         # 自省结果回传
         self.assertEqual(body["introspect"]["nr_subflow_id"], "sf_dummy_99")
-        # 列表新增 imported 一条（共 10）
+        # 列表新增 imported 一条（共 EXPECT_SEEDED + 1）
         lst = self.client.get("/api/subflows").json()
-        self.assertEqual(lst["count"], 10)
+        self.assertEqual(lst["count"], EXPECT_SEEDED + 1)
         imported = [s for s in lst["subflows"] if s["key"] == "my_dummy"]
         self.assertEqual(len(imported), 1)
         m = imported[0]

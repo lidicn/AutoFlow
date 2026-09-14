@@ -4,6 +4,7 @@
 - 子流程 Tab（kind=subflow）：history_* ×4 + bark_push 等。
 - Link API Tab（kind=link_out / http_api）：彩云/anysearch 等，豆包（self_use）被后端排除。
 """
+import os
 import unittest
 
 from autoflow_gateway.config import GatewayConfig
@@ -25,6 +26,11 @@ from api_spec_fixture import make_spec, temp_api_spec
 class TestSubflowTabs(unittest.TestCase):
     def setUp(self):
         import tempfile
+        # 账号密码改造后默认 password_only：未认证请求一律 401。
+        # 本测试不关心认证，设 token_only 让本机回环放行（与 test_connections_settings /
+        # test_subflow_webui 同款配方）。备份原值并在 tearDown 还原，避免污染同会话后续用例。
+        self._token_mode_backup = os.environ.get("AF_WEBUI_TOKEN_MODE")
+        os.environ["AF_WEBUI_TOKEN_MODE"] = "token_only"
         self.tmp = tempfile.mkdtemp(prefix="af_tab_")
         self.cfg = GatewayConfig(data_dir=self.tmp, env="staging")
         self.gw = Gateway(self.cfg)
@@ -34,6 +40,11 @@ class TestSubflowTabs(unittest.TestCase):
 
     def tearDown(self):
         self.client.__exit__(None, None, None)
+        # 还原 token_only 环境变量，避免污染同会话后续用例
+        if self._token_mode_backup is None:
+            os.environ.pop("AF_WEBUI_TOKEN_MODE", None)
+        else:
+            os.environ["AF_WEBUI_TOKEN_MODE"] = self._token_mode_backup
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
 
