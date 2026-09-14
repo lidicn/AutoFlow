@@ -8,6 +8,9 @@
 
 底层机制（rec['state'] 注入后求值）已由 test_wb93_f13_fully_verified_read_value.py
 （注入 store）锁定；本文件只锁「从 HA 读取 → 注入 store」这一段桥。
+
+注：B20/F-R2-01（4343e50）后 fully_verified 还要求 expected 证明世界态转变（种子取反态）；
+故 case1 须传 expected 且把灯种子置反态。其余 fail-closed 用例保持 expected=[]。
 """
 import os, sys
 sys.path.insert(0, r"E:\NAS\autoflow\src")
@@ -31,9 +34,9 @@ class FakeHA:
         return {"entity_id": eid, "state": v, "attributes": {}}
 
 
-def _store(lumi_state="0"):
+def _store(lumi_state="0", lamp_state="off"):
     st = VH.VHassStore()
-    rows = [("light.lamp", "灯", "书房", "off", {}),
+    rows = [("light.lamp", "灯", "书房", lamp_state, {}),
             ("sensor.lumi", "光照", "书房", lumi_state, {})]
     seed = VH.build_seed_from_entities(rows)
     st.areas = seed["areas"]
@@ -66,8 +69,11 @@ def _gw(ha, store):
 class TestF13SeedFromHA:
     def test_seed_numeric_makes_fully_verified(self):
         ha = FakeHA({"sensor.lumi": "50"})
-        store = _store(lumi_state="0")  # 目录态为 0，被实时态 50 覆盖
-        r = _gw(ha, store).run_staging_gate(dsl="", expected=[], flow=C(parse(DSL)), vhass_store=None)
+        # 目录态 lumi=0 被实时态 50 覆盖 → 走否则(turn_off)；灯取反态(on)以证明状态转变
+        store = _store(lumi_state="0", lamp_state="on")
+        r = _gw(ha, store).run_staging_gate(
+            dsl="", expected=[{"entity_id": "light.lamp", "state": "off"}],
+            flow=C(parse(DSL)), vhass_store=None)
         assert r["verdict"] == "放行", r
         assert r["fully_verified"] is True, r
         assert r["replayed_services"] == ["light.turn_off(light.lamp)"], r

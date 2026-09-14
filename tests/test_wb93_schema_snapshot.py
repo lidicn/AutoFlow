@@ -50,7 +50,9 @@ def test_get_entity_state_nested_envelope(monkeypatch):
         "last_updated": "2026-08-29T17:34:03.154171+00:00",
         "context": {"id": "01M179BTWJFSBQPWFJKQDPQ3JG", "parent_id": None, "user_id": None},
     }
-    monkeypatch.setattr(mcp_server, "Gateway", lambda: _FakeGW(live))
+    # patch 代码实际使用的网关访问缝 _gw（全库统一做法，如 test_round20_bugs/
+    # test_selfheal_prod_write）；patch Gateway 类在全量运行下会被泄漏的 _gw 覆盖绕过。
+    monkeypatch.setattr(mcp_server, "_gw", lambda: _FakeGW(live))
 
     out = mcp_server.autoflow_get_entity_state(
         "light.yeelink_cn_555003624_lamp22_s_2"

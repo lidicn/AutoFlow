@@ -17,6 +17,10 @@
 vhass 最小数据契约：取值节点重放只需 world(entityId) 返回实体状态字符串
 （vhass store 种子即满足）；重放把实体态写 msg.payload.state，change 桥接写
 msg.<label>，switch jsonata 读 msg.<label> —— 全链不依赖 websocket。
+
+注：B20/F-R2-01（4343e50 弱验证加固）后，端到端闸门「放行 + fully_verified」还要求
+expected 证明世界态**转变**（种子取反态）；仅「选对分支、动作被重放」会诚实降级为
+未充分验证（零断言 / 前置已满足）。故 TestO1EndToEndGate 正向用例须传 expected。
 """
 import os
 import sys
@@ -135,7 +139,11 @@ def _vhass(*rows):
 
 
 class TestO1EndToEndGate(unittest.TestCase):
-    """全链守卫：取值-label 分支从「未充分验证」升为「放行」，且按世界态选对分支。"""
+    """全链守卫：取值-label 分支从「未充分验证」升为「放行」，且按世界态选对分支。
+
+    B20/F-R2-01（4343e50）后 fully_verified 还要求 expected 证明世界态转变，
+    故须传 expected 且把灯种子置于目标反态（否则零断言/前置已满足降级）。
+    """
 
     def setUp(self):
         os.environ["AUTOFLLOW_DATA_DIR"] = tempfile.mkdtemp(prefix="af_o1_gate_")
@@ -143,19 +151,19 @@ class TestO1EndToEndGate(unittest.TestCase):
         for eid in ("light.lamp", "sensor.lumi"):
             self.gw.state.add_mapping(eid, eid)
 
-    def _gate(self, seed_state):
-        rows = (("light.lamp", "灯", "书房", "off", {}),
-                ("sensor.lumi", "光照", "书房", seed_state, {}))
-        return self.gw.run_staging_gate(DSL, [], vhass_store=_vhass(*rows))
+    def _gate(self, lumi_state, lamp_state, expected):
+        rows = (("light.lamp", "灯", "书房", lamp_state, {}),
+                ("sensor.lumi", "光照", "书房", lumi_state, {}))
+        return self.gw.run_staging_gate(DSL, expected, vhass_store=_vhass(*rows))
 
     def _replayed_services(self, r):
         return [str(s) for s in (r.get("replayed_services") or [])]
 
     def test_dark_world_hits_on_branch_fully_verified(self):
-        r = self._gate("5")  # 5 < 10 → 开灯分支
+        # 光照 5 < 10 → 开灯分支；种子取反态 off 以证明状态转变
+        r = self._gate("5", "off", [{"entity_id": "light.lamp", "state": "on"}])
         self.assertTrue(r.get("passed"))
-        self.assertEqual(r.get("verdict"), "放行",
-                         "取值-label 分支应可本地求值并放行（O1 修复前为未充分验证）")
+        self.assertEqual(r.get("verdict"), "放行", r)
         self.assertTrue(r.get("fully_verified"))
         self.assertFalse(r.get("warnings"))
         svcs = " ".join(self._replayed_services(r))
@@ -163,9 +171,10 @@ class TestO1EndToEndGate(unittest.TestCase):
         self.assertNotIn("turn_off", svcs, "不应重放否则分支")
 
     def test_bright_world_hits_else_branch(self):
-        r = self._gate("50")  # 50 >= 10 → 否则分支
+        # 光照 50 >= 10 → 否则分支(关灯)；种子取反态 on 以证明状态转变
+        r = self._gate("50", "on", [{"entity_id": "light.lamp", "state": "off"}])
         self.assertTrue(r.get("passed"))
-        self.assertEqual(r.get("verdict"), "放行")
+        self.assertEqual(r.get("verdict"), "放行", r)
         self.assertTrue(r.get("fully_verified"))
         svcs = " ".join(self._replayed_services(r))
         self.assertIn("turn_off", svcs, "应重放否则分支")
