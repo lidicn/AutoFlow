@@ -138,15 +138,25 @@ def test_chat_with_tools_unconfigured_errors():
 # ── WebUI 端点 ──
 @pytest.fixture
 def env():
+    # 与 connections_settings 同配方：本组 WebUI 端点测试在 token_only 模式下
+    # 免鉴权放行（默认 password_only 会 401 拦截，属产品正确行为，测试需显式 opt-in）。
+    token_mode_backup = os.environ.get("AF_WEBUI_TOKEN_MODE")
+    os.environ["AF_WEBUI_TOKEN_MODE"] = "token_only"
     tmp = tempfile.mkdtemp(prefix="af_llm_")
     cfg = GatewayConfig(data_dir=tmp, env="staging")
     gw = Gateway(cfg)
     app = build_webui_asgi(cfg, gateway=gw)
     client = TestClient(app)
     client.__enter__()
-    yield client, gw, cfg
-    client.__exit__(None, None, None)
-    shutil.rmtree(tmp, ignore_errors=True)
+    try:
+        yield client, gw, cfg
+    finally:
+        client.__exit__(None, None, None)
+        if token_mode_backup is None:
+            os.environ.pop("AF_WEBUI_TOKEN_MODE", None)
+        else:
+            os.environ["AF_WEBUI_TOKEN_MODE"] = token_mode_backup
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _fake_tools():
