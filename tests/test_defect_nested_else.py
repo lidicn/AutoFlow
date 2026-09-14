@@ -98,8 +98,9 @@ def test_nested_double_else_outer_switch_has_else_output():
     flow = _compile(NESTED_DOUBLE_ELSE)
     switches = _switches(flow)
     assert len(switches) == 2, f"应有 2 个 switch，实际 {len(switches)}"
+    # O1 修复(9f47798)后取值标签引用改为 msg.<label>（原 payload.x）；用 "> 25" 稳健定位外层
     outer = next(s for s in switches
-                 if any("$number(payload.x)" in r.get("v", "") for r in s.get("rules", [])))
+                 if any("> 25" in r.get("v", "") for r in s.get("rules", [])))
     assert outer["outputs"] == 2, f"外层 switch outputs 应为 2，实际 {outer['outputs']}"
     assert any(r.get("t") == "else" for r in outer["rules"]), "外层 switch 缺少 else 规则"
     # 外层 否则 必须挂到 else 输出口（wires[1]）

@@ -118,6 +118,8 @@ def test_get_history_empty_entity_r20():
 def test_nested_switch_wiring():
     out = compile_dsl(
         "触发: binary_sensor.office_motion on\n"
+        "  取值: sensor.office_lux 光照度\n"
+        "  取值: sensor.office_tmp 温度\n"
         "  分支: 光照度 > 100\n"
         "    否则:\n"
         "      分支: 温度 > 30\n"

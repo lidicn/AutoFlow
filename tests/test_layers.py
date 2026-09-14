@@ -40,14 +40,14 @@ class FakeNR:
     def list_flows(self): return self._rec("list_flows")
     def get_flow(self, fid): return self._rec("get_flow", fid)
     def find_flow_by_name(self, name): return self._rec("find_flow_by_name", name)
-    def update_flow(self, fid, flow, force=False): return self._rec("update_flow", fid, force=force)
+    def update_flow(self, fid, flow, force=False, allow_prod=False): return self._rec("update_flow", fid, force=force)
     def create_or_update_flow(self, fid, flow, force=False, allow_prod=False):
         return self._rec("create_or_update_flow", fid, force=force)
     def add_nodes(self, fid, new_nodes): return self._rec("add_nodes", fid)
     def modify_node_field(self, fid, nid, fields): return self._rec("modify_node_field", fid, nid)
     def modify_function_code(self, fid, nid, code, name=None):
         return self._rec("modify_function_code", fid, nid, node_name=name)
-    def delete_flow(self, fid, force=False): return self._rec("delete_flow", fid, force=force)
+    def delete_flow(self, fid, force=False, allow_prod=False): return self._rec("delete_flow", fid, force=force)
     def inject_flow(self, fid): return self._rec("inject_flow", fid)
     def trigger_inject(self, nid): return 204  # 真实返回 HTTP 状态码
     def get_context(self, store, key): return self._rec("get_context", store, key)
