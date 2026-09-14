@@ -357,12 +357,15 @@ def test_R9_deploy_raw_blocks_fatal_schema(monkeypatch, tmp_path):
 
 
 def test_R9_propose_raw_reports_schema_block(monkeypatch, tmp_path):
-    """propose_raw 对致命 schema 必须 node_gate_ok=False + will_block_on_schema=True。"""
+    """propose_raw 对致命 schema 必须 node_gate_ok=False 且直接 stage=schema_block 拒落。"""
     gw = _gw(monkeypatch, tmp_path)
     res = gw.propose_raw(_ha_missing_server_flow(), agent_id="t", target="staging",
                          run_gate=False)
     assert res.get("node_gate_ok") is False, f"致命 schema 下 node_gate_ok 应 False：{res}"
-    assert res.get("would_block_on_schema") is True, "应报 would_block_on_schema"
+    # R9 收口：致命 schema 直接 stage=schema_block 拒落（与 deploy_raw 同口径），
+    # 不再返回 would_block_on_schema 预览标志（A19「两套口径自相矛盾」已消除）。
+    assert res.get("ok") is False, res
+    assert res.get("stage") == "schema_block", f"应 stage=schema_block：{res}"
     _sb = res.get("schema_blocking") or []
     assert any(b.get("rule") == "S3" for b in _sb), f"致命 schema 应含 S3：{_sb}"
 

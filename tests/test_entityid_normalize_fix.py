@@ -107,15 +107,20 @@ def test_api_call_service_v5_domain_service_derives_action():
     assert n["domain"] == "light" and n["service"] == "turn_on", n
 
 
-def test_api_call_service_action_only_backfills_domain_service():
-    """只给 action 的 v7 写法 → 反向补 domain/service。"""
+def test_api_call_service_action_only_keeps_fields_untouched():
+    """只给 action 的 v7 写法 → **不再**反向补 domain/service。
+
+    v7 只需 action 字段，domain/service 可选；反向补全会改写用户手写节点的
+    原始字段（如「💾 存档」节点的空 domain/service 被补成 input_text/set_value），
+    属部署副作用，已由 _normalize_api_call_service 有意移除（见其 docstring）。
+    """
     n = {
         "id": "n_v7", "type": "api-call-service", "z": "f1",
         "server": "s1", "action": "switch.toggle",
         "entityId": ["switch.desk"],
     }
     NodeRedClient._normalize_api_call_service(n)
-    assert n["domain"] == "switch" and n["service"] == "toggle", n
+    assert "domain" not in n and "service" not in n, n
     assert n["action"] == "switch.toggle", n
     assert n["version"] == 7, n
 

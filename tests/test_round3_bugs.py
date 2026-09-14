@@ -114,14 +114,17 @@ def test_bug1_reachable_action_enriched():
 
 
 def test_bug1_coincidental_warning():
-    """状态重放前已满足、且动作不可达 → coincidental=True + 非阻塞告警，verdict 不翻（仍通过）。"""
+    """状态重放前已满足、且无针对该实体的服务被重放 → coincidental=True + 非阻塞告警，verdict 不翻（仍通过）。
+
+    注：动作必须【可达】才谈得上「服务未被重放」——若动作挂在未激活分支下，断言会走
+    branch_inactive 跳过（1416fd8 分支感知），那是另一条语义。故此处用「动作指向别的
+    实体」制造「期望实体未被任何服务触碰」的巧合命中，保持 Bug1 原契约覆盖。
+    """
     store = _vhass_with(*SEED_ON)
     r = GW.run_staging_gate(
         """场景: 巧合
-触发: binary_sensor.study_motion 有人
-取值: sensor.study_lux lux
-分支: $number(lux) < 10
-  动作: light.turn_on(light.study_main)
+触发: inject
+动作: light.turn_on(light.philips_cn_249518489_rwread_s_2_light)
 预期:
   light.study_main = on""",
         expected=[{"entity_id": "light.study_main", "state": "on"}],
@@ -136,14 +139,16 @@ def test_bug1_coincidental_warning():
 
 
 def test_bug1_require_change_fails_coincidence():
-    """require_change=True 时，巧合命中（状态已满足且无服务被重放）→ 真失败。"""
+    """require_change=True 时，巧合命中（状态已满足且无服务被重放）→ 真失败。
+
+    注：同 test_bug1_coincidental_warning，动作须可达（指向别的实体）才不会走
+    branch_inactive 跳过，从而真正触发 require_change 的真失败判定。
+    """
     store = _vhass_with(*SEED_ON)
     r = GW.run_staging_gate(
         """场景: 巧合-require_change
-触发: binary_sensor.study_motion 有人
-取值: sensor.study_lux lux
-分支: $number(lux) < 10
-  动作: light.turn_on(light.study_main)
+触发: inject
+动作: light.turn_on(light.philips_cn_249518489_rwread_s_2_light)
 预期:
   light.study_main = on""",
         expected=[{"entity_id": "light.study_main", "state": "on"}],

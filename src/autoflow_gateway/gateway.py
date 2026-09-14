@@ -6447,6 +6447,12 @@ class Gateway:
                 if _nd.get("type") == "api-call-service" and _nd["id"] not in active:
                     _dm, _sv, _tg, _dt = _ha_node_call(_nd)
                     for _t in _tg:
+                        # 【G3】恒假分支（编译器 R31 判定）的期望走下方专属 N/A 归因，
+                        # 不得被通用「未激活分支」跳过掩盖——否则「分支引用未声明字段」
+                        # 这一 DSL 硬伤的诊断信号会丢失（1416fd8 引入 inactive_effects
+                        # 时曾把 f2cca8b 的 N/A 归因静默覆盖，导致 A30 归因退化）。
+                        if _t in dead_ents:
+                            continue
                         _st, _why = _expected_state_for(_dm, _sv, _dt)
                         if _st is not None:
                             inactive_effects.add((_t, _st))

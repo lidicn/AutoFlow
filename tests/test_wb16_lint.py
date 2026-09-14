@@ -86,9 +86,10 @@ def test_r31_defined_field_ok():
 
 def test_r31_variable_field_ok():
     # 变量 亮度 经 change 写 flow.亮度；分支引用 亮度 应不报 R31
+    # change 规则须带 t:"set"（编译器 dsl_engine.py 发射形态；缺 t 属非法 NR 节点）
     flow = {"nodes": [
         {"id": "c1", "type": "change", "rules": [
-            {"p": "亮度", "pt": "flow", "to": "70", "tot": "num"}]},
+            {"t": "set", "p": "亮度", "pt": "flow", "to": "70", "tot": "num"}]},
         _switch("s1", [_jsonata_rule("$number(亮度) > 10"), {"t": "else", "v": "true", "vt": "jsonata"}],
                 [["a"], ["b"]]),
     ]}

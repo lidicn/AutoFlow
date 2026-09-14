@@ -11,7 +11,7 @@
   - 显式 entity_id/state 覆盖帧
   - 空帧 / 帧无 entity_id → 不写回 HA（#607）
   - 多帧取最新（BLOCKER-2：read 已倒序，直接正序 = 取最新）
-  - 超长帧被截断 → json.loads 失败跳过（并提示截断）
+  - 超长帧被截断 → _truncate 闭合 JSON 后仍可解析（7b9da9a），前部 entity_id/state 故仍可落状态
   - unavailable/unknown/未知状态 → fail-closed 拒绝，绝不静默 turn_off（RISK-3）
   - 显式指定实体时只认同实体帧，避免误用别的实体状态（NIT-4）
 """
@@ -163,13 +163,15 @@ def test_truncated_frame_skipped_but_valid_used(gw, stub):
                      "data": {"entity_id": "switch.desk"}, "agent_id": "cb"}]
 
 
-def test_only_truncated_frame_reports_truncation_hint(gw, stub):
+def test_truncated_frame_parses_and_applies(gw, stub):
+    """7b9da9a：_truncate 会闭合被截断的 JSON 使其仍可 json.loads（杜绝「截断后无法解析」）。
+    entity_id/state 位于 payload 前部、截断落在末尾 note 上，故该帧仍可正常落状态。"""
     long_payload = {"entity_id": "light.study", "state": "on", "note": "x" * 2500}
     _wire(gw, _seed(_make_bridge(), [long_payload]))
     res = gw.apply_state_from_debug(flow_id="f1", node_id="n0", agent_id="cb")
-    assert res.get("ok") is False
-    assert "截断" in res.get("error", "")
-    assert stub == []
+    assert res.get("ok") is True, res
+    assert stub == [{"domain": "light", "service": "turn_on",
+                     "data": {"entity_id": "light.study"}, "agent_id": "cb"}]
 
 
 # ───────────── RISK-3：状态 fail-closed ─────────────

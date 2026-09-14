@@ -220,6 +220,10 @@ def test_token_revoke_then_delete():
 def _webui_app(monkeypatch, tmpdir):
     """构建 WebUI ASGI（禁用 WebUI token → 本机放行，专测 ACP 令牌端点自身）。"""
     monkeypatch.delenv("AF_WEBUI_TOKEN", raising=False)
+    # AF_WEBUI_TOKEN_MODE 默认已是 password_only：无账号时对无身份请求返回 401，
+    # _is_loopback 放行只在 token_only / 未初始化且非 password_only 时才生效。
+    # 本测试只验 ACP 令牌端点自身逻辑，故显式切回 token_only（回滚模式）放行。
+    monkeypatch.setenv("AF_WEBUI_TOKEN_MODE", "token_only")
     from autoflow_gateway import webui as webui_mod
     from autoflow_gateway.config import GatewayConfig
 

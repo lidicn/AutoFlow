@@ -122,14 +122,16 @@ def test_p3f2_propose_verify_direction_consistent():
     """P3-F2：propose 路径(dsl=, 调用方期望) 与 verify 路径(flow=, auto 两分支期望)
     对同份条件流给出一致 verdict（都 pass），不再相互矛盾。"""
     flow = _compile(S5)
-    store = _vhass_with(*SEED_LIGHT)
     expected_auto, _ = _auto_expected_from_nodes(flow["nodes"])
+    # ★ 两次闸门必须各用独立 store：run_staging_gate 会把重放副作用写回 store，
+    #   复用同一 store 会让 verify 路径的 pre_state 变成 propose 已改成的态
+    #   （误判「前置已满足」→ 未充分验证），从而制造虚假的双闸不一致。
     # propose 路径：调用方只声明命中分支期望
     g_propose = GW.run_staging_gate(S5, [{"entity_id": "light.study_main", "state": "on"}],
-                                    vhass_store=store, branch_aware=True)
+                                    vhass_store=_vhass_with(*SEED_LIGHT), branch_aware=True)
     # verify 路径：自动提取两分支期望
     g_verify = GW.run_staging_gate(dsl="", expected=expected_auto, flow=flow,
-                                   vhass_store=store, branch_aware=True)
+                                   vhass_store=_vhass_with(*SEED_LIGHT), branch_aware=True)
     assert g_propose["passed"] == g_verify["passed"], \
         f"双闸方向矛盾：propose={g_propose['passed']} verify={g_verify['passed']}"
     assert g_propose["verdict"] == g_verify["verdict"], \

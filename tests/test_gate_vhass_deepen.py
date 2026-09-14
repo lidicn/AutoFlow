@@ -156,7 +156,8 @@ class TestG1NonToggleStateWriteback(unittest.TestCase):
                          "climate.set_hvac_mode")
 
     def test_gate_warns_non_silently_on_unmodeled(self):
-        """闸门层：有未建模服务时必须显式 warn + 归因，绝不静默 pass。"""
+        """闸门层：有未建模服务时必须显式 warn + 归因；A14 后 dry-run 非硬拦
+        （passed=True 但 fully_verified=False，交 e2e 实机确证），绝不静默 pass。"""
         st = _store()
         flow = {"nodes": [
             {"id": "trg", "type": "inject", "payload": "", "payloadType": "str",
@@ -170,11 +171,12 @@ class TestG1NonToggleStateWriteback(unittest.TestCase):
             vhass_store=st, flow=flow)
         self.assertTrue(any("未建模" in w for w in r.get("warnings", [])),
                         f"未建模服务必须显式告警，实得 warnings={r.get('warnings')}")
-        self.assertFalse(r["passed"], "未建模 → 后置无法验证，不得报通过")
-        fail = r["failures"][0]
-        self.assertEqual(fail.get("unmodeled_service"), "climate.set_aux_heat",
-                         "失败项须归因到未建模服务，而不是笼统『状态不对』")
-        self.assertIn("未建模", fail.get("hint", ""))
+        # A14：dry-run 下未建模服务副作用未知 → 非硬拦，但诚实降级为「未充分验证」
+        self.assertTrue(r["passed"], "A14：dry-run 下未建模服务不再硬拦")
+        self.assertFalse(r["fully_verified"], "未建模 → 后置无法验证，不得宣称充分验证")
+        a = r["assertions"][0]
+        self.assertEqual(a.get("unmodeled_service"), "climate.set_aux_heat",
+                         "断言项须归因到未建模服务，而不是笼统『状态不对』")
 
 
 # ═══════════════ G3：undefined-field 分支不得被保守视为命中 ═══════════════
