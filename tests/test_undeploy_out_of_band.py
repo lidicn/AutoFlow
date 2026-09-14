@@ -10,7 +10,7 @@
 覆盖三种带外删除形态：
   A. 整个 tab 被手动删（get_flow 抛错 → already_gone）。
   B. tab 残留但网关节点被手动删（活 flow 无本网关节点 → 视为 already_gone）。
-  C. NR 删除调用本身失败（如半残/权限）→ 账本仍清理，undeploy 不报错。
+  C. NR 删除调用本身失败（如半残/权限）→ fail-atomic：不清账本 + 报明确错误，可重试。
   D. 带外删后 deploy_proposal 可重部署（自愈闭环）。
 """
 import os
@@ -124,6 +124,10 @@ GW = G.Gateway(
 )
 GW.state.add_mapping("书房主灯", "light.study_main")
 GW.state.add_mapping("light.study_main", "light.study_main")
+# DSL 触发实体为 entity_id 形态；_check_entities_known（D36）要求其命中
+# device_catalog 或 entity_mapping，否则判 R_unknown_entity。测试未 sync 设备目录，
+# 故须显式登记（与 test_deploy_proposal 同做法）。
+GW.state.add_mapping("binary_sensor.study_door", "binary_sensor.study_door")
 
 
 def _vhass():
@@ -199,19 +203,21 @@ def test_undeploy_partial_node_delete():
     print("  ✓ B. undeploy：网关节点被手动删（tab 残余）→ already_gone，不报 NR 删除失败")
 
 
-def test_undeploy_nr_delete_fails_but_ledger_cleared():
-    """C. NR 删除调用本身失败（半残/权限）→ 账本仍清理，undeploy 不硬报错。"""
+def test_undeploy_nr_delete_fails_keeps_ledger_fail_atomic():
+    """C. NR 删除调用本身失败（半残/权限）→ fail-atomic：不清账本 + 报明确错误，
+    保持注册表与 NR 实际状态一致（修复 NR 侧后可重试撤回）。"""
     _reset()
     pid, fid = _propose_and_deploy()
     GW.nr._backend.delete_always_fail = True  # 模拟 NR 删除调用永远失败
     r = GW.undeploy(fid)
-    assert r["ok"], r
-    assert r.get("nr_warning"), r  # 应带 NR 侧警告
+    assert r["ok"] is False, r
+    assert r["action"] == "deleted_tab", r
+    assert "NR 侧撤回失败" in r["error"], r
+    # fail-atomic：账本保留（不孤儿化）、提案仍标记已部署，可修复后重试撤回
+    assert fid in GW.state.get_flow_catalog().get("flows", {}), "失败时不应清账本"
     ps = ProposalStore(cfg)
-    assert ps.get(pid).deployed_flow_id is None
-    # 账本已清（即便 NR 侧 flow 仍在，自愈时 deploy_proposal 会覆盖）
-    assert fid not in GW.state.get_flow_catalog().get("flows", {})
-    print("  ✓ C. undeploy：NR 删除失败 → 仍清账本 + 返回 ok（不卡死）")
+    assert ps.get(pid).deployed_flow_id == fid
+    print("  ✓ C. undeploy：NR 删除失败 → fail-atomic 保账本 + 报明确错误（不孤儿化）")
 
 
 def test_redeploy_after_out_of_band_delete():
@@ -232,7 +238,7 @@ def test_redeploy_after_out_of_band_delete():
 def _run():
     test_undeploy_after_out_of_band_tab_delete()
     test_undeploy_partial_node_delete()
-    test_undeploy_nr_delete_fails_but_ledger_cleared()
+    test_undeploy_nr_delete_fails_keeps_ledger_fail_atomic()
     test_redeploy_after_out_of_band_delete()
     print("\nundeploy 带外删除回归测试全部通过 ✅ (4/4)")
 

@@ -1,13 +1,16 @@
 """Test apply_flow / apply_rollback（WB1-F / #694）：apply 闭环编排核心。
 
-覆盖铁律：
-  - mode A/C（改 flow，高风险）：未批准 **只请示不落地**（pending + decision_id + 回滚点），
-    批准（auto_approve=True）才走 modify_flow 写回；
+覆盖铁律（自愈闭环 Self-Healing Loop，236f173 起）：
+  - mode A/C（改 flow，高风险）：**默认自动写回**，不进人审闸。先 snapshot 落回滚点，
+    再做 per-(agent, flow) 滑动窗口失败预算检查（selfheal_budget，默认 3），通过后直接
+    modify_flow 写回（gate=selfheal_auto_write）；预算耗尽即停并转报告/人工
+    （stage=selfheal_budget_exhausted），防自动修复死循环。
+  - `auto_approve` 参数**已废弃**（保留签名仅为 MCP 调用方兼容），传与不传行为一致。
   - mode B（落状态，低风险）：本层 audit auto-pass，透传 commit_ha_service（其自带确认闸），
     全程不碰 flow；
   - #607：目标 tab 禁用态 → tab_disabled + 显式告警（不阻塞）；
-  - 回滚：apply_rollback(trace_id) 从 apply 前快照还原，同样过决策闸，拒绝用空 flow 覆盖线上；
-  - 审计：同一 trace_id 两阶段（pending → approved）复用同一回滚点，轨迹可追。
+  - 回滚：apply_rollback(trace_id) 从 apply 前快照还原，同样恒自动执行、计入同一自愈预算，
+    拒绝用空 flow 覆盖线上；同一 trace_id 复用**首个非空**回滚点。
 """
 import json
 import os
@@ -104,32 +107,47 @@ def test_mode_a_requires_flow_id(gw, stub):
     assert r["ok"] is False and "flow_id" in r["error"]
 
 
-# ───────────── A/C 段：决策闸两阶段 ─────────────
+# ───────────── A/C 段：自愈闭环自动写回 ─────────────
 
-def test_mode_a_unapproved_only_requests_decision(gw, stub):
+def test_mode_a_auto_writes_with_snapshot_no_decision(gw, stub):
+    """自愈闭环：A/C 改流恒自动写回（先落回滚点），不再走人审决策闸。"""
     r = gw.apply_flow("f_apply", {"dsl": "场景: 修正版", "reason": "观测到灯没亮"},
                       mode="A", agent_id="wb1")
     assert r["ok"] is True
-    assert r["pending"] is True and r["applied"] is False
-    assert r["decision_id"] == "dec-1"
-    assert r["stage"] == "decision_gate" and r["risk"] == "high"
+    assert r["applied"] is True and r["pending"] is False
+    assert r["stage"] == "modify_flow" and r["gate"] == "selfheal_auto_write"
+    assert r["risk"] == "high"
     assert r["snapshot_path"] and os.path.exists(r["snapshot_path"])
-    # 关键：未批准时**一个字节都不能写回**
-    assert stub["modify"] == []
-    assert len(stub["decision"]) == 1
-    q = stub["decision"][0]["question"]
-    assert "观测到灯没亮" in q and r["trace_id"] in q
-    assert stub["decision"][0]["source"] == "wb1"
+    # 恒自动写回：直接 modify_flow，且不请示决策
+    assert len(stub["modify"]) == 1
+    assert stub["modify"][0]["dsl"] == "场景: 修正版"
+    assert stub["decision"] == []
 
 
-def test_mode_a_approved_applies(gw, stub):
+def test_mode_a_auto_approve_flag_is_deprecated_noop(gw, stub):
+    """auto_approve 已废弃（恒自动写回）：旧调用方传 True 应被接受且行为一致。"""
     r = gw.apply_flow("f_apply", {"dsl": "场景: 修正版", "reason": "r"},
                       mode="A", agent_id="wb1", auto_approve=True)
     assert r["ok"] is True and r["applied"] is True and r["pending"] is False
-    assert r["stage"] == "modify_flow" and r["gate"] == "approved"
+    assert r["stage"] == "modify_flow" and r["gate"] == "selfheal_auto_write"
     assert len(stub["modify"]) == 1
-    assert stub["modify"][0]["dsl"] == "场景: 修正版"
-    assert stub["decision"] == []          # 已批准不再重复请示
+    assert stub["decision"] == []          # 废弃参数不再触发决策闸
+
+
+def test_selfheal_budget_exhausted_blocks_further_writes(gw, stub, monkeypatch):
+    """防死循环（fail-safe）：per-(agent, flow) 失败预算耗尽 → 停止写回、转人工。"""
+    monkeypatch.setattr(gwmod, "load_feature_flags", lambda cfg: {})
+    monkeypatch.setenv("AUTOFLLOW_SELFHEAL_BUDGET", "3")
+    monkeypatch.setattr(gw, "modify_flow",
+                        lambda *a, **k: {"ok": False, "error": "反复失败"})
+    patches = [{"match": {"id": "n2"}, "set": {"name": "x"}}]
+    for _ in range(3):                     # 3 次失败 → 记满预算
+        gw.apply_flow("f_apply", {"node_patches": patches}, mode="C", agent_id="cb")
+    r = gw.apply_flow("f_apply", {"node_patches": patches}, mode="C", agent_id="cb")
+    assert r["ok"] is False and r["applied"] is False
+    assert r["stage"] == "selfheal_budget_exhausted"
+    assert r["retry_budget"] == 3
+    assert r["failed_attempts_in_window"] == 3
 
 
 def test_mode_c_node_patches_applied(gw, stub):
@@ -198,19 +216,21 @@ def test_mode_b_commit_failure_surfaces(gw, stub, monkeypatch):
     assert r["ok"] is False and "爆炸半径" in r["error"]
 
 
-# ───────────── 审计轨迹 + 两阶段复用回滚点 ─────────────
+# ───────────── 审计轨迹 + 回滚点复用 ─────────────
 
-def test_trace_persists_two_phases_same_rollback_point(gw, stub):
+def test_trace_reuses_first_rollback_point_across_writes(gw, stub):
+    """同一 trace_id 多次写回时，顶层回滚点取**首个非空**（不被后写覆盖）。"""
     p1 = gw.apply_flow("f_apply", {"dsl": "场景: v2", "reason": "r"}, mode="A")
     tid, snap = p1["trace_id"], p1["snapshot_path"]
-    p2 = gw.apply_flow("f_apply", {"dsl": "场景: v2", "reason": "r"}, mode="A",
-                       auto_approve=True, trace_id=tid)
+    assert p1["applied"] is True
+    p2 = gw.apply_flow("f_apply", {"dsl": "场景: v3", "reason": "r"}, mode="A",
+                       trace_id=tid)
     assert p2["trace_id"] == tid and p2["applied"] is True
     tr = gwmod._read_apply_trace(tid)
     assert tr is not None
     assert len(tr["events"]) == 2
-    assert tr["events"][0]["pending"] is True and tr["events"][1]["applied"] is True
-    # 顶层回滚点取首个非空 → 仍指向 apply 前那一份
+    assert tr["events"][0]["applied"] is True and tr["events"][1]["applied"] is True
+    # 顶层回滚点取首个非空 → 仍指向第一次写回前的快照
     assert tr["snapshot_path"] == snap
     assert tr["flow_id"] == "f_apply"
 
@@ -222,20 +242,16 @@ def test_rollback_unknown_trace(gw, stub):
     assert r["ok"] is False and "找不到" in r["error"]
 
 
-def test_rollback_requires_decision_then_restores(gw, stub):
+def test_rollback_auto_restores_without_decision(gw, stub):
+    """自愈闭环：回滚恒自动执行（不请示），写回快照里的原始节点。"""
     a = gw.apply_flow("f_apply", {"node_patches": [{"match": {"id": "n2"},
                                                     "set": {"name": "v2"}}],
                                   "reason": "热补丁"},
-                      mode="C", auto_approve=True)
+                      mode="C", agent_id="wb1")
     tid = a["trace_id"]
-    # 第一步：只请示，不还原
-    r1 = gw.apply_rollback(tid, agent_id="wb1")
-    assert r1["ok"] is True and r1["pending"] is True and r1["restored"] is False
-    assert r1["decision_id"]
-    assert stub["deploy"] == []
-    # 第二步：批准后真还原，写回的是快照里的原始节点
-    r2 = gw.apply_rollback(tid, agent_id="wb1", auto_approve=True)
-    assert r2["ok"] is True and r2["restored"] is True
+    r = gw.apply_rollback(tid, agent_id="wb1")
+    assert r["ok"] is True and r["restored"] is True and r["pending"] is False
+    assert stub["decision"] == []          # 自愈闭环：回滚不再走人审决策闸
     assert len(stub["deploy"]) == 1
     dep = stub["deploy"][0]
     assert dep["flow_id"] == "f_apply" and dep["force"] is True
@@ -278,13 +294,13 @@ def test_mode_c_patch_nomatch_surfaces_failclosed(gw, stub, monkeypatch):
     assert stub["deploy"] == [] and stub["modify"] == []
 
 
-def test_apply_pending_recorded_in_trace(gw, stub):
-    """审计完整性：未批准阶段即写入 trace（pending:true），供 autoflow_get_trace 独立复核。"""
+def test_apply_write_recorded_in_trace(gw, stub):
+    """审计完整性：自愈自动写回后 trace 即刻落痕（applied:true），供 autoflow_get_trace 复核。"""
     r = gw.apply_flow("f_apply", {"dsl": "场景: v2", "reason": "r"}, mode="A")
     tr = gwmod._read_apply_trace(r["trace_id"])
     assert tr is not None
-    assert tr["events"][0]["pending"] is True
-    assert tr["events"][0]["applied"] is False
+    assert tr["events"][0]["applied"] is True
+    assert tr["events"][0]["gate"] == "selfheal_auto_write"
 
 
 def _write_empty(tmp_path):

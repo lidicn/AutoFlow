@@ -43,9 +43,9 @@ class FakeNR:
             "nodes": flow.get("nodes", []),
         }
         return {"id": fid, "created": created, "raw": {"ok": True}}
-    def update_flow(self, fid, flow, force=False):
+    def update_flow(self, fid, flow, force=False, allow_prod=False):
         return self.create_or_update_flow(fid, flow, force=force)
-    def delete_flow(self, fid, force=False):
+    def delete_flow(self, fid, force=False, allow_prod=False):
         self._flows.pop(fid, None)
         return {"ok": True}
     def get_flow(self, fid):
