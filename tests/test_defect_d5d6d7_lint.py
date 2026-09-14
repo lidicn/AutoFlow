@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
 
-from autoflow_gateway.dsl_engine import compile_dsl
+from autoflow_gateway.dsl_engine import DSLError, compile_dsl
 from autoflow_gateway.flow_linter import lint_flow
 
 
@@ -167,7 +167,8 @@ def test_D7_existing_function_field_ok():
 
 
 def test_D7_bare_missing_field_still_reported():
-    """回归：裸字段引用（powr）仍报 R31。"""
+    """回归：裸标识符误写（powr）在 WB85（d7872de）后由解析层 fail-closed 拦截
+    （C_LABEL_UNDEFINED），早于 lint 阶段——误写仍被捕获，只是机制更靠前。"""
     dsl = (
         "场景: D7c\n"
         "触发: inject\n"
@@ -175,8 +176,12 @@ def test_D7_bare_missing_field_still_reported():
         "分支: powr > 0\n"
         "  动作: light.turn_on(light.A)\n"
     )
-    r31 = _r31(compile_dsl(dsl))
-    assert r31 and "powr" in r31[0]["message"], "裸字段误写仍须报 R31"
+    try:
+        compile_dsl(dsl)
+        assert False, "裸标识符误写应被 fail-closed 拦截（C_LABEL_UNDEFINED）"
+    except DSLError as e:
+        assert getattr(e, "code", None) == "C_LABEL_UNDEFINED", \
+            f"应以 C_LABEL_UNDEFINED 拦截，实际 {getattr(e, 'code', None)}"
 
 
 def test_D7_nested_path_leaf():

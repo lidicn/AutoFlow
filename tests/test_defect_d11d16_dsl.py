@@ -26,7 +26,7 @@ def _nodes(dsl: str) -> list:
 # ── D11：子流程参数裸变量名 ───────────────────────────────────────────────
 
 def test_D11_bare_var_ref_promoted():
-    """子流程参数 text=播报文本（无反引号）→ 自动识别为变量引用 flow.播报文本。"""
+    """子流程参数 text=播报文本（无反引号）→ 自动识别为变量引用（F11/89a616a 后为 $flowContext）。"""
     dsl = (
         "场景: D11\n"
         "触发: inject\n"
@@ -36,7 +36,7 @@ def test_D11_bare_var_ref_promoted():
     ch = [n for n in _nodes(dsl)
           if n["type"] == "change" and "入参" in (n.get("name") or "")][0]
     s = str(ch["rules"])
-    assert "flow.播报文本" in s, f"裸变量名应绑定 flow 上下文：{s}"
+    assert "$flowContext('播报文本')" in s, f"裸变量名应绑定 flow 上下文：{s}"
     assert '"to": "播报文本"' not in s, "变量名不得被字面化"
 
 
@@ -50,7 +50,7 @@ def test_D11_backtick_still_works():
     )
     ch = [n for n in _nodes(dsl)
           if n["type"] == "change" and "入参" in (n.get("name") or "")][0]
-    assert "flow.播报文本" in str(ch["rules"])
+    assert "$flowContext('播报文本')" in str(ch["rules"])
 
 
 def test_D11_literal_value_unchanged():

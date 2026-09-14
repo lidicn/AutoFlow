@@ -128,11 +128,11 @@ def test_new_templates_render_correctly():
                              "room": "客厅", "delay": "60"})
     assert "60 秒" in out
 
-    # 多条件亮度开关
+    # 多条件亮度开关（模板已新增必填 lux：取值实体）
     out = T.render_template("conditional_brightness",
                             {"sensor": "binary_sensor.study_motion",
                              "light": "light.study_main",
-                             "room": "书房"})
+                             "room": "书房", "lux": "sensor.study_lux"})
     assert "binary_sensor.study_motion 有人" in out
     assert "light.turn_on(light.study_main" in out
     assert "分支" in out
@@ -164,7 +164,7 @@ def test_new_templates_compile():
     dsl = T.render_template("conditional_brightness",
                             {"sensor": "binary_sensor.study_motion",
                              "light": "light.study_main",
-                             "room": "书房"})
+                             "room": "书房", "lux": "sensor.study_lux"})
     flow = dsl_engine.compile_dsl(dsl, target="staging")
     assert flow["label"] == "书房亮度自适应开灯"
     assert any(n["type"] == "switch" for n in flow["nodes"])
