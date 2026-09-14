@@ -40,7 +40,7 @@
 | 版本 | 主题 | 档位 | 关键交付 | 状态 |
 |---|---|---|---|---|
 | **v2.1.0** | 收口稳定 | 共用 | 94 测试红清帐 / MA 消费点 / 守卫测试绿 / 安全不变量固化进闸 | 进行中 |
-| **v2.2.0** | 双档成型 | Core+Pro | Core：手术刀编辑+diff+多 flow 安全部署；Pro：引导式 DSL+极简批准；共用 verify_flow 核 | 待排期 |
+| **v2.2.0** | 双档成型 | Core+Pro | Core：手术刀编辑+diff+多 flow 安全部署；Pro：引导式 DSL+极简批准；共用 verify_flow 核 | 进行中（Core 档先行，2026-09-14 起；#7/#9 引擎已落地） |
 | **v2.3.0** | 可信闭环 | 共用 | 快照/回滚稳定化；Arena 转正回归台；防假绿四件套+幽灵实体固化 | 待排期 |
 | **v3.0.0** | 平台成熟 | 共用 | 最小稳定工具面(Core/Pro MCP+UI)；部署/验证/回滚审计；安全扩展接口(预留关) | 待排期 |
 | **v4.0.0** | 生态共存 | 跨 | AutoForge→AutoFlow 交接协议（导出+验证+部署）；明确非重叠 | **可选/延后** |
@@ -62,7 +62,7 @@
 | # | 项 | 内容 | 验收门 | 前置 |
 |---|---|---|---|---|
 | 4 | ✅ **memory-agent 联动消费点**（commit b359cd6，2026-09-14 复核达标） | 新增 `acp_client.py`(+129)/`arena.py`(+96)；读侧 `fetch_memory_inspiration`（snapshot 首选 / ACP 兜底），写侧 `_push_memory_report`（含 `used_memory_tools` 回证） | ✅ **22 passed / 0 失败**（`test_arena_memory_channel.py` + `test_arena_memory_linkage.py`）；读侧用例齐备，`test_push_report_success_uses_fully_verified` 断言 `used_memory_tools==["get_arena_inspiration"]` 证明**真实读过**（非只写不读） | ~~ACP WebUI 前端落地~~ → **该前置已不成立**：实现走 `acp_client` 服务端 + arena 读接口，不依赖 WebUI 页面 |
-| 5 | **历史测试红清帐**（进行中） | 期望漂移修复专项（修测试不改产品）；完成后 A/B 基线克隆回归退役 | 全量回归 failed=0 或每条失败附归属注释 | 无 |
+| 5 | ✅ **历史测试红清帐**（2026-09-14 收官） | 期望漂移修复专项（修测试不改产品）；完成后 A/B 基线克隆回归退役 | ✅ 全量 1695 passed / 1 skipped / 0 failed（基线实测 92 红 → 0；V-F1~F4 零信任闸守卫 42 passed 同绿） | 无 |
 | 5.1 | ✅ **跨文件环境污染根因**（2026-09-14） | `tests/test_gateway.py:262` 的 `make_gateway("prod")` 设 `AUTOFLLOW_ENV=prod` 后**不还原**，毒化后续全部 NR 写 → 与产品无关的假红。修法：`tests/conftest.py` 加 autouse 夹具 `_isolate_global_env`，对 `AUTOFLLOW_ENV/NR_PROD/AUTOFLLOW_DATA_DIR` 快照+用例后还原 | ✅ 污染源+受害者同会话 **57 passed / 0 失败**；全量 **92 红 → 85 红**（passed 1605→1612），**零产品代码改动** | 无 |
 | 5.2 | ✅ **doubao spec 移除后的测试漂移**（2026-09-14） | `cb43830`+`0f4940a` 按 **P0 决策移除 doubao 4 条 spec**（chat/say/image/vision，能力外置 doubao-butler；`tts_speak` 亦于 `77c1b28` 移出网关），但 `test_api_specs.py` 仍断言 `llm_doubao_*` → **7 红** | ✅ 同步 `ALL_SPECS`/`NR_FLOW_SPECS`；删除 3 个锁定已外置能力的用例；tab 节点数按**实测** 24→**15**（2 入口）。**11 passed / 0 失败**。⚠️已在文件内注明"勿凭旧断言把 doubao 加回" | 无 |
 | 5.3 | ✅ **WebUI 鉴权后的测试漂移**（2026-09-14） | 账号密码改造后默认 `password_only`，未认证请求一律 401（含本机 TestClient）→ `test_connections_settings.py` **6 红**；另 `memory` 连接组由 `b359cd6` 新增，期望列表过时 | ✅ 沿用代码库既有配方（`test_webui_settings.py`）：建 app 前设 `AF_WEBUI_TOKEN_MODE=token_only`，tearDown 备份还原；期望补 `memory`。**24 passed / 0 失败** | 无 |
@@ -76,9 +76,9 @@
 **Core 档（极客）**
 | # | 项 | 内容 | 验收门 |
 |---|---|---|---|
-| 7 | **手术刀式单节点/单 flow 编辑** | `nr_client` 支持按 node_id / flow_id 增量修改，**不改兄弟节点**；改前自动 diff 预览 + 节点数/结构守卫 | ✅ 改 1 节点后兄弟节点数 0 变化；diff 可读 |
+| 7 | 🔧 **手术刀式单节点/单 flow 编辑**（引擎✅ 2026-09-14） | `nr_client.modify_node_field` 支持结构键守卫（禁改 id/type/z/wires/inputs/outputs）+ `dry_run` diff 预览 + 兄弟节点数 0 变化断言（fail-closed）；连线走 `add_wire`/`remove_wire`。**待续**：WebUI/MCP 工具面暴露（人批准路径，agent 不写非 `af_*` 流） | ✅ 引擎单测 `test_nr_client_core_surgical.py` 9 例全绿（守卫/diff/兄弟数/节点缺失）；验收门「兄弟节点数 0 变化 + diff 可读」已满足 |
 | 8 | **多 flow 安全部署** | 一次部署多个 flow，逐个 node-count/structural guard；任一个不达标整体回退，不半部署 | ✅ 部分失败时已部署部分可一键回滚到部署前快照 |
-| 9 | **只读 inventory 增强** | 列出 tab/flow/node + 类型 + 是否被 `af_*` 拥有 + 风险标注；无写权限 | ✅ 列得全、标注准、只读 |
+| 9 | 🔧 **只读 inventory 增强**（引擎✅ 2026-09-14） | `nr_client.get_inventory()` 纯 GET 清点 tabs→nodes，含 `owned_by_af`（label `af_` 前缀）+ 风险标注（`unknown_node_type` / `protected_flow`）；零写路径。**待续**：WebUI 只读面板暴露 | ✅ 引擎单测 `test_nr_client_core_surgical.py` 3 例全绿（结构/归属/受保护/纯只读）；验收门「列得全、标注准、只读」已满足 |
 
 **Pro 档（小白）**
 | # | 项 | 内容 | 验收门 |
@@ -146,7 +146,7 @@
 
 | 阶段 | 范围 | 负责人 | 里程碑/验收闸门 | 依赖 |
 |---|---|---|---|---|
-| **A** | v2.1.0 收口 | 本对话（维护） | 94 红清帐 + MA 消费点真实读 + 零信任闸守卫全绿 | ACP WebUI 前端 |
+| **A** | ✅ v2.1.0 收口 | 本对话（维护） | 92 红清帐(1695 passed/1 skipped/0 failed) + MA 消费点真实读(22 passed) + 零信任闸守卫全绿(42 passed) | —（已完成） |
 | **B** | v2.2.0 双档 | 本对话 | Core 手术刀编辑+多 flow 安全部署；Pro 引导 UX；共用 verify_flow 核 | A 完成 |
 | **C** | v2.3.0 闭环 | 本对话 | 快照/回滚稳定；Arena 回归台；防假绿固化 | B 完成 |
 | **D** | v3.0.0 成熟 | 本对话 | 最小工具面；审计；扩展接口预留 | C 完成 |

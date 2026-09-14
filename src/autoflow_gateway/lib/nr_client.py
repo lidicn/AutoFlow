@@ -59,6 +59,10 @@ def _log_operation(action: str, details: str):
 
 NR_CLIENT_VERSION = "2.1.7"
 
+# 手术刀编辑（modify_node_field）禁止改的结构键：改这些等于换节点身份/
+# 重排连线，已超出"编辑字段"范畴（连线请用 add_wire/remove_wire，身份重建请整 flow）。
+_SURGICAL_FORBIDDEN_KEYS = frozenset({"id", "type", "z", "wires", "inputs", "outputs"})
+
 # 默认权威源位置（可被 NR_CLIENT_AUTHORITY 环境变量或运行时注册表覆盖）。
 # 指向本文件自身（vendored 副本即权威源），不再硬编码个人路径。
 NR_CLIENT_AUTHORITY_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nr_client.py")
@@ -321,6 +325,65 @@ class NodeRedClient:
             }
         
         return flow
+
+    def get_inventory(self, protected_flow_ids: Optional[set] = None) -> Dict[str, Any]:
+        """只读清点（Core 档 #9）：tabs→nodes 树，含 af_* 归属 + 风险标注。
+
+        纯 GET，无任何写路径。返回结构：
+          {
+            "tab_count", "node_count",
+            "tabs": [{
+              "id", "label", "owned_by_af"(label 以 af_ 开头),
+              "node_count", "risks":[...],
+              "nodes":[{"id","type","name","risks":[...]}]
+            }]
+          }
+        风险标注：
+          - "unknown_node_type"：节点 type 不在目标 NR 已装类型集（部署即静默丢 msg）
+          - "protected_flow"：tab 在 protected_flow_ids 内（受安全不变量保护，agent 不可写）
+        非 af_ 的用户流本身不标风险——只是归属性说明，供 Core 极客辨别哪些能动。
+        """
+        flows = self.list_flows()  # GET /flows
+        tabs = [f for f in flows if f.get("type") == "tab"]
+        nodes = [f for f in flows if f.get("type") != "tab"]
+        installed = self.get_installed_node_types()  # set，永不为空
+        protected = protected_flow_ids or set()
+
+        tree = []
+        for tab in tabs:
+            tab_id = tab.get("id")
+            label = tab.get("label") or ""
+            tab_nodes = [n for n in nodes if n.get("z") == tab_id]
+            tab_risks = []
+            node_entries = []
+            for n in tab_nodes:
+                ntype = n.get("type")
+                nrisks = []
+                if ntype not in installed:
+                    nrisks.append("unknown_node_type")
+                node_entries.append({
+                    "id": n.get("id"),
+                    "type": ntype,
+                    "name": n.get("name") or ntype,
+                    "risks": nrisks,
+                })
+            owned_by_af = label.startswith("af_")
+            if tab_id in protected:
+                tab_risks.append("protected_flow")
+            tree.append({
+                "id": tab_id,
+                "label": label,
+                "owned_by_af": owned_by_af,
+                "node_count": len(tab_nodes),
+                "risks": tab_risks,
+                "nodes": node_entries,
+            })
+
+        return {
+            "tab_count": len(tabs),
+            "node_count": len(nodes),
+            "tabs": tree,
+        }
 
     def update_flow(self, flow_id: str, flow_data: Dict, 
                     force: bool = False, dry_run: bool = False,
@@ -1637,19 +1700,56 @@ class NodeRedClient:
         raise RuntimeError(f"Node {node_id} not found in flow {flow_id}")
 
     def modify_node_field(self, flow_id: str, node_id: str,
-                           field_updates: Dict) -> Dict:
-        """修改节点任意字段并部署"""
+                           field_updates: Dict, *,
+                           dry_run: bool = False,
+                           allow_structural: bool = False) -> Dict:
+        """手术刀式修改单节点字段并部署（Core 档 #7）。
+
+        守卫：
+          - 禁改结构键（id/type/z/wires/inputs/outputs），防误换节点身份或连线；
+            改连线请用 add_wire/remove_wire。allow_structural=True 可绕过（危险，仅内部用）。
+          - dry_run=True 仅返回字段级 diff，不写、不部署（供 Core 极客预览）。
+          - 部署前断言兄弟节点数 0 变化（defense-in-depth，fail-closed）。
+        """
+        if not allow_structural:
+            bad = set(field_updates) & _SURGICAL_FORBIDDEN_KEYS
+            if bad:
+                raise ValueError(
+                    f"⚠️ 手术刀编辑禁止改结构键 {sorted(bad)}（连线用 add_wire/remove_wire；"
+                    f"换身份请整 flow 重建）。如需放开请显式 allow_structural=True。"
+                )
         flow = self.get_flow(flow_id)
+        old_count = len(flow.get("nodes", []))
         for n in flow.get("nodes", []):
             if n["id"] == node_id:
+                old = {k: n.get(k) for k in field_updates}
+                diff = {k: {"old": old[k], "new": field_updates[k]} for k in field_updates}
+                if dry_run:
+                    return {
+                        "dry_run": True,
+                        "node_id": node_id,
+                        "node_count": old_count,
+                        "diff": diff,
+                    }
                 n.update(field_updates)
                 break
         else:
             raise RuntimeError(f"Node {node_id} not found in flow {flow_id}")
-        
+
+        # 防御：手术刀编辑不得增删节点，兄弟节点数必须 0 变化
         result = self.update_flow(flow_id, flow)
-        _log_operation("MODIFY_NODE", f"flow={flow_id} | node={node_id} | fields={list(field_updates.keys())}")
-        return result
+        new_count = len(flow.get("nodes", []))
+        if new_count != old_count:
+            raise RuntimeError(
+                f"⚠️ 手术刀编辑异常：节点数 {old_count} → {new_count}，已拒绝写入（请人工核查 NR）"
+            )
+        _log_operation("MODIFY_NODE", f"flow={flow_id} | node={node_id} | fields={list(field_updates.keys())} | count={new_count}")
+        return {
+            "success": True,
+            "node_id": node_id,
+            "node_count": new_count,
+            "diff": diff,
+        }
 
     def add_nodes(self, flow_id: str, new_nodes: List[Dict]) -> Dict:
         """向 flow 追加新节点"""

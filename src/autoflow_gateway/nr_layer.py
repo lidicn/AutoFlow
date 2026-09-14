@@ -106,8 +106,9 @@ class NRLayer:
             subflow_id, name, in_ports, out_ports, nodes,
             info=info, category=category, env=env, allow_prod=allow_prod)
 
-    def modify_node_field(self, flow_id: str, node_id: str, fields: Dict) -> Dict:
-        return self.client.modify_node_field(flow_id, node_id, fields)
+    def modify_node_field(self, flow_id: str, node_id: str, fields: Dict,
+                           dry_run: bool = False) -> Dict:
+        return self.client.modify_node_field(flow_id, node_id, fields, dry_run=dry_run)
 
     def modify_function_code(self, flow_id: str, node_id: str, code: str, name: str = None) -> Dict:
         return self.client.modify_function_code(flow_id, node_id, code, name=name)

@@ -102,6 +102,34 @@
 | **F-P2-02（P2，已归因，待修）** | **`passed=True` 但 `fv=False` 高频再现；根因 = 分支条件用「对象属性」写法读实体态 → 重放时不可求值 → 分支判未激活 → 断言被跳过**（B20/B22 族新实例） | P2 42 条记录中 **13 条** `ok=True` 却 `fv=False`。**已取到 gate 原文归因**（复现 `门开即关书房台灯`）：flow 写 `分支: light.philips_cn_249518489_rwread_s_2_light.state = \"on\"` → 重放 `0 个 HA 意图`、断言 `[跳过] 该后置条件来自未激活分支` → `verdict=未充分验证`。**不是种子问题**：该题期望 `off`、种子（同步自真实 HA 当前态）为 `on`，F-R8-04 翻反态后仍为 `on`（恰好一致）；问题在条件表达式用了 `<entity>.state` 属性写法，vhass 求值器不认。**注意**：此跳过是 P3-F1/F2 的**设计行为**（非失败），但 flow 与期望方向其实一致、只是写法导致不可求值 → 属**假阴性**（把本可通过的判为未验证） | 负责人复现 `_verify_flow` 取 gate 原文（`pr_002cccb976be`）| 两个方向择一：① 引导层（DSL 规范/帮助）明确「分支判断实体状态须用 `取值:` 先读进 msg，再 `分支: msg.x = \"on\"`」，禁止 `<entity>.state` 写法；② 闸门侧对 `<entity>.state` 形式做求值支持。**归因已完成**，在修好前不得声称 F-R8-04 已完全解决 B20 族 |
 | **F-P2-03（P3，观察）** | **memory-agent 灵感内容是「设备洞察」而非「任务经验」，与 ROADMAP #4 目标错位** | `get_arena_inspiration` 返回形如「设备1 过去 1 天触发 136 次，活跃于 15:00/20:00/12:00」的**设备活跃度统计**，而 A/B 需要的是「上次这类题踩了什么坑」。P2 实测：B 臂 prompt 长度 +65%（1977→3264 字符）承载这些发散信息，B 臂因此在光照题上写出「定时 15:00 开灯」式无关内容。**非 bug，是产品定位问题** | P2 A/B（§3.2）+ 灵感原文 | 产品决策：灵感源是否纳入**任务级经验**（失败模式 / 有效 DSL 模式）。ROADMAP #4 验收标准建议从「有无读取行为」升级为「读取内容是否提升首次通过率」（本轮 0%→18.2%，方向对但 n=11 不足） |
 | **F-P2-04（P3）** | **`否则:` 空动作写法未进语法速查 → LLM 稳定翻车** | LLM 稳定产出 `否则:` + `动作: null`（或空 `动作:`），编译器报 `动作格式应为 domain.service(target, k=v)`。`dsl_help()` 的 `否则` 条目已写「不动作可留『注释:』占位」，但 `skills/autoflow.md` 语法速查**未写** | P2 冒烟测试两臂同错 | 在 `skills/autoflow.md` 语法速查补一行（本轮已在 harness prompt 侧规避，文档侧待改） |
+| **F-R9-01（P1 · 阻塞）** | **gate 对 climate `turn_off/turn_on/set_hvac_mode` 零断言（mode-only 服务不建模 state 变化）** | 4acd 克隆题（人在书房温度过低关空调）两分区多次提交全 zero_assertion；climate 是 mode-only 服务，重放只记「动作被调用」不生成 state 断言。**与 entity_ids 完备性无关**（主 `tasks.json` 的 4acd 已在 R8 策展补入 climate 仍零断言）→ 纯 domain 建模缺口 | FFL R9（ab_arm_a/b 4acd 全复现）+ 负责人 live 核对 `task_4acd3b517da0__ab_arm_*` 仍 available | gate 对 climate 服务补 `mode_changed` 断言建模，或 propose 阶段显式提示「climate 不可断言、改用取值+分支」；修复前 4acd 类题结构性不可锁 |
+| **F-R9-02（P1 · 阻塞，含克隆陈旧）** | **gate 对「分支引用实体 ∉ arena 设备集」给零断言而非提示 + R9 克隆 entity_ids 未同步 R8 策展** | 两层：① fe065 克隆 `entity_ids` 仅 2 个 binary_sensor（occupancy/motion），**不含灯具也不含 lux 传感器**——而主 `tasks.json` 的 fe065 已在 R8 策展补入 philips/yeelink/lux（5 实体），**克隆建于策展前、克隆陈旧**；② 即便 entity_ids 完备，lux 传感器仍不在分区 10 台设备内 → JSONata 分支本地不可求值 → 仍零断言。gate 应提示「entity X 不在 arena」而非静默零断言 | FFL R9（fe065 两分区全复现）+ 负责人 live 核对克隆 `entity_ids=2`（lux=False, lights=0） | ① 重跑前用当前 `tasks.json` **重新生成克隆**（fe065 克隆须含灯具+lux）；② gate 层对「分支引用实体 ∉ arena 设备集」改报 `assertion_target_unavailable` 提示而非零断言；③ 残留死路由 curator 决定把 lux 传感器纳入分区或下架 |
+| **F-R9-05（P3 · 观察）** | **inspiration 接口 agent 间响应不稳定（memory-agent 冷启动/限流）** | B 组 b2 三次全超时（20s/次）、b1 二次查询 120s 超时、b3 正常——同一接口不同 agent_id 结果不一致；memory-agent 对无历史提交的 agent 疑似冷启动延迟/限流 | FFL R9 + 负责人早前实测（`GET .../inspiration` 返回 200、~13s、source=memory-agent） | 加 timeout 重试 / fallback；memory-agent 在 arena 创建时预加载而非 lazy；**b2 未收到灵感 → 本轮「有记忆」条件不完整** |
+| **F-R10-GATE-01（P1 · 已修，待部署）** | **switch 域状态触发器在孪生重放中不生成 HA 意图事件 → 该触发型态的题结构性不可锁** | t07（排插2灯开→路由插座开，switch 触发）两臂全部 agent 一致失败：B 臂失败回执实锤 `重放 0 个 HA 意图、记录 0 个外部调用`，触发分支被判**未激活**（branch_inactive）→ 断言按 P3-F1/F2 跳过 → V-NEW-1 诚实性缺口拦 fully_verified。binary_sensor/sensor(取值+分支)/定时触发均正常（t01–t06/t08–t10 全可锁）。**根因（负责人代码取证）**：seed_overrides（F-R8-04 反态翻转）在触发注入**之后**覆盖同一触发实体 → 触发态被抹 → `server-state-changed` ifState 比不中 → 0 意图 | FFL R10 + 负责人回执法证（r10-b1-t07-h1 等 31 份 t07 回执）+ 根因代码取证 | **已修**：① 触发实体上的种子覆盖**前置**应用（先种子、后触发事件，后注入者胜），其余实体仍后置；② 「期望态 == 注入触发态」的世界态断言剔除并告警（触发事件保证，非 flow 副作用证据）。守卫 `tests/test_fr10_gateway_fixes.py`（同态剔除/异态保留双覆盖）。**已部署 NAS prod（2026-09-12，运行时内省 + t07 型活体场景验证）** |
+| **F-R10-B1-01（P2 · 已修，待部署）** | **submit payload 漏 agent_id → 锁定归属错位到 arena-agent** | lr_arm_b t01/t02 `locked_by=arena-agent`（live 实锤），非任何 ffl-r10-b* 成员；b1 首次 submit 漏传 agent_id，战绩画像断档且污染按 agent 统计 | FFL R10 + 负责人 live 核对 locked_by | **已修**：① `webui` submit/propose 两端点 agent_id 缺失即 400（不再默认 `arena-agent`）；② `ArenaManager.submit_flow` 深度防御空值；③ WebUI 表单 Agent ID 改必填（去掉客户端兜底）；④ `skills/arena.md` 文档同步。守卫 `tests/test_fr10_gateway_fixes.py`。**已部署 NAS prod（2026-09-12，活体验证：缺 agent_id 提交 → 400 带 F-R10-B1-01 文案）** |
+| **F-R10-KB-01（P2 · 已修，待部署）** | **knowledge_feedback 跨分区/跨臂共享历史案例 → A/B 对照隔离被破坏** | A 臂 4 份 t07 回执（a1-t07-v1/v2、a2-t07-v1、a2-tt07-*）内含 `lr_arm_b` 字样——B 臂提交案例回流进 A 臂 feedback。error_kb/experience 是网关全局单例，**两臂共享同一个「前车之鉴」库** | 负责人回执扫描（python 全文检索） | **已修**：新增环境开关 `AUTOFLOW_ARENA_KB_ISOLATION=1` → error_kb/experience 按 arena_id 分区独享实例（`data/arena_kb/<arena>/`，缺省关闭保持旧行为）；`_kb_feedback` 带 arena_id 只回读本分区经验。守卫 `tests/test_fr10_gateway_fixes.py`。**已部署 NAS prod（2026-09-12）；R11 启用时置 `AUTOFLOW_ARENA_KB_ISOLATION=1`（当前缺省关闭=旧行为）** |
+| **F-R10-T0-01（P3 · 已修已部署，ACP 根因已查明）** | **灵感接口 ACP 主路径全程不可用，全部降级 snapshot-fallback** | 两臂 6 agent 所有灵感调用均 `source=snapshot-fallback`；ACP memory-agent 通道未通（与 R9 一致）。降级内容真实（预置客厅 30 天快照）且响应稳定——**反而消除了 R9 F-R9-05 的超时顽疾** | FFL R10 + 负责人预置实测（ok/5条/entity_ids 可直用） | **已修已部署（2026-09-12）**：① 网关侧 fallback 转正——确定性快照升**首选**（source=snapshot，零 LLM 中介），ACP-LLM 降为快照为空时的兜底（source=memory-agent-fallback）；② **ACP 根因查明并修复**：memory-agent `acp_server.py` 的 `acp_handle(rt, payload)` 缺 `scope` 形参，函数体内 `_acp_kind(rt, scope)` 直接 NameError → 所有 ACP prompt 500。补 `scope: Any = None` 形参 + dispatcher 传入（备份 `acp_server.py.bak_scope_fix_*`），重启后实测 `get_arena_inspiration` 经 LLM 中介返回 ok=True |
+| **F-R10-T0-02（P3 · 观察）** | **灵感 entity_ids 命中率 4/5** | 5 条灵感 1 条 media_player 实体不在（或映射偏差）分区常用集；4 条可直用 | FFL R10 | 快照构建时按分区设备集过滤灵感源实体 |
+| **F-R10-A2-01（P3 · 观察）** | **组内无任务分配协调 → 抢跑致成员全程 400 阻塞** | A 臂 T0 后 5 分钟 a1 抢占 9 题，a2 全程无题可做（400）；B 臂同类（b1 被抢至 0）→ per-agent 数据不可比 | FFL R10 | 下轮开工令加入 **captain 显式分配 task_id→agent_id**，或 harness 支持认领接口 |
+
+### R10 修复落地（三件套 + 灵感转正 + KB 隔离，代码已改 + 守卫已加，待部署）
+
+| 项 | 落地位置 | 内容 |
+|---|---|---|
+| **GATE-01** | `gateway.run_staging_gate` 触发注入/种子覆盖段 + 步循环断言段 | 触发实体种子覆盖前置（后注入者胜）+ 同态世界断言剔除告警，见缺陷表 |
+| **B1-01** | `webui.py`（submit/propose）+ `arena.submit_flow` + `app.js` 两表单 + `skills/arena.md` | agent_id 全链路必填，见缺陷表 |
+| **触发保真降级（T0 族）** | `arena._verify_flow` 出口 + `_is_inject_only_for_state_task` | 题面含状态触发信号词（当/每当/检测到/超过…）而 DSL 仅 `触发: inject` → gate `fully_verified` 降 False + 显式告警（非硬拦，WebUI 可人工批准）。真·手动题不误伤。守卫：`test_fr10_t0_*` 三例 |
+| **灵感转正** | `arena.fetch_memory_inspiration` | snapshot 首选 / ACP 兜底，见缺陷表 T0-01 行 |
+| **KB 隔离** | `arena._kb_store_for` / `_exp_for` / `__init__` | `AUTOFLOW_ARENA_KB_ISOLATION=1` 分区独享经验库，见缺陷表 KB-01 行 |
+
+**证据（离线，零 NAS 副作用）**：`tests/test_fr10_gateway_fixes.py` 8 passed + `tests/test_arena_memory_channel.py` 15 passed（含按新语义翻转的 2 例）；闸门/竞技场回归面 11 文件 142 用例 **136 passed / 6 failed，6 红经 `git worktree` HEAD 干净树对照复现 → 全部为既有陈旧测试**（A14 未建模服务、G1/G3 漂移、P3-F2、F13 数值 fv），与本次改动无关。
+
+**部署（2026-09-12，用户签收）**：备份 `/vol1/1000/docker/autoflow_backup_20260912_183035.tar.gz`（207 项）→
+CRLF 辨伪 4 文件 NAS==HEAD（实质差异 0）→ scp `gateway.py / arena.py / webui.py / webui/static/app.js + skills/arena.md`
+（md5 双侧一致）→ 容器 py_compile → 重启 → **运行时内省**：GATE-01 标记 ast 定位落在 `run_staging_gate`、
+`_is_inject_only_for_state_task/_kb_store_for/_exp_for` 在位、灵感 snapshot-first 生效、StartedAt(18:31:35) > mtime(18:31:00)；
+端点健康 root=200、/mcp* 401；活体验证：缺 agent_id submit → 400 F-R10-B1-01 文案、lr_arm_b 灵感 source=snapshot（63 条可建）。
+全量回归 **92 failed / 1605 passed == 基线 92 既有红，零新增**。
 
 > **R8 存量 13 题的处置定性（负责人）**：并非报告所称「13 道全死路」。
 > - **8 道 turns-off/极性类**（df6d/c9d4/fa65/da8b/cac07/63b3/e398/dd3d/b4a6 一族）→ 修 F-R8-04/02 后**可解**；
@@ -131,6 +159,110 @@
 
 > 部署后 R8 剩余 13 题的预期：**8 道 turns-off/极性族可解 + 1 道语义失配（`c9d4`）可解 = 9 道**；
 > 补 `entity_ids` 后再 +2（`fe065`/`4acd`）= **11 道**；`2dda`/`1e4f` 下架。
+
+---
+
+### R9 双分区对照实验（A/B · 记忆接口实证轮，2026-09-11）
+
+> 实验设计（负责人定）：两个镜像分区 `ab_arm_a`（A 组 ffl-r9-a1/a2/a3，**无记忆**）/ `ab_arm_b`（B 组 ffl-r9-b1/b2/b3，**有记忆**，GET `/inspiration?limit=5&agent_id=`）。同 10 台真实 HA 设备、同 8 道 available 清题、各自副本题（规避首胜即锁）。**对照变量落在 agent 实例层**（纠正 P2 同进程跑两遍的上下文污染）。开工令 `D:\Documents\WorkSpace\Test\KICKOFF_R9.md`；团队产出 `FINDINGS.md` §R9 + `results/r9-*.json`。
+
+**负责人 live 核对（信任但验证）**：
+- 两分区各 **9 locked + 2 available**。其中 3 locked 为 P2 预置遗留、6 locked 为 R9 新清 → **8 道 available 中 6 道清空、2 道死路（fe065/4acd 克隆）**，与团队报告「6/8」一致（报告口径=available 题，非全量）。
+- 死路克隆 `task_fe065fafa172__ab_arm_*` / `task_4acd3b517da0__ab_arm_*` 仍 `available`，确认未锁。
+
+**新发现缺陷（负责人复核后定级）**
+
+| # | 严重度 | 内容（含负责人订正） |
+|---|---|---|
+| **F-R9-01** | P1 阻塞 | gate 对 `climate.turn_off/turn_on/set_hvac_mode` **零断言**：climate 是 mode-only 服务，重放只记「动作被调用」不生成 state 断言。4acd 克隆（人在书房低温关空调）两分区全复现 zero_assertion。**与 entity_ids 完备性无关**（R8 已补 climate 入 entity_ids 仍零断言）→ 属 domain 建模缺口 |
+| **F-R9-02** | P1 阻塞（含克隆陈旧） | gate 对「分支引用实体 ∉ arena 设备集」给零断言而非提示；**且 R9 克隆 entity_ids 未同步 R8 策展**：fe065 克隆 `entity_ids=2`（occupancy/motion），不含灯具也不含 lux 传感器，而主 `tasks.json` 的 fe065 已策展补入 5 实体。即 **克隆建于策展前**。即便 entity_ids 完备，lux 传感器仍不在分区 10 台内 → 仍零断言 |
+| **F-R9-03** | P2 观察 | `seed_health` auto_correct 自动翻转 `pre_satisfied_seed`（B20/F-R8-04 缓解机制生效，changed_by_replay 可达） |
+| **F-R9-04** | P2 观察 | V-NEW-1 规则生效：声明分支但 0 个 HA 意图重放 → 拒 fully_verified（c9d4 走否则路径被拦，AND 触发单路径通过） |
+| **F-R9-05** | P3 观察 | inspiration 接口 agent 间不稳定：b2 三次全超时、b1 二次 120s 超时、b3 正常（memory-agent 冷启动/限流）。**b2 实际未收到灵感 → B 组「有记忆」条件不完整** |
+| **F-R9-06** | P3 观察 | knowledge_feedback 跨 R8/R9、跨 A/B 组、跨 agent 共享闭环实证（historical_cases 含 ffl-r8-* 与 ffl-r9-*） |
+| **F-R9-07** | P3 观察 | AND 复合触发语法可用且更稳（门关闭反态条件优先 AND 而非 取值+分支） |
+
+**负责人裁决（在团队「PASS 条件性」之上追加）**：
+1. **死路根因两层**：F-R9-01 是纯 gate 建模缺口（修 gate）；F-R9-02 一半是**克隆陈旧**（重跑前须用当前 `tasks.json` 重新生成克隆），一半是 gate 对「实体不在 arena」静默零断言（应改提示）。curator 修复后重开 2 道死路。
+2. **A/B 记忆增益本轮不可证**：两分区完成率同 6/8（75%），但 agent 级看——**无记忆组 a2 一人一提交即过 6 道**，**有记忆组 b1=3 / b3=3 / b2 超时 0**。混淆变量：① b2 灵感超时使「有记忆」条件不完整（F-R9-05）；② 灵感内容低效用（F-P2-03：设备洞察非任务经验）；③ agent 能力方差主导（a2 一击 6 道）。**结论：R9 未分离出记忆效应**，与 F-P2-03「方向对但 n 不足」一致。干净 A/B 需：灵感接口稳定 + 灵感升级为任务级经验 + 同能力配对 / 更大样本。
+3. ★**证据同步缺口 → 已订正为负责人工具误判（2026-09-11 R10 复核时发现）**：当时以 Glob
+   `results/r9-*.json` 无匹配断定「41 份证据缺失、请 dsh 补同步」——实为 **Glob 工具对
+   `D:\Documents` 路径恒返回空**（连 `Test/*` 都为空，而同路径 Grep/Read 正常）。python
+   `os.listdir` 清点：results/ 共 906 份，其中 **r9=54 份、r10=133 份，两轮证据一直齐全**。
+   dsh 团队无需补同步，此条撤回并向团队澄清。教训：**D 盘路径清点禁用 Glob，用 python os.listdir**。
+
+> 团队原始报告：`D:\Documents\WorkSpace\Test\FINDINGS.md` §R9（约 100 行，含逐 agent 明细 + §4 证据索引）。
+
+---
+
+### R10 客厅双分区对照实验（A/B 记忆对照第二轮 · 179 设备 · 2026-09-11）
+
+> 装置（负责人预置）：`lr_arm_a`（A 裸跑）/ `lr_arm_b`（B 挂记忆），从客厅竞技场克隆各 **179 台真实设备**；
+> curator 手写 **10 道同题副本**（`task_r10_tNN__lr_arm_a/b`，触发覆盖 人体/门磁/定时/开关状态/取值+分支，
+> 动作覆盖 light/switch/fan/media_player；预检 `_infer_postconditions` 20/20 非空）；lr_arm_b 预置
+> memory-agent 客厅 30 天快照（2000 事件）。开工令 `KICKOFF_R10.md`，**证据落盘列为验收硬条件**。
+
+**负责人 live 核对（信任但验证，全对上）**：
+- `lr_arm_a`：**10/10 locked 全 fv=True**（a1×9 + a3×1）；`lr_arm_b`：**9 locked + t07 available**（b2×5 + b3×2 + arena-agent×2）；
+- F-R10-B1-01 实锤：lr_arm_b t01/t02 `locked_by=arena-agent`（b1 漏传 agent_id）；
+- 证据 **133 份 r10 文件齐全**（31 份 t07 回执 + b1 灵感重试 h1–h5 纪律执行到位）——验收硬条件达成。
+
+**负责人裁决（在团队「PASS 条件性」之上追加）**：
+1. **F-R10-GATE-01 是本轮唯一真产品缺陷**，回执级实锤：switch 域触发分支重放 0 HA 意图 → branch_inactive
+   → 断言跳过 → V-NEW-1 拦 fv。修法 = replay 引擎对 switch 触发补意图生成（对齐 binary_sensor 路径）。
+   ⚠️ **a3 的 inject 破局是「触发语义降级」不是正解**：`触发: inject` 把题面因果（排插2开→路由开）换成了
+   手动测试节点，闸门验证了**动作**（2 意图 changed_by_replay=true）却没验证**触发保真**——这是闸门的
+   第二个语义缺口（动作真、触发假）。修 GATE-01 前不建议推广 inject 解；长期 gate 应对挑战题的
+   inject 触发提交加警告或要求触发与题面一致。
+2. **记忆增益连续第二轮未隔离，且本轮隔离被主动破坏**：A 10/10 vs B 9/10 的唯一差异 t07 是结构性
+   gate 限制，inject 破局属偶然发现（B 组未复用是信息不流动，非记忆无效）。**F-R10-KB-01（跨臂共享
+   error_kb/experience）意味着裸跑组也在吃全组经验** → 不修隔离，A/B 对照永远测不出记忆效应。
+   下轮前置条件：**error_kb/experience 按 arena 隔离** + captain 显式分题（F-R10-A2-01）。
+3. **灵感通道裁定**：ACP 主路径未通（T0-01）但 snapshot-fallback 内容真实、响应稳定、entity_ids 可直用
+   （命中率 4/5），已实际消除 R9 的超时顽疾。产品决策题：**是否把确定性快照通道转正为主通道**（ACP-LLM
+   中介路径收益存疑）。
+4. ★ **R9「证据同步缺口」订正为负责人工具误判**：Glob 对 `D:\Documents` 路径恒返回空（同路径
+   Grep/Read 正常），python os.listdir 实证 r9=54 / r10=133 份一直齐全。dsh 无需补同步。
+   教训入跨项目工具坑：**D 盘路径清点禁用 Glob**。
+
+> 团队原始报告：`D:\Documents\WorkSpace\Test\FINDINGS.md` §R10（约 181 行）+ `results/r10-*`（133 份）。
+
+---
+
+### R11 记忆增益对照实验（A/B · 179 设备 · 2026-09-12）
+
+> 装置（负责人预置）：`r11_arm_a`（A 裸跑）/ `r11_arm_b`（B 挂记忆），客厅克隆各 179 真实设备；
+> F-R11-01 种子同步修复已部署、F-R11-02 两臂统一 V2 六题（记忆变量成唯一差异）。开工令
+> `KICKOFF_R11.md`；团队产出 `FINDINGS_R11.md` + `results/r11_*`（18 份）。本轮由 AI（ffl-arena-tester）
+> **半自治接管**经网关 API 直跑（DSH :3080 返回 401 无凭据，未直驱 UI）。
+
+**负责人 live 核对（信任但验证，全对上）**：
+- A 臂 6/6、B 臂 6/6 **首试即 `ok/passed/fully_verified=True`（attempts=1）**；B 灵感 `source=snapshot, n=5`。
+- 验收链路健康：种子翻转 F-R8-04 生效、无 F-R10-T0 触发保真降级、仅 R39 轻微 lint 两臂同等 → 非网关 bug。
+
+**新发现（负责人复核后定级）**
+
+| # | 严重度 | 内容 |
+|---|---|---|
+| **F-R11-01** | 已闭环 | `_get_vhass`/`_reset_vhass` 现调 `_rewrite_seed` → 种子恒镜像当前 `arena.devices`；R11 重跑零种子极性假绿（§5/§5.5 实锤）。 |
+| **F-R11-02** | 已闭环 | 两臂统一为同 V2 六题（去重按标题，风扇题不重复）→ 记忆变量成唯一差异，对照有效。 |
+| **F-R11-03** | P2 观察 | **记忆增益不显著**：§1 四项指标全不达标（一次通过率 B−A=0pp、步数 B=A、复犯 B=A=0）→ 退判重域。 |
+| **F-R11-04** | P2 根因 | B 臂快照灵感 = **room 级设备 30 天频率**（缺水事件/人体 es2/两路窗帘/静音开关），**与 R11 六题实体零交集** → 记忆无可吸收信号，增益结构上不可能出现。根因：快照由 HA 设备历史建，agent 失败战报（`_push_memory_report`）未回流快照。 |
+| **F-R11-05** | P3 过程 | KICKOFF §4 端点名错误（`submit_flow`/`propose_task` 应为 `/submit`/`/propose`），首轮 404；已修 `KICKOFF_R11.md` §4。 |
+
+**负责人裁决**：
+1. R11 连续第三轮（R9/R10/R11）**未分离出记忆效应**，本轮机制根因清楚：记忆通道返回非任务相关的
+   room 级频率，对平凡题集无可吸收信号；且题集过易（单触发+单 turn_on，2 行 DSL 可解）无犯错空间。
+   与 R9「方向对但 n 不足」、R10「隔离被破坏」同源——**记忆增益需记忆变量升级（战报回流快照）+ 更难题集**才能观测。
+2. 属题集/记忆设计问题，**非网关缺陷**（闸门/种子/触发保真均正常）。建议下轮：① B 臂记忆源纳入 agent
+   失败战报经验；② 换需 `分支`/`调用子流程`/多设备联动的难题，让 A 臂犯错、B 臂凭灵感降重试；
+   ③ 指标改敏（平均尝试次数差）。
+3. **衍生观察（竞技场创造力）**：R11 重跑同时盘点开业至今 91 个已锁定 flow，发现高 creativity 分题面
+   与实现存在**语义漂移**——部分 flow 题面要求与 DSL 行为不符（触发实体错/缺时间触发/死分支/方向相反）
+   却仍过方向-only 验收闸门；真正「题面=实现」且具多条件/延时/时间段逻辑的可部署 flow 为少数。
+   详见 `FINDINGS_R11.md` 及竞技场创造力盘点（负责人另行评估）。
+
+> 团队原始报告：`D:\Documents\WorkSpace\Test\FINDINGS_R11.md`（AI 草案，已复核批准）+ `results/r11_*`（18 份）。
 
 ---
 
@@ -195,3 +327,19 @@
 - **第二处盲区（冷存阶段才发现）**：`D:\Documents\HAOS\workspace\AutoTest\` 是独立缺陷目录
   （A1–A31），子代理扫描时未覆盖。只核验了 round5 工单的 A23/A24/A26 → 发现 B18。见 B19。
 - 提炼过程中未修改、移动或删除任何报告原文（冷存用的是**移动**而非删除，全部可恢复）。
+
+---
+
+## E. Phase B Core 档引擎（#7 手术刀编辑 / #9 只读 inventory，2026-09-14）
+
+> 进入 Phase B（v2.2.0 双档成型），按用户拍板 **Core 档先行**（用户是 Core 受众：1880 勘察 98% flow 在 DSL 疆域外）。
+> 侦察结论：`nr_client` 库层面已具备编辑/inventory 引擎，故本批只补「守卫 + diff 预览 + 只读清点」三层，不重造算法。
+
+| 项 | 改动 | 验收证据 | commit |
+|---|---|---|---|
+| #9 只读 inventory | `nr_client.get_inventory()`（纯 GET，零写路径）：tabs→nodes 树 + `owned_by_af`（label `af_` 前缀）+ 风险标注（`unknown_node_type` / `protected_flow`） | `tests/test_nr_client_core_surgical.py` 3 例（结构/归属/受保护/纯只读断言）全绿 | 待提交 |
+| #7 手术刀编辑守卫 | `modify_node_field` 增：① 禁改结构键 `id/type/z/wires/inputs/outputs`（防误换身份/连线，ValueError fail-closed）；② `dry_run` 字段级 diff 预览（不写不部署）；③ 部署前断言兄弟节点数 0 变化（defense-in-depth） | `tests/test_nr_client_core_surgical.py` 6 例（结构键拦截/dry_run 无写/apply 改字段保数/兄弟数守卫触发/节点缺失）全绿 | 待提交 |
+| #7/#9 接线 | `nr_layer.modify_node_field` 转发 `dry_run`（网关路径可预览）；`test_layers.py` FakeNR stub 同步加 `dry_run` 形参（产品已合法前向兼容，非红） | `test_layers.py` 全绿 | 待提交 |
+
+**安全不变量守恒**：手术刀写路径只经 `nr_client`（人批准/用户自跑）；agent 仍只写 `af_*` 流，本批未向 agent MCP 暴露非 `af_*` 写工具（暴露层留待 WebUI 人批准界面，符合「批准/升格只在 WebUI」）。
+**待续（未含本批）**：#7/#9 的 WebUI/MCP 使用者视角工具面暴露；#8 多 flow 安全部署（与 v2.3 #13 回滚稳定化耦合）；#10/#11 Pro 引导 UX；#12 共用 verify_flow 核。
