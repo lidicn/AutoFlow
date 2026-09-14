@@ -93,9 +93,15 @@ class TestVHassStoreLogic(unittest.TestCase):
         store.entities = {e["entity_id"]: VHassStore._normalize(e) for e in seed["entities"]}
         changed = store.apply_service("light", "turn_on", {"entity_id": "light.x"})
         self.assertEqual(changed[0]["state"], "on")
-        # 未知 service 用 service 名标注
+        # A14：未建模 service 绝不把服务名伪造成 state（那会制造误判 FAIL/PASS），
+        # 保持原 state、只留痕，并登记 unmodeled_calls 供闸门降级为「未充分验证」
         store.apply_service("switch", "weird", {"entity_id": "switch.y"})
-        self.assertEqual(store.entities["switch.y"]["state"], "weird")
+        self.assertEqual(store.entities["switch.y"]["state"], "off")
+        self.assertEqual(
+            store.entities["switch.y"]["attributes"]["_unmodeled_service"],
+            "switch.weird",
+        )
+        self.assertIn("switch.weird(switch.y)", store.unmodeled_calls)
 
     def test_seed_from_catalog(self):
         cat = {"entities": {

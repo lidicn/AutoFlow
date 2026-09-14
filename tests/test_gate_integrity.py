@@ -191,7 +191,8 @@ def test_a14_attr_only_service_keeps_state():
 
 
 def test_a14_unmodeled_service_surfaces_in_gate_reasons(gate):
-    """未建模导致的断言失败，必须在闸门理由里标出来，不能让人以为是 flow 写错了。"""
+    """未建模导致的断言未过必须在闸门理由/警告里标出来（A14/A22：dry-run 非硬拦，
+    交 e2e 实机确认），不能让人以为是 flow 写错了。"""
     s = _store(("remote.a14g", "遥控", "客厅", "on", {}))
     flow = {"id": "a14g", "label": "a14g", "nodes": [
         _inject("t", ["c"]),
@@ -199,8 +200,11 @@ def test_a14_unmodeled_service_surfaces_in_gate_reasons(gate):
     ]}
     g = gate.run_staging_gate("", [{"entity_id": "remote.a14g", "state": "off"}],
                               vhass_store=s, flow=flow)
-    assert g["passed"] is False
+    # 未建模服务副作用未知 → dry-run 下非硬拦（passed=True），但降级未充分验证
+    assert g["passed"] is True, g
+    assert g["fully_verified"] is False, g
     assert any("未建模" in r for r in g["reasons"]), g["reasons"]
+    assert any("未建模" in w for w in g["warnings"]), g["warnings"]
 
 
 def test_a14_unverified_blocks_fail_closed(gate):
