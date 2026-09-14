@@ -50,6 +50,10 @@ class FakeNRClients:
 @unittest.skipUnless(_HAVE_WEB_DEPS, "A5 测试需要 starlette（缺失则 pip install starlette）。")
 class TestBarkInstall(unittest.TestCase):
     def setUp(self):
+        # 与 connections_settings/llm_webui 同配方：WebUI 端点测试需 token_only 免鉴权放行
+        # （默认 password_only 会 401 拦截，属产品正确行为）。
+        self._token_mode_backup = os.environ.get("AF_WEBUI_TOKEN_MODE")
+        os.environ["AF_WEBUI_TOKEN_MODE"] = "token_only"
         self.tmp = tempfile.mkdtemp(prefix="af_bark_")
         self.cfg = GatewayConfig(data_dir=self.tmp, env="staging")
         self.gw = Gateway(self.cfg)
@@ -59,6 +63,10 @@ class TestBarkInstall(unittest.TestCase):
 
     def tearDown(self):
         self.client.__exit__(None, None, None)
+        if self._token_mode_backup is None:
+            os.environ.pop("AF_WEBUI_TOKEN_MODE", None)
+        else:
+            os.environ["AF_WEBUI_TOKEN_MODE"] = self._token_mode_backup
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _bark_row(self):
