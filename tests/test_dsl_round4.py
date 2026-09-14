@@ -249,20 +249,34 @@ def test_R7_lint_R37_wrong_side_handcraft():
 # ── R8：提取字段校验 ──────────────────────────────────────────────────────
 
 def test_R8_self_assign_and_wrong_field_warnings():
-    """提取自赋值 → C_EXTRACT_SELF_ASSIGN；http_api 子流程后取错字段 → C_EXTRACT_FIELD_SUSPECT。"""
+    """提取自赋值 → C_EXTRACT_SELF_ASSIGN；http_api 子流程后取错字段 → C_EXTRACT_FIELD_SUSPECT。
+
+    ★ doubao 下线后的调整（勿倒退）：`C_EXTRACT_FIELD_SUSPECT` 只在「上一步是 http_api
+    型子流程」时触发，而 http_api 形态随豆包 4 spec（cb43830 / 0f4940a，P0）一并下线，
+    现存能力（`anysearch_batch` / `llm_caiyun_weather`）都是 link_out 型 —— 走 DSL 已
+    无法触发该规则。故自赋值走 DSL 端到端；错字段改为直接单测 `_lint_extract`，
+    保住这条规则本身的回归锁（将来若重新注册 http_api 能力，DSL 路径即自动恢复）。
+    """
     dsl = (
         "场景: R8\n"
         "触发: sensor.a 变化\n"
-        "调用子流程: llm_doubao_chat(user_msg=hi)\n"
+        "调用子流程: anysearch_batch(keywords=hi)\n"
         "提取: payload.reply = payload.reply\n"
-        "提取: x = payload.resp\n"
     )
     issues = list(validate(parse(dsl)))
     msgs = {i.message for i in issues}
     assert any("C_EXTRACT_SELF_ASSIGN" in m for m in msgs), \
         f"自赋值应报 C_EXTRACT_SELF_ASSIGN，实际 {[i.message[:60] for i in issues]}"
-    assert any("C_EXTRACT_FIELD_SUSPECT" in m for m in msgs), \
-        f"错字段应报 C_EXTRACT_FIELD_SUSPECT，实际 {[i.message[:60] for i in issues]}"
+
+    # 错字段：直接喂 http_api 上下文给规则本体（link-out 型子流程走不到这条分支）
+    from autoflow_gateway.dsl_engine import Extract, _lint_extract
+    out = _lint_extract(Extract(name="x", expr="payload.resp"),
+                        prev_api_subflow="some_http_cap")
+    assert out and any("C_EXTRACT_FIELD_SUSPECT" in i.message for i in out), \
+        f"http_api 子流程后取错字段应报 C_EXTRACT_FIELD_SUSPECT，实际 {[i.message[:60] for i in out]}"
+    # 取 payload.reply 是约定落点，不该报
+    assert _lint_extract(Extract(name="x", expr="payload.reply"),
+                         prev_api_subflow="some_http_cap") == []
 
 
 def test_R8_lint_R36_handcraft_self_assign():
@@ -277,9 +291,13 @@ def test_R8_lint_R36_handcraft_self_assign():
 
 
 def test_R8_llm_no_auto_self_assign_node():
-    """A28：llm_* 子流程编译后不应再自动产出自赋值空节点（R36 应为 0）。"""
+    """A28：外部能力子流程编译后不应再自动产出自赋值空节点（R36 应为 0）。
+
+    载体子流程由 llm_doubao_chat 换成 anysearch_batch（豆包 4 spec 已 P0 下线），
+    本用例锁的是「编译产物不自赋值」这一编译器属性，与具体能力无关。
+    """
     flow = compile_dsl(
-        "场景: R8b\n触发: sensor.a 变化\n调用子流程: llm_doubao_chat(user_msg=hi)\n"
+        "场景: R8b\n触发: sensor.a 变化\n调用子流程: anysearch_batch(keywords=hi)\n"
     )
     r36 = [i for i in lint_flow(flow) if i["rule"] == "R36"]
     assert r36 == [], "llm_* 编译产物不应含自赋值空节点"

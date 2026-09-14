@@ -232,19 +232,29 @@ class TestLayerHotReload(EnvSandbox):
 class TestConnectionsAPI(EnvSandbox):
     def setUp(self):
         super().setUp()
+        # 账号密码改造后默认 password_only：未认证请求一律 401（含本机 TestClient）。
+        # 本组测试不关心认证，设 token_only 让回环放行（与 test_webui_settings 同款）。
+        # 注意备份原值并在 tearDown 还原，避免污染同会话后续用例。
+        self._token_mode_backup = os.environ.get("AF_WEBUI_TOKEN_MODE")
+        os.environ["AF_WEBUI_TOKEN_MODE"] = "token_only"
         self.gw = Gateway(self.cfg)
         self.client = TestClient(build_webui_asgi(self.cfg, gateway=self.gw))
         self.client.__enter__()
 
     def tearDown(self):
         self.client.__exit__(None, None, None)
+        if self._token_mode_backup is None:
+            os.environ.pop("AF_WEBUI_TOKEN_MODE", None)
+        else:
+            os.environ["AF_WEBUI_TOKEN_MODE"] = self._token_mode_backup
         super().tearDown()
 
     def test_get_lists_groups(self):
         r = self.client.get("/api/settings/connections")
         self.assertEqual(r.status_code, 200)
         ids = [g["id"] for g in r.json()["groups"]]
-        self.assertEqual(ids, ["ha", "nr", "bark"])
+        # memory 组由 arena ↔ memory-agent 消费点引入（b359cd6 改 connections.py 新增）
+        self.assertEqual(ids, ["ha", "nr", "bark", "memory"])
 
     def test_put_saves_and_masks(self):
         r = self.client.put("/api/settings/connections",

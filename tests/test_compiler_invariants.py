@@ -89,11 +89,14 @@ DSL_DELAY = """
 动作: light.turn_off(灯)
 """
 
-DSL_IMAGE = """
-场景: 视觉能力
+# 原「视觉能力」用例锁的是 llm_doubao_image；豆包 4 spec 已 P0 下线（cb43830 / 0f4940a），
+# http_api 形态随之消失。现存外部能力（anysearch_batch / llm_caiyun_weather）是 link-out
+# 形态（fire-and-forget，无回执），其后不能再跟 `提取:`（会触发 R7 空转告警），
+# 故改为「纯外部能力调用」用例。
+DSL_API_LINKOUT = """
+场景: 外部能力
 触发: 每天 20:00
-调用子流程: llm_doubao_image(prompt=`一只猫`)
-提取: 图片链接 = payload.reply
+调用子流程: anysearch_batch(keywords=智能家居, max_results=3)
 """
 
 DSL_HISTORY = """
@@ -177,7 +180,7 @@ SMOKE_CASES = [
     ("first", DSL_FIRST, ["prod"]),
     ("read_extract", DSL_READ_EXTRACT, ["staging", "prod"]),
     ("delay", DSL_DELAY, ["staging", "prod"]),
-    ("image", DSL_IMAGE, ["staging", "prod"]),
+    ("api_linkout", DSL_API_LINKOUT, ["staging", "prod"]),
     ("history", DSL_HISTORY, ["staging", "prod"]),
     ("parallel", DSL_PARALLEL, ["staging", "prod"]),
     ("build_http", DSL_BUILD_HTTP, ["staging", "prod"]),
@@ -230,13 +233,15 @@ MATRIX = [
     ("read_extract", lambda t: f"场景: x\n触发: sensor.a 变化\n取值: sensor.a temperature\n提取: 温度 = payload.temperature\n"),
     ("switch_two", lambda t: f'场景: x\n触发: sensor.a 有人\n分支 msg.payload == "有人":\n    动作: light.turn_on(灯)\n否则:\n    动作: light.turn_off(灯)\n'),
     ("switch_single", lambda t: f'场景: x\n触发: sensor.a 有人\n分支 msg.payload == "有人":\n    动作: light.turn_on(灯)\n'),
-    ("switch_num", lambda t: f"场景: x\n触发: sensor.a 有人\n分支 n == 3:\n    动作: light.turn_on(灯)\n否则:\n    动作: light.turn_off(灯)\n"),
-    ("switch_bool", lambda t: f"场景: x\n触发: sensor.a 有人\n分支 flag == true:\n    动作: light.turn_on(灯)\n否则:\n    动作: light.turn_off(灯)\n"),
+    ("switch_num", lambda t: f"场景: x\n触发: sensor.a 有人\n取值: sensor.a n\n分支 n == 3:\n    动作: light.turn_on(灯)\n否则:\n    动作: light.turn_off(灯)\n"),
+    ("switch_bool", lambda t: f"场景: x\n触发: sensor.a 有人\n取值: sensor.a flag\n分支 flag == true:\n    动作: light.turn_on(灯)\n否则:\n    动作: light.turn_off(灯)\n"),
     ("time_range", lambda t: "场景: x\n触发: sun.sun 日出\n时间段: 07:00-23:00\n动作: light.turn_on(灯)\n"),
     ("delay", lambda t: f"场景: x\n触发: sensor.a 无人\n延时: 30\n动作: light.turn_off(灯)\n"),
     ("subflow_linkout", lambda t: f"场景: x\n触发: sensor.a 有人\n调用子流程: demo_notify(text=hi, room=客厅)\n"),
     ("subflow_instance", lambda t: f"场景: x\n触发: sensor.a 变化\n调用子流程: demo_notify(text=hi, room=客厅)\n"),
-    ("subflow_httpapi", lambda t: f"场景: x\n触发: 每天 20:00\n调用子流程: llm_doubao_image(prompt=`猫`)\n提取: 图片链接 = payload.reply\n"),
+    # 原 subflow_httpapi 用 llm_doubao_image（已下线），改为现存 link-out 外部能力；
+    # 其后不跟 `提取:`（link-out 无回执，跟提取会触发 R7 空转告警）。
+    ("subflow_linkout_params", lambda t: f"场景: x\n触发: 每天 20:00\n调用子流程: anysearch_batch(keywords=猫, max_results=3)\n"),
     ("subflow_history", lambda t: f"场景: x\n触发: inject\n调用子流程: history_state_at(entity=climate.x, at=昨晚23:12)\n提取: v = payload.value\n"),
     ("parallel", lambda t: f"场景: x\n触发: sensor.a 有人\n并行:\n    动作: light.turn_on(灯1)\n    动作: light.turn_on(灯2)\n"),
     ("build_http", lambda t: "场景: x\n触发: inject\n构建: {\"m\":\"hi\"}\n请求: POST https://example.com/api\n"),
@@ -248,24 +253,28 @@ MATRIX = [
     ("raw_switch", lambda t: f'场景: x\n触发: sensor.a 有人\n原生节点: {{"type":"switch","name":"c","outputs":2,"property":"payload.cond","rules":[{{"t":"eq","v":"a"}},{{"t":"else"}}]}}\n动作: light.turn_on(灯)\n'),
     ("multi_trigger", lambda t: f"场景: x\n触发: sensor.a 有人\n触发: sensor.b 变化\n动作: light.turn_on(灯)\n"),
     ("notify", lambda t: f"场景: x\n触发: inject\n动作: notify.mobile_app(标题=hi)\n"),
-    # ── 嵌套 / 组合（R13 孤儿历史重灾区）──
+    # ★ 分支标签纪律（WB85 / d7872de 起 fail-closed）：`分支 <标签> ...` 里的标签必须先用
+#   `取值:` 定义过，否则编译器直接抛 C_LABEL_UNDEFINED。新增矩阵用例时，凡是分支条件
+#   用到裸标签（c / n / flag …），必须在 触发 之后补一行 `取值: sensor.x <标签>`；
+#   引用 msg.payload.* 的写法（如 `分支 msg.payload == "a"`）不受此约束。
+# ── 嵌套 / 组合（R13 孤儿历史重灾区）──
     # 注：DSL 不支持 分支 嵌套在 分支/否则 体内（编译器正确拒绝），故不纳入矩阵。
-    ("query_in_branch", lambda t: f"场景: x\n触发: sensor.a 有人\n分支 c == 1:\n    查询: light.b off\n    动作: light.turn_on(灯)\n否则:\n    动作: light.turn_off(灯)\n"),
+    ("query_in_branch", lambda t: f"场景: x\n触发: sensor.a 有人\n取值: sensor.a c\n分支 c == 1:\n    查询: light.b off\n    动作: light.turn_on(灯)\n否则:\n    动作: light.turn_off(灯)\n"),
     ("extract_in_branch", lambda t: f"场景: x\n触发: sensor.a 变化\n取值: sensor.a temp\n分支 temp > 30:\n    提取: 高温 = payload.temp\n    动作: light.turn_on(灯)\n否则:\n    动作: light.turn_off(灯)\n"),
-    ("timerange_in_branch", lambda t: "场景: x\n触发: sensor.a 有人\n分支 c == 1:\n    时间段: 07:00-23:00\n    动作: light.turn_on(灯)\n否则:\n    动作: light.turn_off(灯)\n"),
+    ("timerange_in_branch", lambda t: "场景: x\n触发: sensor.a 有人\n取值: sensor.a c\n分支 c == 1:\n    时间段: 07:00-23:00\n    动作: light.turn_on(灯)\n否则:\n    动作: light.turn_off(灯)\n"),
     ("parallel_subflow_delay", lambda t: f"场景: x\n触发: sensor.a 有人\n并行:\n    动作: light.turn_on(灯1)\n    延时: 10\n    调用子流程: demo_notify(text=hi, room=客厅)\n动作: light.turn_on(灯2)\n"),
-    ("kitchen_sink", lambda t: f"场景: x\n触发: sensor.a 有人\n查询: light.b off\n分支 c == 1:\n    动作: light.turn_on(灯1)\n    延时: 5\n    调用子流程: demo_notify(text=hi, room=客厅)\n否则:\n    动作: light.turn_on(灯2)\n取值: sensor.a temp\n提取: 温度 = payload.temp\n动作: light.turn_on(灯)\n观测: 看状态\n"),
+    ("kitchen_sink", lambda t: f"场景: x\n触发: sensor.a 有人\n取值: sensor.a c\n查询: light.b off\n分支 c == 1:\n    动作: light.turn_on(灯1)\n    延时: 5\n    调用子流程: demo_notify(text=hi, room=客厅)\n否则:\n    动作: light.turn_on(灯2)\n取值: sensor.a temp\n提取: 温度 = payload.temp\n动作: light.turn_on(灯)\n观测: 看状态\n"),
     ("multi_trigger_var_subflow", lambda t: f"场景: x\n触发: sensor.a 有人\n触发: sensor.b 变化\n变量: mode = eco\n调用子流程: demo_notify(text=hi, room=客厅)\n动作: light.turn_on(灯)\n"),
-    ("subflow_httpapi_multi", lambda t: f"场景: x\n触发: 每天 20:00\n调用子流程: llm_doubao_image(prompt=`猫`)\n提取: 图片链接 = payload.reply\n提取: 第二 = payload.reply\n动作: light.turn_on(灯)\n"),
-    ("raw_in_branch", lambda t: f'场景: x\n触发: sensor.a 有人\n分支 c == 1:\n    原生节点: {{"type":"change","name":"设v","rules":[{{"t":"set","p":"payload.v","pt":"msg","to":"1","tot":"num"}}]}}\n    动作: light.turn_on(灯)\n否则:\n    动作: light.turn_off(灯)\n'),
-    ("cond_then_branch", lambda t: f"场景: x\n触发: sensor.a 有人\n条件: light.b = on\n分支 c == 1:\n    动作: light.turn_on(灯)\n否则:\n    动作: light.turn_off(灯)\n"),
+    ("subflow_linkout_then_action", lambda t: f"场景: x\n触发: 每天 20:00\n调用子流程: anysearch_batch(keywords=猫)\n动作: light.turn_on(灯)\n"),
+    ("raw_in_branch", lambda t: f'场景: x\n触发: sensor.a 有人\n取值: sensor.a c\n分支 c == 1:\n    原生节点: {{"type":"change","name":"设v","rules":[{{"t":"set","p":"payload.v","pt":"msg","to":"1","tot":"num"}}]}}\n    动作: light.turn_on(灯)\n否则:\n    动作: light.turn_off(灯)\n'),
+    ("cond_then_branch", lambda t: f"场景: x\n触发: sensor.a 有人\n取值: sensor.a c\n条件: light.b = on\n分支 c == 1:\n    动作: light.turn_on(灯)\n否则:\n    动作: light.turn_off(灯)\n"),
     ("long_entity", lambda t: f"场景: x\n触发: binary_sensor.study_motion_xyz_abc 有人\n动作: light.turn_on(light.study_main_lamp_01)\n"),
     ("dash_entity", lambda t: f"场景: x\n触发: sensor.mi-body-composition-scale_d22e_weight 变化\n调用子流程: demo_notify(text=hi, room=客厅)\n"),
     ("multi_action_params", lambda t: f"场景: x\n触发: sensor.a 有人\n动作: light.turn_on(灯, brightness=80, kelvin=3000)\n动作: light.turn_on(灯2, brightness=50)\n动作: climate.set_temperature(climate.x, temperature=22)\n"),
     ("switch_three", lambda t: f'场景: x\n触发: sensor.a 有人\n分支 msg.payload == "a":\n    动作: light.turn_on(灯1)\n分支 msg.payload == "b":\n    动作: light.turn_on(灯2)\n否则:\n    动作: light.turn_off(灯)\n'),
     ("read_then_branch", lambda t: f"场景: x\n触发: sensor.a 变化\n取值: sensor.a state\n分支 state == on:\n    动作: light.turn_on(灯)\n否则:\n    动作: light.turn_off(灯)\n"),
     ("double_gate", lambda t: f"场景: x\n触发: sensor.a 有人\n查询: light.b on\n查询: light.c off\n动作: light.turn_on(灯)\n"),
-    ("time_range_then_action_branch", lambda t: "场景: x\n触发: sun.sun 日出\n时间段: 07:00-23:00\n分支 c == 1:\n    动作: light.turn_on(灯)\n否则:\n    动作: light.turn_off(灯)\n"),
+    ("time_range_then_action_branch", lambda t: "场景: x\n触发: sun.sun 日出\n取值: sensor.a c\n时间段: 07:00-23:00\n分支 c == 1:\n    动作: light.turn_on(灯)\n否则:\n    动作: light.turn_off(灯)\n"),
 ]
 
 

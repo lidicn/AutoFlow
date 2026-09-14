@@ -31,6 +31,34 @@ def _load_built():
         return json.load(f)
 
 
+def _short(sid: str) -> str:
+    """子流程 id → 内部节点 id 前缀（subflows_built.json 的命名约定）。
+
+    例：af_hist_state_at → state_at，内部节点即 state_at_n_parse / state_at_n_dbg_calc。
+    早先版本曾按完整 sid 加 "__"（af_hist_state_at__n_parse），后改为去前缀短名；
+    测试不得再硬编码旧写法，否则实现一改就假红。
+    """
+    return sid[len("af_hist_"):] if sid.startswith("af_hist_") else sid
+
+
+def _built_as_live(server="fake-server-id"):
+    """把 built.json 的内容伪装成「线上已正确安装」的 flow 列表。
+
+    #107 起 ensure 用【内容指纹】判定是否 no-op：光有内部节点不够，内容必须与本地
+    built.json 一致。故 no-op 用例必须用 built 的真实内容构造线上态，
+    否则会落入 stale_rebuilt 分支（这正是早先用例红掉的原因）。
+    """
+    import copy
+    live = []
+    for arr in _load_built():
+        arr = copy.deepcopy(arr)
+        for e in arr:
+            if e.get("type") == "api-get-history":
+                e["server"] = server  # 线上已按目标实例替换过 server
+        live.extend(arr)
+    return live
+
+
 class _FakeNR:
     """内存替身：记录 list_flows / get_default_server_id / deploy_all 调用，不触真实 NR。"""
 
@@ -52,17 +80,19 @@ class _FakeNR:
 
 class TestHistorySubflow(unittest.TestCase):
     def test_ensure_noop_when_all_present(self):
-        """4 个历史子流程全部在场 → 必须 no-op，绝不调用 deploy_all（避免改写活体）。"""
-        present = []
-        for sid in HISTORY_SUBFLOW_IDS:
-            present.append({"type": "subflow", "id": sid})
-            present.append({"z": sid, "type": "api-get-history"})  # 内部节点：证明非空壳(#607)
-        nr = _FakeNR(present)
+        """4 个历史子流程在场且内容与本地 built.json 一致 → 必须 no-op，绝不 deploy_all。
+
+        #107：ensure 除「内部节点数>0」外还比对行为指纹（function 源码 + api-get-history
+        关键配置），线上残留旧版代码会被判 stale 并重建。故「在场」必须按 built 真实内容
+        构造，不能只塞一个占位内部节点。
+        """
+        nr = _FakeNR(_built_as_live())
         res = ensure_history_subflow(nr, allow_prod=False)
         self.assertFalse(res["created"], res)
         self.assertTrue(res["exists"], res)
         self.assertEqual(res["missing"], [], res)
         self.assertEqual(res["rebuilt"], [], res)
+        self.assertEqual(res["stale_rebuilt"], [], res)
         self.assertIsNone(nr.deployed, "已存在时不应 deploy（会触真实 NR / 改写活体）")
 
     def test_ensure_rebuild_when_missing(self):
@@ -114,18 +144,15 @@ class TestHistorySubflow(unittest.TestCase):
         self.assertFalse(dup, f"重建后仍有重复 id：{dup}")
         self.assertNotIn("n_parse", deployed_ids, "重建不应保留共享裸 id")
         for sid in HISTORY_SUBFLOW_IDS:
-            self.assertIn(f"{sid}__n_parse", deployed_ids,
-                          f"重建缺前缀 id {sid}__n_parse")
+            want = f"{_short(sid)}_n_parse"
+            self.assertIn(want, deployed_ids, f"重建缺前缀 id {want}")
 
     def test_ensure_partial_missing_rebuilds_only_missing(self):
-        """仅缺 1 个 → 只重建那 1 个，其余 3 个不受影响，deploy 只含缺失的节点。"""
+        """仅缺 1 个 → 只重建那 1 个；其余 3 个内容一致，绝不连带重建。"""
         missing_id = next(iter(HISTORY_SUBFLOW_IDS))
-        present = []
-        for sid in HISTORY_SUBFLOW_IDS:
-            if sid == missing_id:
-                continue
-            present.append({"type": "subflow", "id": sid})
-            present.append({"z": sid, "type": "api-get-history"})  # 内部节点：证明非空壳(#607)
+        # 在场 3 个按 built 真实内容构造（内容一致才不会被判 stale 而连带重建）
+        present = [n for n in _built_as_live()
+                   if n.get("id") != missing_id and n.get("z") != missing_id]
         nr = _FakeNR(present)
         res = ensure_history_subflow(nr, allow_prod=False)
         self.assertTrue(res["created"], res)
@@ -172,9 +199,10 @@ class TestHistorySubflow(unittest.TestCase):
             # 内部节点 id 已加 sid__ 前缀（#711 衍生 bug 修复：跨子流程同名 id 在 NR 全局
             # 节点索引互相覆盖，导致仅 1 个子流程能跑、其余 receive is not a function）。
             self.assertEqual(len(arr), 9, f"{sid} 应有 9 节点，实得 {len(arr)}")
+            short = _short(sid)
             dbg_nodes = {n.get("id") for n in arr if n.get("type") == "debug"}
             self.assertEqual(dbg_nodes,
-                             {f"{sid}__n_dbg_parse", f"{sid}__n_dbg_hist", f"{sid}__n_dbg_calc"},
+                             {f"{short}_n_dbg_parse", f"{short}_n_dbg_hist", f"{short}_n_dbg_calc"},
                              f"{sid} G1 debug 探针缺失/未加前缀：{dbg_nodes}")
             # def 的 in/out 是端口对象列表，各 1 个端口
             self.assertEqual(len(arr[0].get("in", [])), 1, f"{sid} def.in 应有 1 端口")
@@ -207,10 +235,10 @@ class TestHistorySubflow(unittest.TestCase):
         from collections import Counter
         dup = {k: v for k, v in Counter(all_ids).items() if v > 1}
         self.assertFalse(dup, f"内部节点 id 跨子流程重复（碰撞根因）：{dup}")
-        # 同时确认每个 id 都带 sid__ 前缀
+        # 同时确认每个 id 都带「本子流程专属前缀」（去 af_hist_ 的短名 + "_"）
         sids = {arr[0]["id"] for arr in built}
         for i in all_ids:
-            self.assertTrue(any(i.startswith(s + "__") for s in sids),
+            self.assertTrue(any(i.startswith(_short(s) + "_") for s in sids),
                              f"内部节点 id 未带子流程前缀：{i}")
 
     def test_feed_node_payload_objectify_and_entity_rewrite(self):

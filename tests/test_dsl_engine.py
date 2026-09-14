@@ -613,35 +613,26 @@ def test_semantic_gap_detect_first_in_body():
     assert any("首次" in g or "去重" in g for g in gaps), gaps
 
 
-def test_image_vision_subflow_compile():
-    """P1②：文生图/图生文 ApiSpec 经 dsl_engine 编译为正确内联 http_api 节点。
+def test_httpapi_inline_capability_is_retired():
+    """下线锁：http_api 内联能力已随豆包 4 spec 一并移除（cb43830 / 0f4940a，P0）。
 
-    验证：两个端点都生成独立 http request（url 正确）；文生图把响应 image_url
-    规整进 payload.reply，图生文把 reply 规整进 payload.reply（与对话类一致）。
+    原 `test_image_vision_subflow_compile` 锁的是「llm_doubao_image / llm_doubao_vision
+    编译成内联 http request + 提取节点」——该能力属于豆包中枢，已按 P0 移出 AutoFlow
+    （能力归 doubao-butler）。现存外部能力（anysearch_batch / llm_caiyun_weather）改为
+    link-out 形态，不再内联 http 节点，详见 tests/test_api_capability.py。
+
+    这里保留一条【否定锁】：注册表中不得再出现 http_api 型能力与已下线的 doubao spec。
+    一旦将来重新注册（无论是复活豆包还是新增 http_api 能力），本用例会红，
+    强制你回来把真正的能力测试补上，而不是让覆盖悄悄消失。
     """
-    dsl = """
-场景: 视觉能力
-触发: 每天 20:00
-调用子流程: llm_doubao_image(prompt=`一只赛博朋克风格的猫`)
-提取: 图片链接 = payload.reply
-调用子流程: llm_doubao_vision(prompt=`描述这张图`, image=`https://example.com/cat.jpg`)
-提取: 回复 = payload.reply
-"""
-    flow = compile_dsl(dsl)
-    nodes = flow["nodes"]
-    urls = {n.get("url") for n in nodes if n.get("type") == "http request"}
-    assert "http://<NAS_IP>:1880/llm/image" in urls, urls
-    assert "http://<NAS_IP>:1880/llm/vision" in urls, urls
-    # 文生图：提取节点把 image_url 规整进 payload.reply
-    ext_img = [n for n in nodes if n.get("type") == "change"
-               and n.get("name") == "取 llm_doubao_image 返回值"]
-    assert ext_img, "缺少 image 提取节点"
-    assert ext_img[0]["rules"][0]["to"] == "payload.image_url"
-    # 图生文：提取节点把 reply 规整进 payload.reply（identity）
-    ext_vis = [n for n in nodes if n.get("type") == "change"
-               and n.get("name") == "取 llm_doubao_vision 返回值"]
-    assert ext_vis, "缺少 vision 提取节点"
-    assert ext_vis[0]["rules"][0]["to"] == "payload.reply"
+    from autoflow_gateway import subflows as sf
+    names = set(sf.SUBFLOWS)
+    assert not any(n.startswith("llm_doubao") for n in names), \
+        f"豆包 spec 已按 P0 下线，不应重新注册：{sorted(n for n in names if n.startswith('llm_doubao'))}"
+    httpapi = sorted(n for n, s in sf.SUBFLOWS.items()
+                     if (getattr(s, "call", {}) or {}).get("type") == "http_api")
+    assert httpapi == [], \
+        f"现存 http_api 型能力：{httpapi} —— 若有意新增，请同步补回能力级编译测试"
 
 
 # ── A4 语义缺口检测扩展：间隔触发 / 自然语言条件 / 直到…才 ───────────────

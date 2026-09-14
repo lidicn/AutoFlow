@@ -35,6 +35,8 @@ class _StageFake:
         self.ha = None
     _build_vhass_from_staging = G.Gateway._build_vhass_from_staging
     _gate_node_types = G.Gateway._gate_node_types
+    # #711：ensure 必须先于闸门跑（替身 self.nr is None → helper 走 no_nr_client 分支，安全）
+    _ensure_history_subflow_for = G.Gateway._ensure_history_subflow_for
     run_staging_gate = G.Gateway.run_staging_gate
     _seed_read_value_entities_from_ha = G.Gateway._seed_read_value_entities_from_ha
 
@@ -113,6 +115,8 @@ class _GWStub:
         self.cfg = types.SimpleNamespace(nr_ha_server_id="")
     _gate_node_types = G.Gateway._gate_node_types
     _inject_ha_server = G.Gateway._inject_ha_server
+    # #711：ensure 必须先于闸门跑（_NRStub 无 client → helper 返回 no_nr_client，安全 no-op）
+    _ensure_history_subflow_for = G.Gateway._ensure_history_subflow_for
     modify_flow = G.Gateway.modify_flow
 
 

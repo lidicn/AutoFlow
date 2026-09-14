@@ -46,6 +46,11 @@ def _mk_shim(seed_states):
         def _gate_node_types(self, flow):
             return None
 
+        # #711：ensure 必须先于闸门跑。本桩无 NR client，补 no-op 对齐（与 _gate_node_types 同策）
+        def _ensure_history_subflow_for(self, flow, allow_prod, tid=None,
+                                        where="deploy"):
+            return {"skipped": "stub_no_nr"}
+
         def _check_entities_known(self, scene):
             return []
 

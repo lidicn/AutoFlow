@@ -3,6 +3,7 @@
 仓库此前无 conftest；本文件提供可复用的 FakeNR / FakeHA stub，
 让「部署前自检 / 真机回读」类测试无需真 Node-RED / HA 即可跑（CB 接管 WB2 失联期自测）。
 """
+import os
 import sys
 from pathlib import Path
 
@@ -64,6 +65,27 @@ def _autoflow_env(monkeypatch):
     """锁定非生产默认值，避免误绑 0.0.0.0（与 C13 硬化呼应）。"""
     monkeypatch.setenv("AF_MCP_HOST", "127.0.0.1")
     monkeypatch.setenv("AF_DEPLOY_POLICY", "review_all")
+
+
+# 被个别测试直接改写、又容易忘记还原的全局开关。不还原会毒化同进程后续所有测试：
+# 典型如某文件设 AUTOFLLOW_ENV=prod 后，后续 nr_client 写全被 prod 护栏拦下
+# （NRGuardError），产生与产品无关的假红。这里在每个用例结束后强制还原。
+_ENV_ISOLATE = ("AUTOFLLOW_ENV", "NR_PROD", "AUTOFLLOW_DATA_DIR")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_global_env():
+    """用例结束后还原全局环境变量，杜绝跨文件环境污染。
+
+    用例内部仍可自由 setenv（如刻意验证 prod 护栏），仅在结束后还原。
+    """
+    saved = {k: os.environ.get(k) for k in _ENV_ISOLATE}
+    yield
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
 
 
 @pytest.fixture

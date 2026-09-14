@@ -140,6 +140,12 @@ def _flow_has_branch_node(flow: Optional[Dict[str, Any]]) -> bool:
                 return True
     return False
 
+# ── 历史查询子流程自动安装授权（#711）──
+# 装的是网关自有的 4 个 af_hist_* managed 子流程定义：增量 append、幂等、不碰任何用户
+# flow，与「禁止 agent 写 prod 用户流」的护栏语义不冲突，故默认放行；
+# 需要关闭时设 AUTOFLLOW_HIST_AUTOINSTALL=0。
+_HIST_AUTOINSTALL = os.environ.get("AUTOFLLOW_HIST_AUTOINSTALL", "1") != "0"
+
 # ── A9 结构化日志（trace_id + 各阶段耗时）──
 # 纯增量：网关此前无任何日志输出，加 logging 不影响既有行为。
 # 每条请求生成 trace_id，关键入口(propose_dsl/deploy_raw/deploy_proposal/list_pending)
@@ -3861,6 +3867,13 @@ class Gateway:
             except DefenseError as e:
                 return {"ok": False, "error": f"defense: {e}"}
 
+        # #711：历史查询子流程幂等确保 —— 必须在节点闸门【之前】，否则闸门实时拉 /flows
+        # 时 af_hist_* 尚未安装，会把「其实能自动装」的历史类 flow 误判成「节点类型未注册」。
+        # 必须无条件执行：下方闸门无条件运行，若这里因 dry_run 跳过，dry_run 校验阶段就会
+        # 误报，卡住白盒历史类 flow 的部署校验。装的是网关自有 managed 子流程，幂等、
+        # 不碰用户 flow（dry_run 里写一次无害）。
+        self._ensure_history_subflow_for(flow, allow_prod, _tid, "deploy_proposal")
+
         # 节点注册表闸门（P0 防御）：未知节点类型直接报错，不让坏 flow 上线
         self._gate_node_types(flow)
 
@@ -5037,10 +5050,7 @@ class Gateway:
         # （#119 护栏订正：is_prod() 按 env 判定，写 prod 必须 allow_prod=True，否则 _guard_prod
         # 抛 NRGuardError 被下方 except 吞掉，导致子流程永不重建）。绝不动 1880。
         if not dry_run:
-            from .subflows import (
-                ensure_bark_subflow, flow_uses_bark_subflow,
-                ensure_history_subflow, flow_uses_history_subflow,
-            )
+            from .subflows import ensure_bark_subflow, flow_uses_bark_subflow
             if flow_uses_bark_subflow(flow.get("nodes", [])):
                 try:
                     _bark_res = ensure_bark_subflow(self.nr.client, allow_prod=True)
@@ -5049,19 +5059,13 @@ class Gateway:
                 except Exception as _be:
                     # bark 缺只影响推送，不阻塞主流程；且活体已存在不会触发生成
                     _slog(_tid, "deploy_raw.bark_ensure_err", error=str(_be)[:200])
-            # Step 2.6b：历史查询子流程幂等确保（仿 bark 的 A3 模式）。
-            # 4 个 af_hist_* 子流程的 ensure 与 bark 同策略：活体已存在 → no-op（零风险）；
-            # 仅在缺失时从 subflows_built.json 重建（server 替换成默认 HA server，可移植）。
-            # 仅作用于 1990（prod 实例）→ allow_prod=True 显式 opt-in（#119 护栏订正），绝不动 1880。
-            if flow_uses_history_subflow(flow.get("nodes", [])):
-                try:
-                    _hist_res = ensure_history_subflow(self.nr.client, allow_prod=True)
-                    _slog(_tid, "deploy_raw.history_ensure",
-                          created=_hist_res.get("created"), exists=_hist_res.get("exists"),
-                          rebuilt=_hist_res.get("rebuilt"))
-                except Exception as _he:
-                    # 历史子流程缺只影响历史查询类能力，不阻塞主流程；活体已存在不会触发生成
-                    _slog(_tid, "deploy_raw.history_ensure_err", error=str(_he)[:200])
+        # Step 2.6b：历史查询子流程幂等确保（#711）—— 必须在节点闸门（Step 5）之前。
+        # 与 bark 不同：bark 缺只影响推送可留在 dry_run 内；history 缺会让下方闸门把
+        # 「其实能自动装」的 af_hist_* 误判成「节点类型未注册」，而闸门是无条件运行的，
+        # 故这里也【无条件】执行（dry_run 预览同样要给出正确结论）。
+        # 装的是网关自有 managed 子流程，幂等、不碰用户 flow，dry_run 里写一次无害。
+        # allow_prod=True：仅作用于 1990（prod 实例），绝不动 1880（#119 护栏订正）。
+        self._ensure_history_subflow_for(flow, True, _tid, "deploy_raw")
 
         # Step 2.7: 【D4/G2】link-out 目标校验（部署前捕获指向不存在 link-in 的悬空 link out，
         # 否则运行时报 'Error delivering message to node:undefined' 这类难定位故障）。
@@ -5668,6 +5672,10 @@ class Gateway:
             return {"ok": False, "stage": "ha_server_inject",
                     "error": self._ha_server_unresolved_msg(unresolved)}
 
+        # Step 3.9: 历史查询子流程幂等确保（#711）—— 在闸门前，避免把「其实能自动装」
+        # 的 af_hist_* 误报成 node_gate 错误，污染提案的 node_gate_ok 信号。
+        self._ensure_history_subflow_for(flow, _HIST_AUTOINSTALL, _tid, "propose_raw")
+
         # Step 4: 节点注册表闸门（P0 防御）—— 未知节点类型记 error 不拦提案（fail-open）
         _node_gate_ok = True
         try:
@@ -6212,6 +6220,14 @@ class Gateway:
                     "reasons": [f"实体未确认(应来自 resolve_entity)：{', '.join(rogue)}"],
                 }
 
+        # 0.6) 历史查询子流程幂等确保（#711）—— 黑箱链路 propose_dsl → run_staging_gate →
+        # 0.7 闸门。af_hist_* 若未装，闸门直接判「节点类型未注册」硬拦，agent 连提案都
+        # 产不出来（实测复现）。这里用 _HIST_AUTOINSTALL（默认 True）授权安装：装的是网关
+        # 自有的 4 个 managed 子流程定义，增量 append、幂等、不碰任何用户 flow，与「禁止
+        # agent 写 prod 用户流」的护栏语义不冲突。需要关闭时设 AUTOFLLOW_HIST_AUTOINSTALL=0。
+        self._ensure_history_subflow_for(flow, _HIST_AUTOINSTALL, None,
+                                         "run_staging_gate")
+
         # 0.7) 节点注册表闸门（P0 防御）：未知节点类型直接拦截，
         #      不让黑箱放行『编译合法但部署即坏』的 flow。
         try:
@@ -6235,6 +6251,28 @@ class Gateway:
         # 1) 单步默认：把首个 state 触发态注入 vhass（兼容旧行为，供条件门控/断言参考）
         trig = next((t for t in scene.triggers if t.kind == "state"), None) \
             if scene is not None else None
+        # 【F-R10-GATE-01】状态触发实体集合。触发态是**世界事件**，必须最后落定——
+        # seed_overrides 若在其后覆盖同一实体，会把分支判定条件抹掉
+        # （server-state-changed 的 ifState 比不中 → 0 HA 意图重放，R10 t07 结构性失效根因）。
+        _trigger_ents: set = set()
+        _trig_injected: Dict[str, str] = {}
+        if trig and trig.kind == "state":
+            _trigger_ents.add(trig.entity)
+
+        # 0.9) F-R10-GATE-01：seed_overrides 中落在**触发实体**上的条目前置应用
+        #      （先种子反态、后触发事件，后注入者胜）。其余实体仍按 1.5) 后置覆盖，
+        #      「触发事件 + 其他实体初始态」两件事的语义不变。
+        if seed_overrides and _trigger_ents:
+            for _so_eid in list(seed_overrides.keys()):
+                if _so_eid not in _trigger_ents:
+                    continue
+                try:
+                    if store.get_state(_so_eid) is None:
+                        continue
+                    store.inject_trigger(_so_eid, seed_overrides[_so_eid])
+                except Exception:
+                    pass
+
         if trig and trig.kind == "state":
             tstate = trig.state if trig.state not in ("*", None) else "changed"
             try:
@@ -6246,6 +6284,7 @@ class Gateway:
             tstate = _sanitize_trigger_state(tstate)
             try:
                 store.inject_trigger(trig.entity, tstate)
+                _trig_injected[trig.entity] = tstate
             except Exception:
                 pass
         elif scene is None:
@@ -6258,9 +6297,11 @@ class Gateway:
                         else nd.get("entityId") or nd.get("entity_id"))
                 _st = nd.get("ifState")
                 if _eid and _st:
+                    _trigger_ents.add(_eid)
                     try:
                         # F-R6.5：白箱直通口同样净化（第二实例，与 scene 路径同根因）
                         store.inject_trigger(_eid, _sanitize_trigger_state(_st))
+                        _trig_injected[_eid] = _sanitize_trigger_state(_st)
                     except Exception:
                         pass
                 break
@@ -6270,9 +6311,13 @@ class Gateway:
         #      后置者不得被前者覆盖；置于 _pre_states 采样之前——闸门据此判定
         #      changed_by_replay（前置已满足即无法证明 flow 改变了世界，B20）。
         #      只覆盖已存在的实体，绝不借道创建幽灵实体。
+        #      【F-R10-GATE-01】例外：触发实体已在 0.9) 前置应用（先种子后触发事件），
+        #      此处再覆盖会把触发态抹掉 → 分支判不中 → 0 意图，跳过。
         if seed_overrides:
             for _so_eid, _so_state in seed_overrides.items():
                 try:
+                    if _so_eid in _trigger_ents:
+                        continue
                     if store.get_state(_so_eid) is None:
                         continue
                     store.inject_trigger(_so_eid, _so_state)
@@ -6313,6 +6358,27 @@ class Gateway:
         _declared_effect_unreplayed_steps = []  # 【V-NEW-1】声明效果却 0 重放且不可归因于已知原因
         _extern_branch_unverified = []  # 【B22】外部调用驱动的分支 → 反置动作被重放却跳过断言
         for step in steps:
+            # 【F-R10-GATE-01·断言侧】状态触发实体上「期望态 == 注入触发态」的断言
+            # 由触发事件（世界）保证，不是 flow 的副作用证据；该实体通常也无服务被
+            # 重放，保留必然 coincidental 刷警告。剔除并告警；期望与触发态**不同**者
+            # 保留（如「开灯后关灯」，其重放起点由 0.9) 前置种子保证为反态，可证转变）。
+            if _trigger_ents:
+                _exp_all = step.get("expected") or []
+                _kept, _dropped = [], []
+                for _c in _exp_all:
+                    _eid_c = _c.get("entity_id")
+                    if (_eid_c in _trigger_ents
+                            and _trig_injected.get(_eid_c) is not None
+                            and _c.get("state") == _trig_injected.get(_eid_c)):
+                        _dropped.append(_eid_c)
+                    else:
+                        _kept.append(_c)
+                if _dropped:
+                    warnings.append(
+                        "【触发态断言剔除】" + "、".join(sorted(set(_dropped))) +
+                        " 的后置断言与状态触发事件同态——该状态由触发事件（世界）保证，"
+                        "不构成 flow 副作用证据，已从断言集剔除（F-R10-GATE-01）。")
+                    step = {**step, "expected": _kept}
             # 2a) 应用本步世界事件（多步场景逐步推进现实态）
             for eid, st in (step.get("world") or {}).items():
                 try:
@@ -6654,6 +6720,10 @@ class Gateway:
                 "分支依据其返回值判定 → 闸门无法求值，「未激活分支」的跳过结论不可信；且已实测到"
                 "与该后置条件相反的动作被重放。结论降级为未充分验证（B22）。"
                 "请勿把外部子流程返回值当作分支判据。")
+
+        # 【F-R10-T0·触发保真】的判定在 arena 层（_verify_flow）：闸门内 scene 与 flow
+        # 同源于一份 DSL，二者必然一致，在闸门内比对是死代码；只有 arena 拿得到题面
+        # （任务期望状态/时间触发 vs 提交 flow 仅 inject 触发）才能识别保真降级。
 
         # A22：存在「被跳过/未建模/重放归零 warn_only」的验证层时，即便断言全过也不算充分验证，
         # verdict 降级为「未充分验证」（而非「放行」），消除「零验证报 pass」假象。
@@ -7227,6 +7297,42 @@ class Gateway:
                         "e2e-trace 删除 flow %s 重试仍失败，可能遗留孤儿 tab：%s",
                         flow_id, e,
                     )
+
+    def _ensure_history_subflow_for(self, flow: Dict[str, Any],
+                                    allow_prod: bool,
+                                    tid: Optional[str] = None,
+                                    where: str = "deploy") -> Dict[str, Any]:
+        """含 af_hist_* 引用时，幂等确保 4 个历史查询子流程已装在目标 NR。
+
+        必须在 `_gate_node_types` 之前调用 —— 闸门实时拉 /flows 判断子流程是否存在，
+        先装后过闸才能放行（#711：此前 ensure 只在 deploy_raw 且写死 allow_prod=False，
+        prod 永不安装 → 历史类 flow 全被闸门拒绝）。
+
+        幂等：活体已存在且内容指纹一致 → no-op（零风险）；缺失/空壳/内容陈旧才重建。
+        不抛异常：装不上时由后续闸门给出准确的「节点类型未注册」错误，语义一致。
+        返回 ensure 结果 dict（跳过/失败时返回 {"skipped": ...}）。
+
+        ★ 恢复记录（2026-09-14）：本方法由 f98170b(#711) 引入，在 5e1c66d「拉齐 E 到 NAS
+        活树」同步提交中被整体冲掉（NAS 侧当时是另一种内联实现，仅覆盖 deploy_raw），
+        导致 deploy_proposal / propose_raw / run_staging_gate / modify_flow 四条路径
+        失去 ensure —— 新实例上历史类 flow 会被节点闸门误判「未注册」而静默失效。
+        此处按 f98170b 原语义恢复，不改行为。
+        """
+        from .subflows import ensure_history_subflow, flow_uses_history_subflow
+        if not flow_uses_history_subflow(flow.get("nodes", [])):
+            return {"skipped": "not_used"}
+        client = getattr(self.nr, "client", None)
+        if client is None:
+            return {"skipped": "no_nr_client"}
+        try:
+            res = ensure_history_subflow(client, allow_prod=allow_prod)
+            _slog(tid, f"{where}.history_ensure",
+                  created=res.get("created"), exists=res.get("exists"),
+                  rebuilt=res.get("rebuilt"), allow_prod=allow_prod)
+            return res
+        except Exception as e:  # noqa: BLE001 — 装不上不阻断，交由闸门给出准确错误
+            _slog(tid, f"{where}.history_ensure_err", error=str(e)[:200])
+            return {"skipped": "error", "error": str(e)[:200]}
 
     def _gate_node_types(self, flow: Dict[str, Any]) -> None:
         """节点注册表闸门（P0 防御）。
@@ -7969,6 +8075,9 @@ class Gateway:
                         "changed_nodes": 0}
             target["id"] = flow_id
             mode = "node_patches"
+        # ★ 历史查询子流程幂等确保 —— 必须在节点闸门【之前】（#711，见 deploy_proposal 注释）
+        # allow_prod 由调用方传入（人审/人触发默认放行写 prod；纯 agent 自动化受 prod 守卫保护）。
+        self._ensure_history_subflow_for(target, allow_prod, None, "modify_flow")
         # 节点注册表闸门（P0 防御）
         try:
             self._gate_node_types(target)
