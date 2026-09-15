@@ -90,6 +90,14 @@ class HALayer:
         """兜底：GET /api/areas（虚拟 HA/vhass 支持；真实 HA 可能 404 返回 {}）。"""
         return self.client.get_areas_http()
 
+    def entity_integrations(self) -> Dict[str, Optional[str]]:
+        """P0 决策层：实体集成名（config_entry.domain 回退 platform）。转发到 HAClient。"""
+        return self.client.entity_integrations()
+
+    def entity_platforms(self) -> Dict[str, Optional[str]]:
+        """P0 决策层：实体接入平台（注册表 platform 字段）。转发到 HAClient。"""
+        return self.client.entity_platforms()
+
     def domain_counts(self) -> Dict[str, int]:
         return self.client.domain_counts()
 

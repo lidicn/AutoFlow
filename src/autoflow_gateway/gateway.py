@@ -1884,10 +1884,36 @@ class Gateway:
                 'possible_states': self._possible_states(meta.get('domain')),
                 'matched_by': mb,
                 'confidence': conf,
+                'device_id': meta.get('device_id') or '',
+                'integration': meta.get('integration') or '',
+                'platform': meta.get('platform') or '',
             })
+        # P0 决策层：同物理设备多 entity_id 归并展示（设备卡）。
+        # 若 Top-N 里出现 ≥2 个候选共享同一 device_id，归并为一张设备卡并列出各接入路径
+        # （如某设备同时挂 light.xxx / switch.yyy / sensor.zzz），让 agent 一眼看清「这是同一个
+        # 物理设备、该挑哪个 domain」，避免把多实体当多个设备、或选错域。
+        _dg: Dict[str, Any] = {}
+        for c in out:
+            did = c.get('device_id')
+            if did:
+                grp = _dg.setdefault(did, {'device_id': did,
+                                          'integration': c.get('integration'),
+                                          'entities': []})
+                grp['entities'].append(c['entity_id'])
+        device_groups = [v for v in _dg.values() if len(v['entities']) > 1]
+        # P0 决策层：默认开学习闭环——high 置信单候选自动沉淀语义映射，下次同设备名直接命中，
+        # 免去重复模糊扫描且更稳。仅对「无歧义 high」落盘，绝不沉淀模糊/多候选猜测。
+        if len(top) == 1 and top[0][3] == 'high':
+            _eid = top[0][0]
+            if self.state.resolve(name) != _eid:
+                try:
+                    self.state.add_mapping(name, _eid)
+                except Exception:
+                    pass
         result = {'ok': True, 'query': name, 'area': area_filter,
                    'area_warning': area_warning,
-                   'domain': domain, 'count': len(out), 'candidates': out}
+                   'domain': domain, 'count': len(out),
+                   'candidates': out, 'device_groups': device_groups}
         # D36 防御纵深：写回缓存（容量上限，超出丢弃最旧条目防无限增长）。
         if len(_RESOLVE_ENTITY_CACHE) >= _RESOLVE_ENTITY_CACHE_MAX:
             _RESOLVE_ENTITY_CACHE.clear()
@@ -9088,6 +9114,17 @@ class Gateway:
             ha_areas = {}
             area_map = {}
             device_map = {}
+        # P0 决策层：platform / integration（实体接入平台与集成名）抓取独立于 area/device——
+        # 即使后端无该能力（如旧测试桩/虚拟 HA），也只让集成字段留空，不影响区域/设备映射核心能力。
+        # 经 HALayer 转发（非绕层直调 .client），保持层边界干净（契约测试 test_contracts_surface 盯防破口）。
+        integration_map: Dict[str, str] = {}
+        platform_map: Dict[str, str] = {}
+        try:
+            integration_map = self.ha.entity_integrations() or {}
+            platform_map = self.ha.entity_platforms() or {}
+        except Exception:
+            integration_map = {}
+            platform_map = {}
         # websocket 注册表缺失/为空时（如虚拟 HA vhass 仅暴露 REST /api/areas，
         # 或真实 HA 该版本 websocket 注册表为空但 REST 可用），主动尝试 REST 兜底。
         # 注意：_get_registries 失败是「静默返回空」而非抛异常，故不能只依赖 except 分支。
@@ -9119,8 +9156,10 @@ class Gateway:
                 # 正常路径：websocket 注册表实体映射（含 device 兜底）
                 area_name = area_map.get(eid) or s.get("area") or ""
                 dev_id = device_map.get(eid) or ""
+                plat = platform_map.get(eid) or ""
+                integ = integration_map.get(eid) or ""
             else:
-                # websocket 抓取失败：保留既有区域/设备映射，绝不把全库区域清零；
+                # websocket 抓取失败：保留既有区域/设备/集成映射，绝不把全库清零；
                 # 仅对新实体用 state 上的 area 兜底。
                 area_name = (prev_areas.get(eid)
                              or (existing.get("area") if existing else "")
@@ -9128,6 +9167,8 @@ class Gateway:
                 dev_id = (prev_devs.get(eid)
                           or (existing.get("device_id") if existing else "")
                           or "")
+                plat = (existing.get("platform") if existing else "") or ""
+                integ = (existing.get("integration") if existing else "") or ""
             caps = self._infer_caps(s)
             lc = s.get("last_changed")
             existing = ents.get(eid)
@@ -9145,6 +9186,8 @@ class Gateway:
                     "friendly_name": fn,
                     "area": area_name,
                     "device_id": dev_id,
+                    "platform": plat,
+                    "integration": integ,
                     "capabilities": caps,
                     "attributes": attrs,
                     "state": s.get("state"),

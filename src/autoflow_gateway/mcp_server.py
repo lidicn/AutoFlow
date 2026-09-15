@@ -102,9 +102,11 @@ def autoflow_resolve_entity(name: str, area: str = "", top_n: int = 8) -> str:
       全部一并返回，由你自行判断该用哪一个（例如「显示器挂灯」可能是 light 也可能是 switch，
       看返回里的 domain + friendly_name 决定）。不要预设它是 light 还是 switch。
     - 每个候选返回 {entity_id, friendly_name, domain, area, state(当前状态),
-      possible_states(该域可能状态), confidence}；
+      possible_states(该域可能状态), confidence, device_id, integration(接入集成名), platform(接入平台)}；
       possible_states 直接告诉你这个设备能同步到哪些状态（如 ["on","off"] / ["open","closed"]），
-      省去你猜。
+      省去你猜；integration/platform 让你在「同名多集成」时挑对来源（如 hue 灯 vs mqtt 灯）。
+    - 顶层额外返回 device_groups：若 Top-N 里出现 ≥2 个候选共享同一 device_id（同一物理设备挂多个
+      entity_id，如 light.x / switch.y / sensor.z），归并为设备卡并列出各接入路径，避免你当多设备处理或选错域。
     - area 可传中文房间词(书房/主卧室...)优先在该房间内找；找不到自动放宽到全局。
     - confidence=high 是强匹配（精确别名/同名），medium/low 是模糊，优先取 confidence=high 或排序第一。
     - 写 DSL 时把选中的 entity_id 作为 resolved_entities 传入 autoflow_propose_dsl，闸门会强制校验。"""

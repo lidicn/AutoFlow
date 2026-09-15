@@ -103,6 +103,16 @@ class FakeHA:
         # 测试用假后端：实体未绑设备，返回空映射（device_id 字段留空即可）
         return {}
 
+    def entity_platforms(self):
+        # P0 决策层：假后端给各实体标注接入平台，供 refresh_catalog 落盘 + 断言。
+        return {"light.living_room": "hue", "light.entrance": "hue",
+                "switch.kitchen": "mqtt"}
+
+    def entity_integrations(self):
+        # P0 决策层：假后端给各实体标注集成名（config_entry.domain），与 platform 同值。
+        return {"light.living_room": "hue", "light.entrance": "hue",
+                "switch.kitchen": "mqtt"}
+
     def invalidate_registries(self):
         # 真实 HAClient 用 websocket 缓存，这里无需操作
         pass
@@ -611,3 +621,92 @@ class TestBranchRequiredGate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestEntityResolutionDecisionLayer(unittest.TestCase):
+    """P0 决策层（v2.3.0 #13 速赢）：refresh 抓 integration/platform + resolve 设备归并/集成优选 + 默认学习闭环。
+
+    验证门：
+      V1 refresh_catalog 落盘 platform/integration（来自 HA 注册表 config_entry.domain 回退 platform）。
+      V2 resolve_entity 候选带 device_id/integration/platform，且 device_groups 归并同设备多实体。
+      V3 resolve_entity 对 high 置信单候选自动沉淀语义映射（默认开学习闭环）。
+    """
+
+    def setUp(self):
+        self.gw = make_gateway()
+        # 避免 module 级 _RESOLVE_ENTITY_CACHE 跨测试污染（影响 V3 的「未映射」判定）
+        import autoflow_gateway.gateway as _gwmod
+        _gwmod._RESOLVE_ENTITY_CACHE.clear()
+
+    def test_refresh_captures_integration_and_platform(self):
+        r = self.gw.refresh_catalog()
+        self.assertTrue(r["ok"])
+        cat = self.gw.state.get_device_catalog()
+        # 来自 FakeHA entity_integrations：light.* → hue，switch.kitchen → mqtt
+        self.assertEqual(cat["entities"]["light.living_room"]["integration"], "hue")
+        self.assertEqual(cat["entities"]["light.living_room"]["platform"], "hue")
+        self.assertEqual(cat["entities"]["switch.kitchen"]["integration"], "mqtt")
+        self.assertEqual(cat["entities"]["switch.kitchen"]["platform"], "mqtt")
+
+    def test_resolve_entity_carries_integration_platform_device_id(self):
+        self.gw.refresh_catalog()
+        res = self.gw.resolve_entity("客厅主灯")
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["count"], 1)
+        c = res["candidates"][0]
+        self.assertEqual(c["entity_id"], "light.living_room")
+        self.assertEqual(c["integration"], "hue")
+        self.assertEqual(c["platform"], "hue")
+        self.assertIn("device_id", c)
+        self.assertIn("device_groups", res)
+
+    def test_resolve_entity_device_groups_merge(self):
+        # 注入同物理设备挂多 entity_id 的目录（device_id 相同），验证归并设备卡。
+        self.gw.state.set_device_catalog({
+            "version": 1, "freshness": "now",
+            "entities": {
+                "light.study_desk": {"entity_id": "light.study_desk", "domain": "light",
+                                     "friendly_name": "书房显示器挂灯", "area": "书房",
+                                     "device_id": "dev_desk", "integration": "hue",
+                                     "platform": "hue", "state": "off"},
+                "switch.study_desk": {"entity_id": "switch.study_desk", "domain": "switch",
+                                      "friendly_name": "书房显示器挂灯开关", "area": "书房",
+                                      "device_id": "dev_desk", "integration": "hue",
+                                      "platform": "hue", "state": "off"},
+                "sensor.study_desk_pwr": {"entity_id": "sensor.study_desk_pwr", "domain": "sensor",
+                                          "friendly_name": "书房显示器挂灯功率", "area": "书房",
+                                          "device_id": "dev_desk", "integration": "hue",
+                                          "platform": "hue", "state": "0"},
+            },
+        })
+        res = self.gw.resolve_entity("书房显示器挂灯")
+        self.assertTrue(res["ok"])
+        # 3 个候选都共享 device_id=dev_desk → 归并成 1 张设备卡
+        self.assertEqual(len(res["device_groups"]), 1)
+        grp = res["device_groups"][0]
+        self.assertEqual(grp["device_id"], "dev_desk")
+        self.assertEqual(grp["integration"], "hue")
+        self.assertEqual(set(grp["entities"]),
+                         {"light.study_desk", "switch.study_desk", "sensor.study_desk_pwr"})
+
+    def test_resolve_entity_auto_learns_mapping_on_high_single(self):
+        # 不靠 refresh 播种（直接注入目录、清空映射），验证 high 单候选自动沉淀映射。
+        self.gw.state.set_device_catalog({
+            "version": 1, "freshness": "now",
+            "entities": {
+                "light.living_room": {"entity_id": "light.living_room", "domain": "light",
+                                      "friendly_name": "客厅主灯", "area": "客厅",
+                                      "device_id": "", "integration": "hue",
+                                      "platform": "hue", "state": "off"},
+            },
+        })
+        # 清空语义映射（模拟未播种状态）
+        self.gw.state.save_entity_mapping({"version": 1, "mappings": {},
+                                            "areas": {}, "room_aliases": {}})
+        self.assertIsNone(self.gw.state.resolve("客厅主灯"))
+        res = self.gw.resolve_entity("客厅主灯")
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["count"], 1)
+        self.assertEqual(res["candidates"][0]["confidence"], "high")
+        # 默认开学习闭环：应自动沉淀「客厅主灯」→ light.living_room
+        self.assertEqual(self.gw.state.resolve("客厅主灯"), "light.living_room")

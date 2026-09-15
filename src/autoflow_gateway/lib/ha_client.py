@@ -28,6 +28,7 @@ import subprocess
 import urllib.request
 import urllib.error
 from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
 try:
     import websockets
@@ -129,7 +130,8 @@ class HAClient:
 
     # ---------- HA websocket 注册表（area/device 唯一可靠来源；REST 不暴露） ----------
     async def _ws_fetch_registries(self):
-        """经 websocket 取 entity/device/area 三个注册表。返回 (ent, dev, area) 三个 list。"""
+        """经 websocket 取 entity/device/area 注册表 + config_entry 列表。
+        返回 (ent, dev, area, config_entries) 四个 list。"""
         if not _HAVE_WS:
             raise HAError("websockets 未安装，无法获取注册表（area/device）。请 pip install websockets。")
         ws_url = self.server.replace("http://", "ws://").replace("https://", "wss://") + "/api/websocket"
@@ -141,27 +143,29 @@ class HAClient:
             await ws.send(json.dumps({"id": 1, "type": "config/entity_registry/list"}))
             await ws.send(json.dumps({"id": 2, "type": "config/device_registry/list"}))
             await ws.send(json.dumps({"id": 3, "type": "config/area_registry/list"}))
+            await ws.send(json.dumps({"id": 4, "type": "config/config_entry/list"}))
             res = {}
-            for _ in range(3):
+            for _ in range(4):
                 m = json.loads(await ws.recv())
-                if m.get("type") == "result" and m.get("id") in (1, 2, 3):
+                if m.get("type") == "result" and m.get("id") in (1, 2, 3, 4):
                     r = m.get("result")
                     res[m["id"]] = r if isinstance(r, list) else []
-            return res.get(1, []), res.get(2, []), res.get(3, [])
+            return res.get(1, []), res.get(2, []), res.get(3, []), res.get(4, [])
 
     def _get_registries(self):
-        """同步取三个注册表（带 5 分钟缓存）。失败返回 ([],[],[])，上层优雅降级。"""
+        """同步取 实体/设备/区域注册表 + 配置项列表（带 5 分钟缓存）。
+        失败返回 ([],[],[],[])，上层优雅降级。"""
         now = time.time()
         if getattr(self, "_reg_cache", None) and now - self._reg_cache[0] < _REG_CACHE_TTL:
             return self._reg_cache[1]
         if not _HAVE_WS:
-            return [], [], []
+            return [], [], [], []
         try:
-            ent, dev, area = asyncio.run(self._ws_fetch_registries())
+            ent, dev, area, config_entries = asyncio.run(self._ws_fetch_registries())
         except Exception as e:  # 任何网络/认证/解析错误都不应炸掉 refresh
-            return [], [], []
-        self._reg_cache = (now, (ent, dev, area))
-        return ent, dev, area
+            return [], [], [], []
+        self._reg_cache = (now, (ent, dev, area, config_entries))
+        return ent, dev, area, config_entries
 
     def invalidate_registries(self):
         """强制下次重新拉取注册表（refresh_catalog 入口调用）。"""
@@ -176,7 +180,7 @@ class HAClient:
                        （HA 大量实体 area_id 为空，区域挂在 device 上，必须走 device 兜底）
         - entity_device:{entity_id: device_id}（供设备归组 B6 用）
         """
-        ent, dev, area = self._get_registries()
+        ent, dev, area, _config_entries = self._get_registries()
         area_map = {a.get("area_id"): a.get("name") for a in area if a.get("area_id")}
         dev_area = {d.get("id"): area_map.get(d.get("area_id")) for d in dev if d.get("id")}
         entity_area, entity_device = {}, {}
@@ -297,6 +301,31 @@ class HAClient:
         """返回 {entity_id: device_id}，供设备归组（B6）与 room_summary 使用。"""
         _, _, entity_device = self._get_area_index()
         return dict(entity_device)
+
+    def entity_platforms(self) -> Dict[str, Optional[str]]:
+        """返回 {entity_id: 注册表 platform 字段}（如 'hue'/'mqtt'/'zha'）。
+
+        供 refresh_catalog 落盘实体接入平台；无 websocket（注册表不可用）时返回 {}。"""
+        ent, _dev, _area, _ce = self._get_registries()
+        return {e.get("entity_id"): e.get("platform") for e in ent if e.get("entity_id")}
+
+    def entity_integrations(self) -> Dict[str, Optional[str]]:
+        """返回 {entity_id: 集成名}，用于实体解析决策层的「集成优选 / 设备归并」。
+
+        - 优先取 config_entry_id → config/config_entry/list 的 domain（真实集成名，如 'hue'）；
+        - 无 config_entry_id（纯 YAML 平台）时回退 platform 字段。
+        - 无 websocket（注册表不可用）时返回 {}，上层优雅降级。
+        """
+        ent, _dev, _area, config_entries = self._get_registries()
+        ce_map = {c.get("entry_id"): c.get("domain") for c in config_entries if c.get("entry_id")}
+        out = {}
+        for e in ent:
+            eid = e.get("entity_id")
+            if not eid:
+                continue
+            ce = e.get("config_entry_id")
+            out[eid] = ce_map.get(ce) or e.get("platform")
+        return out
 
     def get_history(self, entity_id, hours=24):
         """取最近 hours 小时的状态变化历史。返回 [{s, lu, lc, a}] 列表。"""
