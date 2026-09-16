@@ -102,6 +102,10 @@ _CONNECTIVITY_TIER_PENALTY = {"local": -0.5, "cloud": 0.5, "polling": 1.0}
 # 离线设备（state=unavailable/unknown）强降权，避免被静默置顶；属 entity_health 弱信号。
 _CONNECTIVITY_OFFLINE_PENALTY = 2.0
 
+# P2 #15 决策层：resolve 出口成功率漏斗计数（exact/medium/low/ambiguous/none）。
+# exact=单候选 high 置信；medium/low=单候选中低置信；ambiguous=多候选需澄清；none=0 候选。
+_RESOLVE_OUTCOME_COUNTS = {"exact": 0, "medium": 0, "low": 0, "ambiguous": 0, "none": 0}
+
 # D36 防御纵深：单次闸门校验引用的实体上限。家自动化流极少超过此数；超过即判异常复杂度，
 # 廉价拒绝（不逐个模糊解析），杜绝『N 个未知实体 → N 次 O(目录) 扫描』的串行阻塞 DoS。
 _MAX_ENTITY_REFS = 256
@@ -1831,6 +1835,55 @@ class Gateway:
             return "cloud"
         return "unknown"
 
+    def _resolve_outcome(self, count: int, top: List) -> str:
+        """P2 #15：把一次 resolve 结果归类为 5 档之一（成功率漏斗）。"""
+        if count == 0:
+            return "none"
+        if count >= 2:
+            return "ambiguous"
+        conf = top[0][3] if top else "low"
+        return {"high": "exact", "medium": "medium", "low": "low"}.get(conf, "low")
+
+    def _record_resolve_outcome(self, outcome: str, query: str, count: int) -> None:
+        """P2 #15：累加出口成功率漏斗计数（进程级，不落盘、不影响主流程）。
+
+        注意：resolve_entity 为无请求上下文的机械化同步助手，拿不到 trace_id，
+        故不在此写结构化日志——避免空 trace_id 污染单次请求的 trace 一致性断言。
+        漏斗可通过 get_resolve_telemetry() 读出，且 outcome 已随 resolve_entity 结果返回。
+        """
+        if outcome in _RESOLVE_OUTCOME_COUNTS:
+            _RESOLVE_OUTCOME_COUNTS[outcome] += 1
+
+    def _build_disambiguation(self, query, count, top, out, device_groups) -> List[str]:
+        """P2 #15：歧义/无候选/低置信时回自然语言消歧提示，驱动 agent 澄清而非静默猜域。"""
+        hints = []
+        if count == 0:
+            hints.append(f"「{query}」无匹配候选；请检查设备名/区域，或先 refresh_catalog() 再试。")
+        elif count >= 2:
+            items = "、".join(f"{c['entity_id']}({c['domain']}/{c['friendly_name']})"
+                              for c in out[:5])
+            hints.append(f"「{query}」匹配到 {count} 个候选：{items}。"
+                         f"请指定要控制的具体设备（用 resolve 返回的 entity_id），避免静默选错域。")
+        elif top and top[0][3] == "low":
+            c = out[0]
+            hints.append(f"「{query}」仅低置信度匹配到 {c['entity_id']}（{c['friendly_name']}），"
+                         f"建议确认后再写入 DSL。")
+        if device_groups:
+            hints.append(f"检测到 {len(device_groups)} 个「同物理设备多实体」分组，"
+                         f"优先按设备卡选择 domain。")
+        return hints
+
+    def get_resolve_telemetry(self) -> Dict[str, Any]:
+        """P2 #15：返回 resolve 出口成功率漏斗（进程内计数，重启清零；属轻量遥测）。"""
+        total = sum(_RESOLVE_OUTCOME_COUNTS.values())
+        resolved = (total - _RESOLVE_OUTCOME_COUNTS.get("none", 0)
+                    - _RESOLVE_OUTCOME_COUNTS.get("ambiguous", 0))
+        return {
+            "counts": dict(_RESOLVE_OUTCOME_COUNTS),
+            "total": total,
+            "resolved_rate": round(resolved / total * 100, 1) if total else 0.0,
+        }
+
     def resolve_entity(self, name: str, area: Optional[str] = None,
                        domain: Optional[str] = None, top_n: int = 5) -> Dict[str, Any]:
         '''自然语言设备名 → Top-N 候选 entity_id（受控选择，消灭 LLM 凭记忆写错 ID）。
@@ -1963,11 +2016,14 @@ class Gateway:
                     self.state.add_mapping(name, _eid)
                 except Exception:
                     pass
+        outcome = self._resolve_outcome(len(out), top)
+        self._record_resolve_outcome(outcome, name, len(out))
+        disambiguation = self._build_disambiguation(name, len(out), top, out, device_groups)
         result = {'ok': True, 'query': name, 'area': area_filter,
                    'area_warning': area_warning,
                    'domain': domain, 'count': len(out),
                    'candidates': out, 'device_groups': device_groups,
-                   'notes': notes}
+                   'notes': notes, 'outcome': outcome, 'disambiguation': disambiguation}
         # D36 防御纵深：写回缓存（容量上限，超出丢弃最旧条目防无限增长）。
         if len(_RESOLVE_ENTITY_CACHE) >= _RESOLVE_ENTITY_CACHE_MAX:
             _RESOLVE_ENTITY_CACHE.clear()
@@ -5526,6 +5582,25 @@ class Gateway:
             _resp["minted_id"] = real_fid
         return _resp
 
+    def classify_entity_reliability(self, entity_ids: List[str]) -> List[Dict[str, Any]]:
+        """P2 #15：基于 device_catalog 标注实体可靠性（连通性档位 + 离线弱信号）。
+
+        纯只读，返回 [{entity_id, connectivity_tier, offline_now, unreliable}]。
+        unreliable = 当前离线(unavailable/unknown) 或 polling 档位（高陈旧风险）。
+        **非阻塞标注**：只供 verify_flow 显式提示「自动化可能假绿」，绝不改动验证 verdict/passed
+        （fail-closed 不拦合法流——设备当前离线但将来会上线，拦了反而误伤）。"""
+        cat = self.state.get_device_catalog().get("entities", {})
+        out = []
+        for eid in entity_ids:
+            e = cat.get(eid)
+            if not e:
+                continue
+            tier = e.get("connectivity_tier") or "unknown"
+            off = e.get("state") in ("unavailable", "unknown")
+            out.append({"entity_id": eid, "connectivity_tier": tier,
+                        "offline_now": off, "unreliable": bool(off or tier == "polling")})
+        return out
+
     def verify_flow(self, flow_json: Dict, agent_id: str = "verify",
                     run_gate: bool = True, require_e2e: bool = False,
                     target: str = "staging", allow_prod: bool = False) -> Dict[str, Any]:
@@ -5650,6 +5725,19 @@ class Gateway:
 
         _slog(_tid, "verify_flow.done", elapsed=round(time.perf_counter() - _t0, 3),
               verdict=unified["verdict"], passed=unified["passed"])
+        # P2 #15：实体可靠性标注（防假绿，非阻塞）——离线/轮询档设备显式标注，不改 verdict/passed。
+        _ref_ents = []
+        for n in nodes:
+            _eid = (n.get("entity_id") or n.get("entityId")
+                    or (n.get("params") or {}).get("entity_id"))
+            if _eid and _eid not in _ref_ents:
+                _ref_ents.append(_eid)
+        reliability = self.classify_entity_reliability(_ref_ents)
+        unreliable = [r for r in reliability if r["unreliable"]]
+        if unreliable:
+            unified["notes"].append(
+                "实体可靠性偏低（离线/轮询档），自动化可能假绿，建议改用在线本地集成设备："
+                + "、".join(r["entity_id"] for r in unreliable))
         return {
             "ok": True,
             "deployed": False,
@@ -5660,6 +5748,7 @@ class Gateway:
             "lint": lint_issues,
             "lint_error_count": sum(1 for v in lint_issues if v.get("level") == "error"),
             "lint_warning_count": sum(1 for v in lint_issues if v.get("level") == "warning"),
+            "entity_reliability": reliability,
             "_trace_id": _tid,
         }
 

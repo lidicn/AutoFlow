@@ -112,6 +112,9 @@ def autoflow_resolve_entity(name: str, area: str = "", top_n: int = 8) -> str:
       entity_id，如 light.x / switch.y / sensor.z），归并为设备卡并列出各接入路径，避免你当多设备处理或选错域。
     - 顶层额外返回 notes：弱信号显式提示（如「设备 X 当前离线，建议优先在线本地集成设备 Y」），
       离线/常离线设备不要静默置顶，按提示挑在线本地集成替代。
+    - 顶层额外返回 outcome（exact/medium/low/ambiguous/none，成功率漏斗）与 disambiguation
+      （歧义/无候选/低置信时的自然语言消歧提示，驱动你澄清而非静默猜域）。
+    - 网关侧持续累计 resolve 出口计数（get_resolve_telemetry 可读成功率漏斗），用于衡量解析质量。
     - area 可传中文房间词(书房/主卧室...)优先在该房间内找；找不到自动放宽到全局。
     - confidence=high 是强匹配（精确别名/同名），medium/low 是模糊，优先取 confidence=high 或排序第一。
     - 写 DSL 时把选中的 entity_id 作为 resolved_entities 传入 autoflow_propose_dsl，闸门会强制校验。"""

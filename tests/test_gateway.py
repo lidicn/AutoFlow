@@ -793,3 +793,76 @@ class TestEntityResolutionConnectivityTier(unittest.TestCase):
             self.assertIn("connectivity_tier", c)
             self.assertIn("entity_health", c)
             self.assertIn("offline_now", c["entity_health"])
+
+
+class TestEntityResolutionTelemetryAndDisambiguation(unittest.TestCase):
+    """P2 #15 决策层（v2.3.0 #15）：resolve 出口成功率漏斗 + 自然语言消歧 + verify_flow 可靠性标注。
+
+    验证门：
+      V1 resolve 出口归类 exact/medium/low/ambiguous/none，且 exact 计数累加进遥测。
+      V2 无候选 → outcome=none + disambiguation 提示「无匹配」；多候选 → outcome=ambiguous +
+          disambiguation 列出候选驱动澄清（不静默猜域）。
+      V3 verify_flow 标注离线/轮询档设备为 unreliable，且【非阻塞】（不改 verdict/passed）。
+    """
+
+    def setUp(self):
+        self.gw = make_gateway()
+        import autoflow_gateway.gateway as _gwmod
+        _gwmod._RESOLVE_ENTITY_CACHE.clear()
+
+    def _set_catalog(self, entities):
+        self.gw.state.set_device_catalog({"version": 1, "freshness": "now", "entities": entities})
+
+    def test_outcome_exact_and_telemetry(self):
+        self._set_catalog({"light.x": {"entity_id": "light.x", "domain": "light",
+                                       "friendly_name": "唯一灯", "area": "书房", "device_id": "",
+                                       "integration": "hue", "platform": "hue",
+                                       "connectivity_tier": "local", "state": "on"}})
+        before = self.gw.get_resolve_telemetry()["counts"]["exact"]
+        res = self.gw.resolve_entity("唯一灯")
+        self.assertEqual(res["outcome"], "exact")
+        self.assertEqual(self.gw.get_resolve_telemetry()["counts"]["exact"], before + 1)
+
+    def test_outcome_none_and_disambiguation(self):
+        # 目录非空但查询无匹配 → outcome=none（注意空目录会走早退分支，不在此测）。
+        self._set_catalog({"light.x": {"entity_id": "light.x", "domain": "light",
+                                       "friendly_name": "唯一灯", "area": "书房", "device_id": "",
+                                       "integration": "hue", "platform": "hue",
+                                       "connectivity_tier": "local", "state": "on"}})
+        res = self.gw.resolve_entity("不存在XYZ")
+        self.assertEqual(res["outcome"], "none")
+        self.assertTrue(any("无匹配" in h for h in res["disambiguation"]))
+
+    def test_disambiguation_ambiguous_lists_candidates(self):
+        self._set_catalog({
+            "light.a": {"entity_id": "light.a", "domain": "light", "friendly_name": "客厅灯",
+                        "area": "客厅", "device_id": "", "integration": "hue", "platform": "hue",
+                        "connectivity_tier": "local", "state": "on"},
+            "light.b": {"entity_id": "light.b", "domain": "light", "friendly_name": "卧室灯",
+                        "area": "卧室", "device_id": "", "integration": "hue", "platform": "hue",
+                        "connectivity_tier": "local", "state": "on"},
+        })
+        res = self.gw.resolve_entity("灯")
+        self.assertEqual(res["outcome"], "ambiguous")
+        self.assertGreaterEqual(res["count"], 2)
+        self.assertTrue(any("匹配到" in h for h in res["disambiguation"]))
+
+    def test_verify_flow_reliability_annotation_nonblocking(self):
+        base = {"entity_id": "light.lamp", "domain": "light", "friendly_name": "灯", "area": "书房",
+                "device_id": "", "integration": "hue", "platform": "hue", "connectivity_tier": "local"}
+        flow = {"id": "f1", "label": "t", "nodes": [
+            {"id": "n1", "type": "api-call-service",
+             "params": {"entity_id": "light.lamp", "domain": "light", "service": "turn_on"}}]}
+        # 在线：不标不可靠
+        self._set_catalog({"light.lamp": dict(base, state="on")})
+        r_on = self.gw.verify_flow(flow, run_gate=False)
+        rel_on = {r["entity_id"]: r for r in r_on["entity_reliability"]}
+        self.assertFalse(rel_on["light.lamp"]["unreliable"])
+        # 离线：标不可靠 + 加提示，但 verdict 不变（非阻塞，防假绿不误伤合法流）
+        self._set_catalog({"light.lamp": dict(base, state="unavailable")})
+        r_off = self.gw.verify_flow(flow, run_gate=False)
+        rel_off = {r["entity_id"]: r for r in r_off["entity_reliability"]}
+        self.assertTrue(rel_off["light.lamp"]["unreliable"])
+        self.assertTrue(rel_off["light.lamp"]["offline_now"])
+        self.assertEqual(r_on["verdict"], r_off["verdict"])
+        self.assertTrue(any("可靠性偏低" in n for n in r_off["gate"].get("notes", [])))
