@@ -327,6 +327,26 @@ class HAClient:
             out[eid] = ce_map.get(ce) or e.get("platform")
         return out
 
+    def entity_connection_classes(self) -> Dict[str, Optional[str]]:
+        """返回 {entity_id: config_entry.connection_class}（如 'LOCAL_PUSH'/'CLOUD_POLL'）。
+
+        供 P1 #14 决策层推导 connectivity_tier（local>cloud>polling）。
+        connection_class 是 HA 对集成连通性/推送方式的权威分类，比硬编码平台清单可靠。
+        - 优先取 config_entry_id → config/config_entry/list 的 connection_class；
+        - 无 websocket（注册表不可用）或缺失时返回 {}，上层优雅降级（tier 留 unknown）。
+        """
+        ent, _dev, _area, config_entries = self._get_registries()
+        ce_map = {c.get("entry_id"): c.get("connection_class")
+                  for c in config_entries if c.get("entry_id")}
+        out = {}
+        for e in ent:
+            eid = e.get("entity_id")
+            if not eid:
+                continue
+            ce = e.get("config_entry_id")
+            out[eid] = ce_map.get(ce)
+        return out
+
     def get_history(self, entity_id, hours=24):
         """取最近 hours 小时的状态变化历史。返回 [{s, lu, lc, a}] 列表。"""
         end = datetime.now(timezone.utc)

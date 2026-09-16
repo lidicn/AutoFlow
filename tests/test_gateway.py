@@ -113,6 +113,12 @@ class FakeHA:
         return {"light.living_room": "hue", "light.entrance": "hue",
                 "switch.kitchen": "mqtt"}
 
+    def entity_connection_classes(self):
+        # P1 #14 决策层：假后端给各实体标注 connection_class，供 refresh 推导 connectivity_tier。
+        # light.living_room/kitchen 本地实时(local)，light.entrance 走云(cloud)。
+        return {"light.living_room": "LOCAL_PUSH", "light.entrance": "CLOUD_POLL",
+                "switch.kitchen": "LOCAL_PUSH"}
+
     def invalidate_registries(self):
         # 真实 HAClient 用 websocket 缓存，这里无需操作
         pass
@@ -710,3 +716,80 @@ class TestEntityResolutionDecisionLayer(unittest.TestCase):
         self.assertEqual(res["candidates"][0]["confidence"], "high")
         # 默认开学习闭环：应自动沉淀「客厅主灯」→ light.living_room
         self.assertEqual(self.gw.state.resolve("客厅主灯"), "light.living_room")
+
+
+class TestEntityResolutionConnectivityTier(unittest.TestCase):
+    """P1 #14 决策层（v2.3.0 #14）：connectivity_tier 抓取 + 排序降权/优选 + 健康度标注 + 提示。
+
+    验证门：
+      V1 refresh_catalog 经 connection_class 推导 connectivity_tier（LOCAL_PUSH→local / CLOUD_POLL→cloud）。
+      V2 resolve_entity 同置信度内 local 优先于 cloud（排序调整，不丢候选）。
+      V3 离线设备(state=unavailable)强降权，且 notes 显式提示离线/优先替代。
+      V4 候选带 connectivity_tier + entity_health 标注。
+    """
+
+    def setUp(self):
+        self.gw = make_gateway()
+        import autoflow_gateway.gateway as _gwmod
+        _gwmod._RESOLVE_ENTITY_CACHE.clear()
+
+    def test_refresh_captures_connectivity_tier(self):
+        r = self.gw.refresh_catalog()
+        self.assertTrue(r["ok"])
+        cat = self.gw.state.get_device_catalog()
+        # FakeHA.entity_connection_classes: living_room/kitchen=LOCAL_PUSH→local, entrance=CLOUD_POLL→cloud
+        self.assertEqual(cat["entities"]["light.living_room"]["connectivity_tier"], "local")
+        self.assertEqual(cat["entities"]["light.entrance"]["connectivity_tier"], "cloud")
+        self.assertEqual(cat["entities"]["switch.kitchen"]["connectivity_tier"], "local")
+
+    def _inject_twin(self, a_tier, a_state, b_tier, b_state):
+        # 两个同名实体（friendly_name 相等 → 同分 exact 命中，排序纯由 penalty 决定），隔离测试排序。
+        self.gw.state.set_device_catalog({
+            "version": 1, "freshness": "now",
+            "entities": {
+                "light.local_a": {"entity_id": "light.local_a", "domain": "light",
+                                  "friendly_name": "测试灯", "area": "书房",
+                                  "device_id": "", "integration": "hue", "platform": "hue",
+                                  "connectivity_tier": a_tier, "state": a_state},
+                "switch.cloud_b": {"entity_id": "switch.cloud_b", "domain": "switch",
+                                   "friendly_name": "测试灯", "area": "书房",
+                                   "device_id": "", "integration": "tuya", "platform": "tuya",
+                                   "connectivity_tier": b_tier, "state": b_state},
+            },
+        })
+
+    def test_local_preferred_over_cloud_same_confidence(self):
+        # 同置信度(high/exact)下，local 应排在 cloud 之前；两者都不离线。
+        self._inject_twin("local", "off", "cloud", "on")
+        res = self.gw.resolve_entity("测试灯")
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["count"], 2)
+        self.assertEqual(res["candidates"][0]["entity_id"], "light.local_a")
+        self.assertEqual(res["candidates"][1]["entity_id"], "switch.cloud_b")
+        # 标注到位
+        self.assertEqual(res["candidates"][0]["connectivity_tier"], "local")
+        self.assertEqual(res["candidates"][0]["entity_health"], {"offline_now": False})
+
+    def test_offline_downranked_below_online(self):
+        # 即便本地集成，离线(unavailable)也应被降到在线云集成之后；notes 提示离线。
+        self._inject_twin("local", "unavailable", "cloud", "on")
+        res = self.gw.resolve_entity("测试灯")
+        self.assertTrue(res["ok"])
+        # 在线 cloud 排第一，离线 local 排第二
+        self.assertEqual(res["candidates"][0]["entity_id"], "switch.cloud_b")
+        self.assertEqual(res["candidates"][1]["entity_id"], "light.local_a")
+        self.assertTrue(res["candidates"][1]["entity_health"]["offline_now"])
+        # 显式提示离线设备（不静默置顶）
+        self.assertTrue(any("离线" in n for n in res["notes"]))
+
+    def test_candidates_carry_tier_and_health(self):
+        self._inject_twin("polling", "off", "cloud", "on")
+        res = self.gw.resolve_entity("测试灯")
+        self.assertTrue(res["ok"])
+        tiers = {c["entity_id"]: c["connectivity_tier"] for c in res["candidates"]}
+        self.assertEqual(tiers["light.local_a"], "polling")
+        self.assertEqual(tiers["switch.cloud_b"], "cloud")
+        for c in res["candidates"]:
+            self.assertIn("connectivity_tier", c)
+            self.assertIn("entity_health", c)
+            self.assertIn("offline_now", c["entity_health"])

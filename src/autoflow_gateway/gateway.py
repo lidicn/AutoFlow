@@ -95,6 +95,13 @@ _ENTITY_ID_SHAPE_RE = re.compile(r"^[a-z0-9_][a-z0-9_.\-]*\.[a-z0-9_.\-]+$")
 _RESOLVE_ENTITY_CACHE: dict = {}
 _RESOLVE_ENTITY_CACHE_MAX = 1024
 
+# P1 #14 决策层：连通性档位排序权重（local>cloud>polling，unknown 中性不调整）。
+# 由 config_entry.connection_class 推导（LOCAL_PUSH→local / LOCAL_POLL→polling / CLOUD_*→cloud）。
+# 负权重=优先、正权重=降权、缺失=0（中性）。只影响排序、绝不过滤（fail-closed 不丢候选）。
+_CONNECTIVITY_TIER_PENALTY = {"local": -0.5, "cloud": 0.5, "polling": 1.0}
+# 离线设备（state=unavailable/unknown）强降权，避免被静默置顶；属 entity_health 弱信号。
+_CONNECTIVITY_OFFLINE_PENALTY = 2.0
+
 # D36 防御纵深：单次闸门校验引用的实体上限。家自动化流极少超过此数；超过即判异常复杂度，
 # 廉价拒绝（不逐个模糊解析），杜绝『N 个未知实体 → N 次 O(目录) 扫描』的串行阻塞 DoS。
 _MAX_ENTITY_REFS = 256
@@ -1806,6 +1813,24 @@ class Gateway:
     def _possible_states(self, domain: Optional[str]) -> List[str]:
         return self._DOMAIN_POSSIBLE_STATES.get(domain or "", [])
 
+    def _connectivity_tier_from_connection_class(self, cc: Optional[str]) -> str:
+        """P1 #14：HA config_entry.connection_class → connectivity_tier。
+
+        映射（与路线图 local>cloud>polling 三档一致）：
+          LOCAL_PUSH  → 'local'  （本地实时推送，最优）
+          LOCAL_POLL  → 'polling'（本地但轮询，有状态陈旧风险，降至 polling 档）
+          CLOUD_*     → 'cloud'  （依赖外网）
+          缺失/未知   → 'unknown'（中性，不调整排序）
+        """
+        if not cc:
+            return "unknown"
+        cc = str(cc).upper()
+        if cc.startswith("LOCAL"):
+            return "local" if cc.endswith("PUSH") else "polling"
+        if cc.startswith("CLOUD"):
+            return "cloud"
+        return "unknown"
+
     def resolve_entity(self, name: str, area: Optional[str] = None,
                        domain: Optional[str] = None, top_n: int = 5) -> Dict[str, Any]:
         '''自然语言设备名 → Top-N 候选 entity_id（受控选择，消灭 LLM 凭记忆写错 ID）。
@@ -1815,7 +1840,11 @@ class Gateway:
           medium : friendly_name 子串匹配（越靠前、字符串越短越优）
           low    : entity_id 子串匹配
         area 为「优先提示」而非硬约束：优先返回该区域候选；若该区域无匹配则放宽到全局，
-        避免区域名不完全一致（如设备未分配区域/区域别名差异）把正确设备整段排除。'''
+        避免区域名不完全一致（如设备未分配区域/区域别名差异）把正确设备整段排除。
+
+        P1 #14 决策层：候选额外带 connectivity_tier（local>cloud>polling，由集成 connection_class 推导）
+        与 entity_health（offline_now 弱信号）；排序在「置信度优先」之后纳入连通性/离线降权
+        （只影响排序、绝不过滤，fail-closed 不丢候选），并在 notes 里显式提示离线设备与优先替代。'''
         # D36 防御纵深：相同查询直接命中缓存，避免重复 O(目录) 模糊扫描。
         _ck = (name, area, domain)
         if _ck in _RESOLVE_ENTITY_CACHE:
@@ -1843,6 +1872,14 @@ class Gateway:
                 return (5.0 + eid_l.find(q) * 0.01, 'entity_id_substr', 'low')
             return None
 
+        def _penalty(meta):
+            # P1 #14：连通性档位 + 离线弱信号 → 排序惩罚（负=优先、正=降权、缺失=0）。
+            tier = meta.get('connectivity_tier') or 'unknown'
+            p = _CONNECTIVITY_TIER_PENALTY.get(tier, 0.0)
+            if meta.get('state') in ('unavailable', 'unknown'):
+                p += _CONNECTIVITY_OFFLINE_PENALTY
+            return p
+
         def _collect(afilter):
             out = []
             seen = set()
@@ -1851,7 +1888,7 @@ class Gateway:
                 meta = ents[mapped]
                 if (not afilter or self._area_match(meta, afilter, area, area_index)) and \
                    (not domain or meta.get('domain') == domain):
-                    out.append((mapped, meta, 'mapping', 'high', 0.0))
+                    out.append((mapped, meta, 'mapping', 'high', 0.0, 0.0))
                     seen.add(mapped)
             for eid, meta in ents.items():
                 if eid in seen:
@@ -1862,7 +1899,7 @@ class Gateway:
                     continue
                 s = _score(meta, eid)
                 if s is not None:
-                    out.append((eid, meta, s[1], s[2], s[0]))
+                    out.append((eid, meta, s[1], s[2], s[0], _penalty(meta)))
                     seen.add(eid)
             return out
 
@@ -1871,10 +1908,12 @@ class Gateway:
             # 区域名可能不完全一致（设备未分配区域/别名差异），放宽到全局，避免漏掉正确设备
             cands = _collect(None)
         conf_rank = {'high': 0, 'medium': 1, 'low': 2}
-        cands.sort(key=lambda c: (conf_rank.get(c[3], 3), c[4]))
+        # 排序：置信度优先 → 模糊分 → 连通性/离线惩罚（P1 #14，只影响同置信度内的次序）。
+        cands.sort(key=lambda c: (conf_rank.get(c[3], 3), c[4], c[5]))
         top = cands[:top_n]
         out = []
-        for eid, meta, mb, conf, _ in top:
+        for eid, meta, mb, conf, _, _p in top:
+            _off = meta.get('state') in ('unavailable', 'unknown')
             out.append({
                 'entity_id': eid,
                 'friendly_name': meta.get('friendly_name'),
@@ -1887,6 +1926,8 @@ class Gateway:
                 'device_id': meta.get('device_id') or '',
                 'integration': meta.get('integration') or '',
                 'platform': meta.get('platform') or '',
+                'connectivity_tier': meta.get('connectivity_tier') or 'unknown',
+                'entity_health': {'offline_now': _off},
             })
         # P0 决策层：同物理设备多 entity_id 归并展示（设备卡）。
         # 若 Top-N 里出现 ≥2 个候选共享同一 device_id，归并为一张设备卡并列出各接入路径
@@ -1901,6 +1942,18 @@ class Gateway:
                                           'entities': []})
                 grp['entities'].append(c['entity_id'])
         device_groups = [v for v in _dg.values() if len(v['entities']) > 1]
+        # P1 #14：显式回传 agent 的弱信号提示——离线设备降权并建议优先在线本地集成替代。
+        notes = []
+        online_local = [c for c in out
+                        if c.get('connectivity_tier') == 'local' and not c['entity_health']['offline_now']]
+        for c in out:
+            if c['entity_health']['offline_now']:
+                pref = online_local[0]['friendly_name'] if online_local else ''
+                if pref:
+                    notes.append(f"设备「{c['friendly_name']}」当前离线(state={c['state']})，"
+                                 f"建议优先在线本地集成设备「{pref}」")
+                else:
+                    notes.append(f"设备「{c['friendly_name']}」当前离线(state={c['state']})，已在排序中降权")
         # P0 决策层：默认开学习闭环——high 置信单候选自动沉淀语义映射，下次同设备名直接命中，
         # 免去重复模糊扫描且更稳。仅对「无歧义 high」落盘，绝不沉淀模糊/多候选猜测。
         if len(top) == 1 and top[0][3] == 'high':
@@ -1913,7 +1966,8 @@ class Gateway:
         result = {'ok': True, 'query': name, 'area': area_filter,
                    'area_warning': area_warning,
                    'domain': domain, 'count': len(out),
-                   'candidates': out, 'device_groups': device_groups}
+                   'candidates': out, 'device_groups': device_groups,
+                   'notes': notes}
         # D36 防御纵深：写回缓存（容量上限，超出丢弃最旧条目防无限增长）。
         if len(_RESOLVE_ENTITY_CACHE) >= _RESOLVE_ENTITY_CACHE_MAX:
             _RESOLVE_ENTITY_CACHE.clear()
@@ -9119,12 +9173,16 @@ class Gateway:
         # 经 HALayer 转发（非绕层直调 .client），保持层边界干净（契约测试 test_contracts_surface 盯防破口）。
         integration_map: Dict[str, str] = {}
         platform_map: Dict[str, str] = {}
+        conn_class_map: Dict[str, str] = {}
         try:
             integration_map = self.ha.entity_integrations() or {}
             platform_map = self.ha.entity_platforms() or {}
+            # P1 #14 决策层：config_entry.connection_class（LOCAL_PUSH/CLOUD_POLL…）→ connectivity_tier。
+            conn_class_map = self.ha.entity_connection_classes() or {}
         except Exception:
             integration_map = {}
             platform_map = {}
+            conn_class_map = {}
         # websocket 注册表缺失/为空时（如虚拟 HA vhass 仅暴露 REST /api/areas，
         # 或真实 HA 该版本 websocket 注册表为空但 REST 可用），主动尝试 REST 兜底。
         # 注意：_get_registries 失败是「静默返回空」而非抛异常，故不能只依赖 except 分支。
@@ -9158,6 +9216,8 @@ class Gateway:
                 dev_id = device_map.get(eid) or ""
                 plat = platform_map.get(eid) or ""
                 integ = integration_map.get(eid) or ""
+                # P1 #14：connectivity_tier 由 connection_class 推导（LOCAL_*/CLOUD_*）。
+                tier = self._connectivity_tier_from_connection_class(conn_class_map.get(eid))
             else:
                 # websocket 抓取失败：保留既有区域/设备/集成映射，绝不把全库清零；
                 # 仅对新实体用 state 上的 area 兜底。
@@ -9169,6 +9229,8 @@ class Gateway:
                           or "")
                 plat = (existing.get("platform") if existing else "") or ""
                 integ = (existing.get("integration") if existing else "") or ""
+                # 抓取失败：沿用既有 tier，绝不把全库清零。
+                tier = (existing.get("connectivity_tier") if existing else "") or "unknown"
             caps = self._infer_caps(s)
             lc = s.get("last_changed")
             existing = ents.get(eid)
@@ -9188,6 +9250,7 @@ class Gateway:
                     "device_id": dev_id,
                     "platform": plat,
                     "integration": integ,
+                    "connectivity_tier": tier,
                     "capabilities": caps,
                     "attributes": attrs,
                     "state": s.get("state"),
@@ -9203,6 +9266,9 @@ class Gateway:
                     added += 1
             else:
                 existing["gone"] = False  # 仍在，取消消失标记
+                # P1 #14：旧 catalog 缺 connectivity_tier 字段时补齐，避免解析侧读到 None。
+                if "connectivity_tier" not in existing:
+                    existing["connectivity_tier"] = tier
 
         # 标记已消失实体（保留映射）
         gone = 0

@@ -98,6 +98,11 @@ class HALayer:
         """P0 决策层：实体接入平台（注册表 platform 字段）。转发到 HAClient。"""
         return self.client.entity_platforms()
 
+    def entity_connection_classes(self) -> Dict[str, Optional[str]]:
+        """P1 #14 决策层：实体接入集成的 connection_class（LOCAL_PUSH/CLOUD_POLL…）。
+        转发到 HAClient，供 gateway 推导 connectivity_tier（不绕层直调 .client）。"""
+        return self.client.entity_connection_classes()
+
     def domain_counts(self) -> Dict[str, int]:
         return self.client.domain_counts()
 
