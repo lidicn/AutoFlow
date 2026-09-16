@@ -6,17 +6,20 @@
 
 工具数契约（含 B1/B2 新增的 2 个决策取回工具 + 只读/诊断回看工具 autoflow_get_flow / autoflow_debug_read /
 autoflow_get_nr_flow / autoflow_trigger_inject）：
-  · 用户工具 27（含 autoflow_request_decision / autoflow_get_decision /
+  · 用户工具 28（含 autoflow_request_decision / autoflow_get_decision /
     autoflow_list_decisions 决策闭环三件套，autoflow_get_flow / autoflow_debug_read /
     autoflow_get_nr_flow / autoflow_trigger_inject 诊断回看；其中 autoflow_debug_read /
-    autoflow_get_nr_flow / autoflow_trigger_inject 仅注册于 /mcp，不进 admin）
-  · 单用户端点 /mcp = 27 用户 + 15 刀 = 42（刀含 WB1-F/#694 的 autoflow_apply /
+    autoflow_get_nr_flow / autoflow_trigger_inject 仅注册于 /mcp，不进 admin；
+    外加 v2.2.0 收口新增 autoflow_get_inventory 只读 Node-RED 清点，仅挂用户面 /mcp，非刀，black 可见）
+  · 单用户端点 /mcp = 28 用户 + 16 刀 = 44（刀含 WB1-F/#694 的 autoflow_apply /
     autoflow_apply_rollback、CB7/#692 的 autoflow_apply_state_from_debug 胶水，及 #701 的
     autoflow_get_trace apply 轨迹读取刀，外加 #16 的 autoflow_snapshot_instance /
-    autoflow_restore_snapshot 实例快照/还原刀）
-  · /mcp-admin = 22 用户 + 15 刀 + 7 运维 = 44（autoflow_debug_read / autoflow_get_nr_flow /
-    autoflow_trigger_inject 仅注册于 /mcp，不进 admin；golden/acceptance 评测杠杆已迁 archive，见 C4）
-  · black 经 tools/list 过滤后见 27 用户工具（13 把刀已隐藏）
+    autoflow_restore_snapshot 实例快照/还原刀，外加 v2.2.0 收口新增 autoflow_surgical_edit
+    手术刀编辑刀，双装饰器挂 /mcp 与 /mcp-admin，列入 _DEPLOY_KNIVES 对 black 隐藏）
+  · /mcp-admin = 22 用户 + 16 刀 + 7 运维 = 45（autoflow_debug_read / autoflow_get_nr_flow /
+    autoflow_trigger_inject 仅注册于 /mcp，不进 admin；autoflow_get_inventory 仅用户面不进 admin；
+    golden/acceptance 评测杠杆已迁 archive，见 C4；autoflow_surgical_edit 双装饰器故进 admin）
+  · black 经 tools/list 过滤后见 28 用户工具（16 把刀已隐藏）
 
 工具数变更史（改基线必须在此登记原因，避免「测试跟着代码改」）：
   · 25 用户 / 38 总 → 26 用户 / 39 总：DEV-acp-integration #4 新增
@@ -27,6 +30,10 @@ autoflow_get_nr_flow / autoflow_trigger_inject）：
   · 40 总 → 42 总：#16 新增 autoflow_snapshot_instance / autoflow_restore_snapshot
     两把实例快照/还原运维刀（双装饰器，挂 /mcp 与 /mcp-admin，列入 _KNIVES 对 black 隐藏）；
     用户工具仍 27、black 过滤后仍 27（刀数 13 → 15）。
+  · 42 总 → 44 总（v2.2.0 收口）：新增 autoflow_get_inventory（只读清点，仅挂用户面 /mcp，
+    非刀，black 可见）+ autoflow_surgical_edit（#7 手术刀编辑，双装饰器挂 /mcp 与
+    /mcp-admin，列入 _KNIVES 对 black 隐藏）；故 /mcp: 28 用户 + 16 刀 = 44、
+    /mcp-admin: 22 用户 + 16 刀 + 7 运维 = 45、black 过滤后仍 28 用户工具。
 """
 import os
 import sys
@@ -46,6 +53,7 @@ _KNIVES = {
     "autoflow_apply", "autoflow_apply_rollback", "autoflow_apply_state_from_debug",
     "autoflow_get_trace",
     "autoflow_snapshot_instance", "autoflow_restore_snapshot",
+    "autoflow_surgical_edit",  # #7 Core 档手术刀编辑（v2.2.0 收口，对 black 隐藏）
 }
 
 
@@ -56,12 +64,12 @@ class TestSingleEntryMerge(unittest.TestCase):
 
     def test_user_endpoint_carries_all_tools(self):
         names = {t.name for t in ms.mcp._tool_manager.list_tools()}
-        self.assertEqual(len(names), 42, "单用户端点 /mcp 应为 42 工具（27 用户 + 15 刀）")
+        self.assertEqual(len(names), 44, "单用户端点 /mcp 应为 44 工具（28 用户 + 16 刀）")
         self.assertTrue(_KNIVES.issubset(names), "部署/自检刀必须在 /mcp 上注册")
 
     def test_admin_endpoint_unchanged(self):
         names = {t.name for t in ms.mcp_admin._tool_manager.list_tools()}
-        self.assertEqual(len(names), 44, "/mcp-admin 应为 44 工具（22 用户 + 15 刀 + 7 运维）")
+        self.assertEqual(len(names), 45, "/mcp-admin 应为 45 工具（22 用户 + 16 刀 + 7 运维）")
         self.assertTrue(_KNIVES.issubset(names))
 
     def test_acp_delegate_tool_user_face_only(self):
@@ -84,7 +92,7 @@ class TestSingleEntryMerge(unittest.TestCase):
         out = json.loads(ms._filter_tools_list(json.dumps(fake).encode()))
         visible = {t["name"] for t in out["result"]["tools"]}
         self.assertEqual(visible, set(all_names) - _KNIVES)
-        self.assertEqual(len(visible), 27, "black 经 tools/list 过滤后应仅见 27 用户工具")
+        self.assertEqual(len(visible), 28, "black 经 tools/list 过滤后应仅见 28 用户工具")
 
     def test_filter_passthrough_non_tools_list(self):
         self.assertEqual(ms._filter_tools_list(b""), b"", "空响应原样透传")

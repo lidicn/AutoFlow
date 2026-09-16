@@ -4306,6 +4306,214 @@ class Gateway:
             _resp["minted_id"] = fid
         return _resp
 
+    # ──────────────────────────────────────────────────────────────────────
+    # #8 · 多 flow 安全部署编排（一次 N 提案，任一不达标整体回滚）
+    # ──────────────────────────────────────────────────────────────────────
+    def deploy_proposals(self, ids: List[str], agent_id: str = "human",
+                         target: str = "prod", force: bool = False,
+                         validate: bool = True, allow_prod: bool = True,
+                         require_e2e: Optional[bool] = None,
+                         dry_run: bool = False) -> Dict[str, Any]:
+        """#8 批量安全部署：一次部署多个已通过提案，部署前整实例快照留底；
+        任一条不达标（闸/编译/冲突/防御失败）即把整实例回滚到部署前快照，绝不留下半截。
+
+        设计要点（与 deploy_proposal 的 per-call 快照正交、互补）：
+        - 进循环前只拍**一张**整实例快照 `deploy_proposals_before`（落盘前留底）；
+        - 逐条调用既有 deploy_proposal（其自身也会拍 deploy_proposal_before，无害冗余）；
+        - 任一条 ok=False → 立即 restore 整实例到本快照、rolled_back=True，返回已部署清单
+          + 失败清单（含首失败项的 error/stage），供 WebUI「一键回滚」按钮复用；
+        - 全成功 → 直接返回 deployed 清单，不回滚。
+        - 异常（非预期）同样整体回滚，fail-closed 不留半截。
+        ROADMAP #8 验收门：「部分失败时已部署部分可一键回滚到部署前快照」即此实现。
+        """
+        _tid = _new_trace_id()
+        _t0 = time.perf_counter()
+        if not ids:
+            return {"ok": False, "error": "ids 不能为空", "rolled_back": False,
+                    "deployed": [], "failed": []}
+        snap = self.nr.take_instance_snapshot("deploy_proposals_before") if not dry_run else None
+        deployed: List[Dict[str, Any]] = []
+        failed: List[Dict[str, Any]] = []
+
+        def _rollback() -> None:
+            if dry_run or not snap:
+                return
+            try:
+                self.nr.restore_instance_snapshot(snap, allow_prod=allow_prod)
+            except Exception as _rb:
+                _slog(_tid, "deploy_proposals.rollback_err", error=str(_rb)[:200])
+
+        try:
+            for pid in ids:
+                r = self.deploy_proposal(
+                    pid, agent_id=agent_id, target=target, force=force,
+                    validate=validate, allow_prod=allow_prod,
+                    require_e2e=require_e2e, dry_run=dry_run)
+                if r.get("ok"):
+                    deployed.append({
+                        "pid": pid,
+                        "flow_id": r.get("flow_id"),
+                        "label": r.get("label"),
+                        "created": r.get("created"),
+                    })
+                else:
+                    failed.append({
+                        "pid": pid,
+                        "error": r.get("error"),
+                        "stage": r.get("stage"),
+                        "conflict": r.get("conflict"),
+                    })
+                    _slog(_tid, "deploy_proposals.partial_fail", pid=pid,
+                          stage=r.get("stage"), error=str(r.get("error"))[:200])
+                    _rollback()
+                    return {
+                        "ok": False, "rolled_back": (not dry_run and snap is not None),
+                        "snapshot": snap, "deployed": deployed, "failed": failed,
+                        "error": f"提案 {pid} 部署未通过（{r.get('stage')}），整批已回滚",
+                    }
+        except Exception as _e:
+            _slog(_tid, "deploy_proposals.exception", error=str(_e)[:200])
+            _rollback()
+            return {
+                "ok": False, "rolled_back": (not dry_run and snap is not None),
+                "snapshot": snap, "deployed": deployed,
+                "failed": failed + [{"pid": None, "error": f"异常: {_e}"}],
+                "error": f"批量部署异常，整批已回滚: {_e}",
+            }
+
+        _slog(_tid, "deploy_proposals.done", deployed=len(deployed),
+              elapsed=round(time.perf_counter() - _t0, 3))
+        return {
+            "ok": True, "rolled_back": False, "snapshot": snap,
+            "deployed": deployed, "failed": failed,
+        }
+
+    # ──────────────────────────────────────────────────────────────────────
+    # #11 · 三句话人话摘要（意图 + 验证结果 + 影响设备）
+    # ──────────────────────────────────────────────────────────────────────
+    _ENTITY_RE = re.compile(
+        r"\b(?:light|switch|sensor|binary_sensor|cover|climate|fan|lock|scene|script|"
+        r"input_boolean|input_number|input_select|input_button|media_player|vacuum|"
+        r"humidifier|number|select|button|automation|device_tracker|person|group|"
+        r"alarm_control_panel|camera|valve|timer|zone)\.[a-z0-9_]+")
+
+    def proposal_summary(self, pid: str) -> Dict[str, Any]:
+        """#11 把一条提案压缩成「三句话人话卡」，供非技术用户在 WebUI 批准前秒懂：
+
+        ① 意图：这条自动化要做什么（spec/title/DSL 摘要）
+        ② 验证：部署前会经过怎样的验证（staging 闸重放几条断言 / Lint / 实机 E2E）
+        ③ 影响设备：会碰哪些 HA 实体（从 DSL / 预期条件 / raw flow 节点提取）
+
+        纯派生、不改任何状态；返回 {ok, type, intent, verification, impacted_devices,
+        plain:[三句]}。供 WebUI 卡片渲染（前端在途改动提交后接）。
+        """
+        store = ProposalStore(self.cfg)
+        p = store.get(pid)
+        if p is None:
+            return {"ok": False, "error": f"提案不存在: {pid}"}
+        try:
+            content = json.loads(p.content) if isinstance(p.content, str) else (p.content or {})
+        except Exception:
+            content = {}
+        if not isinstance(content, dict):
+            content = {}
+
+        ctype = content.get("type", "dsl")
+        intent = self._summarize_intent(p, content, ctype)
+        expected = content.get("expected_postconditions") or []
+        verification = self._summarize_verification(ctype, content, expected)
+        devices = self._summarize_impacted_devices(ctype, content)
+
+        plain = [
+            f"意图：{intent}".rstrip(),
+            f"验证：{verification}".rstrip(),
+            f"影响设备：{('、'.join(devices) if devices else '无（纯逻辑 / 无 HA 动作）')}".rstrip(),
+        ]
+        return {
+            "ok": True, "pid": pid, "type": ctype,
+            "intent": intent, "verification": verification,
+            "impacted_devices": devices, "plain": plain,
+        }
+
+    @staticmethod
+    def _summarize_intent(p, content: Dict[str, Any], ctype: str) -> str:
+        spec = (p.spec or "").strip()
+        if spec:
+            return spec
+        title = (p.title or "").strip()
+        if ctype == "dsl":
+            dsl = (content.get("dsl") or "").strip()
+            if dsl:
+                return dsl
+        if ctype == "raw_flow":
+            return (content.get("label") or title or "白盒流")
+        if ctype == "subflow":
+            return (content.get("name") or content.get("dsl_name") or title or "子流程")
+        return title or "未命名提案"
+
+    @staticmethod
+    def _summarize_verification(ctype: str, content: Dict[str, Any],
+                                expected: List[Dict]) -> str:
+        require_e2e = bool(content.get("require_e2e"))
+        if ctype == "subflow":
+            nm = content.get("name") or content.get("dsl_name") or "未知"
+            return f"原子注册子流程（{nm}），不跑 HA staging 闸门（属 Tier A 人工验证）"
+        if ctype == "raw_flow":
+            n_block = len(content.get("blocking_rules") or [])
+            if content.get("blocked"):
+                rules = "、".join(content.get("blocking_rules") or [])
+                return (f"含 {n_block} 条阻断级 Lint 问题（{rules}），部署将被拒；"
+                        f"请修正后重提")
+            base = (f"经 schema + Lint 校验（{content.get('lint_error_count', 0)} 错误 / "
+                    f"{content.get('lint_warning_count', 0)} 警告）")
+            if require_e2e:
+                base += "；且需实机 E2E 验证通过才放行"
+            return base
+        # dsl
+        n = len(expected)
+        if n == 0 and not require_e2e:
+            return ("无后置条件断言：仅经静态编译 / Lint 校验，部署前不重放 HA 意图"
+                    "（建议补『预期:』以便可验证）")
+        base = f"部署前将经 staging 闸门重放验证 {n} 条后置条件断言"
+        if require_e2e:
+            base += "；且需实机 E2E 验证通过才放行"
+        return base
+
+    @classmethod
+    def _summarize_impacted_devices(cls, ctype: str, content: Dict[str, Any]) -> List[str]:
+        devs: set = set()
+        if ctype == "dsl":
+            devs |= set(cls._ENTITY_RE.findall(content.get("dsl") or ""))
+            for ec in (content.get("expected_postconditions") or []):
+                e = ec.get("entity_id") if isinstance(ec, dict) else None
+                if isinstance(e, str):
+                    devs.add(e)
+        elif ctype == "raw_flow":
+            flow = content.get("flow") or {}
+            for n in flow.get("nodes", []) or []:
+                if not isinstance(n, dict):
+                    continue
+                if n.get("type") == "api-call-service":
+                    eid = n.get("entityId")
+                    if isinstance(eid, str):
+                        devs.add(eid)
+                    elif isinstance(eid, list):
+                        devs.update(str(x) for x in eid)
+                elif n.get("type") == "server-state-changed":
+                    ents = n.get("entities") if isinstance(n.get("entities"), dict) else None
+                    if ents:
+                        e = ents.get("entity")
+                        if isinstance(e, str):
+                            devs.add(e)
+                        elif isinstance(e, list):
+                            devs.update(str(x) for x in e)
+            devs |= set(cls._ENTITY_RE.findall(
+                json.dumps(content.get("flow") or {}, ensure_ascii=False)))
+        touched = content.get("entities_touched")
+        if isinstance(touched, list):
+            devs.update(str(x) for x in touched)
+        return sorted(d for d in devs if d)
+
     def _deploy_subflow_proposal(self, p, content: Dict[str, Any], agent_id: str,
                                 force: bool, dry_run: bool, tid: str, t0: float,
                                 allow_prod: bool = True) -> Dict[str, Any]:
@@ -5738,7 +5946,16 @@ class Gateway:
         for n in nodes:
             _eid = (n.get("entity_id") or n.get("entityId")
                     or (n.get("params") or {}).get("entity_id"))
-            if _eid and _eid not in _ref_ents:
+            if not _eid:
+                continue
+            # NR api-call-service 的 entityId 是数组（如 ["light.x"]），须展开成单实体，
+            # 否则 classify_entity_reliability 收到嵌套 list → cat.get([...]) 抛
+            # TypeError: unhashable type: 'list'（verify_flow 对任何正常流都会崩）。
+            if isinstance(_eid, list):
+                for e in _eid:
+                    if e and e not in _ref_ents:
+                        _ref_ents.append(e)
+            elif _eid not in _ref_ents:
                 _ref_ents.append(_eid)
         reliability = self.classify_entity_reliability(_ref_ents)
         unreliable = [r for r in reliability if r["unreliable"]]

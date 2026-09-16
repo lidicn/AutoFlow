@@ -107,8 +107,13 @@ class NRLayer:
             info=info, category=category, env=env, allow_prod=allow_prod)
 
     def modify_node_field(self, flow_id: str, node_id: str, fields: Dict,
-                           dry_run: bool = False) -> Dict:
-        return self.client.modify_node_field(flow_id, node_id, fields, dry_run=dry_run)
+                           dry_run: bool = False, allow_structural: bool = False) -> Dict:
+        """Core 档 #7 手术刀编辑：改单节点字段并部署（结构键默认禁止）。
+
+        委托底层 client.modify_node_field（nr_client.py:1711）；allow_structural 透传，
+        用于显式绕过结构键守卫（危险，仅内部用）。"""
+        return self.client.modify_node_field(
+            flow_id, node_id, fields, dry_run=dry_run, allow_structural=allow_structural)
 
     def modify_function_code(self, flow_id: str, node_id: str, code: str, name: str = None) -> Dict:
         return self.client.modify_function_code(flow_id, node_id, code, name=name)
@@ -147,6 +152,16 @@ class NRLayer:
         """
         return self.client.restore_snapshot(path, allow_prod=allow_prod,
                                             allow_partial=allow_partial)
+
+    # ── 只读清点（Core 档 #9）──
+    def get_inventory(self, protected_flow_ids: Optional[set] = None) -> Dict[str, Any]:
+        """Core 档 #9：tabs→nodes 树（含 af_* 归属 + 风险标注），纯 GET 无写路径。
+
+        委托底层 client.get_inventory（nr_client.py:329）。protected_flow_ids 来自网关
+        flow_catalog（受安全不变量保护的流），不传则只标 unknown_node_type 风险。
+        命名避开 NRLayer banned 属性，保持 layer 只上浮安全读。
+        """
+        return self.client.get_inventory(protected_flow_ids=protected_flow_ids)
 
     # ── 端到端执行追踪（E2E）透传 ──
     def inject_flow(self, flow_id: str) -> None:

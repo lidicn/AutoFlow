@@ -13,14 +13,19 @@ if SRC not in sys.path:
 
 os.environ.setdefault("AUTOFLLOW_ENV", "staging")
 _tmp = tempfile.mkdtemp(prefix="af_prop_")
-os.environ["AUTOFLLOW_DATA_DIR"] = _tmp
 
+from autoflow_gateway import config as _cfgmod
 from autoflow_gateway.proposals import ProposalStore, _is_test_agent, Proposal
 
 
 class TestPurgeTestProposals(unittest.TestCase):
     def setUp(self):
-        self.store = ProposalStore()
+        # 隔离：显式构造 config 并强制 data_dir 指向临时目录，既不走全局 get_config()
+        # 单例（避免 apply_saved_to_env 用真实连接设置覆盖、也避免 reset_config 污染其他
+        # 测试模块的全局配置），也不受 env 被其他测试模块改写的影响。
+        cfg = _cfgmod.GatewayConfig()
+        cfg.data_dir = _tmp
+        self.store = ProposalStore(config=cfg)
 
     def test_is_test_agent(self):
         self.assertTrue(_is_test_agent("agent_test"))

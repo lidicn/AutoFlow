@@ -91,6 +91,7 @@ _DEPLOY_KNIVES = {
     "autoflow_apply", "autoflow_apply_rollback", "autoflow_apply_state_from_debug",
     "autoflow_get_trace",
     "autoflow_snapshot_instance", "autoflow_restore_snapshot",  # #16 实例快照/还原运维刀（对 black 隐藏）
+    "autoflow_surgical_edit",  # #7 Core 档手术刀编辑（对 black 隐藏；get_inventory 只读不藏）
 }
 
 # ───────────── 读：自然语言设备名 → 实体候选（跨域，不引导猜域）─────────────
@@ -1578,6 +1579,69 @@ def autoflow_restore_snapshot(path: str, allow_prod: bool = False) -> str:
         return _js({"ok": True, **res})
     except Exception as e:
         return _js({"ok": False, "error": f"还原失败：{e}"})
+
+
+@mcp.tool()
+def autoflow_get_inventory(area: str = "") -> str:
+    """【只读·Core 清点】返回 Node-RED 全部 tab→node 树（含 af_* 归属 + 风险标注），
+    供 Core 极客辨认「哪些流是网关自管、哪些能动、哪些受保护」。
+
+    纯 GET，无任何写路径；不依赖真实 HA。
+    - area：可选，按 tab label 过滤（含该子串即返回）；空=全部。
+    - 返回 {ok, tab_count, node_count, tabs:[{id,label,owned_by_af,node_count,risks,nodes}]}；
+      风险项：unknown_node_type（节点 type 未安装，部署即静默丢消息）/
+      protected_flow（受安全不变量保护，agent 不可写）。
+    - 三面板均可调，纯只读。"""
+    gw = _gw()
+    try:
+        protected = set(gw.state.get_flow_catalog().get("flows", {}).keys())
+    except Exception:
+        protected = set()
+    try:
+        inv = gw.nr.get_inventory(protected_flow_ids=protected)
+    except Exception as e:
+        return _js({"ok": False, "error": f"清点失败（NR 不可达）: {e}"})
+    if area:
+        inv = dict(inv)
+        inv["tabs"] = [t for t in inv.get("tabs", []) if area in (t.get("label") or "")]
+        inv["tab_count"] = len(inv["tabs"])
+    inv.setdefault("ok", True)
+    return _js(inv)
+
+
+@mcp_admin.tool()
+@mcp.tool()
+def autoflow_surgical_edit(flow_id: str, node_id: str, fields_json: str,
+                          dry_run: bool = True, allow_structural: bool = False) -> str:
+    """【Core 档 #7·手术刀编辑】改单节点字段并部署（结构键 id/type/z/wires 默认禁止）。
+
+    - flow_id / node_id：目标流与节点。
+    - fields_json：JSON 对象，如 '{"name":"新名字","payload":"on"}'（仅非结构字段）。
+    - dry_run=True（默认）：只返回字段级 diff，不写、不部署——Core 极客预览首选。
+    - dry_run=False：写回并部署；部署前断言兄弟节点数 0 变化（fail-closed，绝不增删节点）。
+    - allow_structural=True 可绕过结构键守卫（危险，仅内部用）。
+    - ⚠️ 普通身份不可见也不可调（_DEPLOY_KNIVES 同级运维刀）。"""
+    agent = get_current_agent()
+    if agent is None:
+        return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
+    if agent.mode == "normal":
+        return _js({"ok": False, "error": "当前身份为『普通』(mode=normal)；手术刀编辑属原生手写能力，请改用『原生手写身份码』调用本工具。"})
+    if not flow_id or not node_id:
+        return _js({"ok": False, "error": "flow_id 与 node_id 必填。"})
+    try:
+        fields = json.loads(fields_json or "{}")
+    except json.JSONDecodeError:
+        return _js({"ok": False, "error": "fields_json 非法 JSON"})
+    if not isinstance(fields, dict) or not fields:
+        return _js({"ok": False, "error": "fields_json 必须是非空 JSON 对象。"})
+    gw = _gw()
+    try:
+        res = gw.nr.modify_node_field(flow_id, node_id, fields,
+                                      dry_run=dry_run,
+                                      allow_structural=bool(allow_structural))
+    except Exception as e:
+        return _js({"ok": False, "error": f"手术刀编辑失败: {e}"})
+    return _js({"ok": True, **res})
 
 
 @mcp_admin.tool()
