@@ -59,6 +59,9 @@ class FakeNR:
         return "server_auto"
     def validate_flow(self, flow):
         return []
+    def take_instance_snapshot(self, label):
+        # 测试桩：不连真 NR，返回虚拟快照路径（gateway 仅记录到 snapshot_before）
+        return f"/tmp/af_snap_{label}.json"
 
 
 class FakeHA:

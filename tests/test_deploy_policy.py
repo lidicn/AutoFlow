@@ -58,6 +58,9 @@ class FakeNR:
         return "server_auto"
     def validate_flow(self, flow):
         return []
+    def take_instance_snapshot(self, label):
+        # #16/T011：部署前整实例快照在测试里降级为无操作（返回虚拟路径）
+        return f"/tmp/af_snap_{label}.json"
 
 
 class FakeHA:

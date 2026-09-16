@@ -10,10 +10,11 @@ autoflow_get_nr_flow / autoflow_trigger_inject）：
     autoflow_list_decisions 决策闭环三件套，autoflow_get_flow / autoflow_debug_read /
     autoflow_get_nr_flow / autoflow_trigger_inject 诊断回看；其中 autoflow_debug_read /
     autoflow_get_nr_flow / autoflow_trigger_inject 仅注册于 /mcp，不进 admin）
-  · 单用户端点 /mcp = 27 用户 + 13 刀 = 40（刀含 WB1-F/#694 的 autoflow_apply /
+  · 单用户端点 /mcp = 27 用户 + 15 刀 = 42（刀含 WB1-F/#694 的 autoflow_apply /
     autoflow_apply_rollback、CB7/#692 的 autoflow_apply_state_from_debug 胶水，及 #701 的
-    autoflow_get_trace apply 轨迹读取刀）
-  · /mcp-admin = 22 用户 + 13 刀 + 7 运维 = 42（autoflow_debug_read / autoflow_get_nr_flow /
+    autoflow_get_trace apply 轨迹读取刀，外加 #16 的 autoflow_snapshot_instance /
+    autoflow_restore_snapshot 实例快照/还原刀）
+  · /mcp-admin = 22 用户 + 15 刀 + 7 运维 = 44（autoflow_debug_read / autoflow_get_nr_flow /
     autoflow_trigger_inject 仅注册于 /mcp，不进 admin；golden/acceptance 评测杠杆已迁 archive，见 C4）
   · black 经 tools/list 过滤后见 27 用户工具（13 把刀已隐藏）
 
@@ -23,6 +24,9 @@ autoflow_get_nr_flow / autoflow_trigger_inject）：
     故 /mcp-admin 的 42 不变）。
   · 26 用户 / 39 总 → 27 用户 / 40 总：E:/NAS/autoflow 收敛自 NAS prod 活树，
     相对 af_acp(e8b3e63) 多 1 个用户工具（活树演进，非刀误加，black 过滤后仍可见）。
+  · 40 总 → 42 总：#16 新增 autoflow_snapshot_instance / autoflow_restore_snapshot
+    两把实例快照/还原运维刀（双装饰器，挂 /mcp 与 /mcp-admin，列入 _KNIVES 对 black 隐藏）；
+    用户工具仍 27、black 过滤后仍 27（刀数 13 → 15）。
 """
 import os
 import sys
@@ -41,6 +45,7 @@ _KNIVES = {
     "autoflow_set_tab_state", "autoflow_verify_flow",
     "autoflow_apply", "autoflow_apply_rollback", "autoflow_apply_state_from_debug",
     "autoflow_get_trace",
+    "autoflow_snapshot_instance", "autoflow_restore_snapshot",
 }
 
 
@@ -51,12 +56,12 @@ class TestSingleEntryMerge(unittest.TestCase):
 
     def test_user_endpoint_carries_all_tools(self):
         names = {t.name for t in ms.mcp._tool_manager.list_tools()}
-        self.assertEqual(len(names), 40, "单用户端点 /mcp 应为 40 工具（27 用户 + 13 刀）")
-        self.assertTrue(_KNIVES.issubset(names), "14 把部署/自检刀必须在 /mcp 上注册")
+        self.assertEqual(len(names), 42, "单用户端点 /mcp 应为 42 工具（27 用户 + 15 刀）")
+        self.assertTrue(_KNIVES.issubset(names), "部署/自检刀必须在 /mcp 上注册")
 
     def test_admin_endpoint_unchanged(self):
         names = {t.name for t in ms.mcp_admin._tool_manager.list_tools()}
-        self.assertEqual(len(names), 42, "/mcp-admin 应为 42 工具（22 用户 + 13 刀 + 7 运维）")
+        self.assertEqual(len(names), 44, "/mcp-admin 应为 44 工具（22 用户 + 15 刀 + 7 运维）")
         self.assertTrue(_KNIVES.issubset(names))
 
     def test_acp_delegate_tool_user_face_only(self):

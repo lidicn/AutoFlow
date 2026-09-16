@@ -35,8 +35,7 @@ def _minimal_flow(fid, n_nodes=2):
 
 
 def test_restore_snapshot_reapplies_all_flows():
-    """restore_snapshot 把快照里每个 flow 重放（create_or_update_flow），
-    返回恢复的 flow 数；断言每个 flow 都走了 PUT。"""
+    """#16/T011 修复：restore_snapshot 整包 POST /flows 还原（不得逐条 PUT）。"""
     fid = "af_restore"
     flow = _minimal_flow(fid)
     snap_path = os.path.join(tempfile.gettempdir(), "nr_restore_test.json")
@@ -46,24 +45,31 @@ def test_restore_snapshot_reapplies_all_flows():
             "flows": [flow, _minimal_flow("af_other")],
         }, f)
 
+    posts = []
     puts = []
     client = nr.NodeRedClient(url="http://x:1880")
 
     def _fake_json(method, endpoint, **kw):
+        if method == "POST" and endpoint == "/flows":
+            # 整实例还原：必须整包 POST /flows
+            posts.append(kw.get("json"))
+            return {"rev": "ok"}
+        if method == "GET" and endpoint == "/flows":
+            return []  # 部署前 live 视为空（guard(0) 无 missing → 放行）
         if method == "GET" and endpoint.startswith("/flow/"):
-            # 视为已存在 → 走 update 路径（1 PUT）
             return {"id": endpoint.split("/")[-1]}
         if method == "PUT":
             puts.append(endpoint)
-            return {"id": endpoint.split("/")[-1]}
         return {"id": "x"}
 
     client._json = _fake_json
     restored = client.restore_snapshot(snap_path)
-    assert restored == 2, f"应恢复 2 个 flow，实得 {restored}"
-    # 每个 flow 一次 PUT（update 路径）
-    assert puts.count(f"/flow/{fid}") == 1, puts
-    assert puts.count("/flow/af_other") == 1, puts
+    # 返回整包还原结果（restored_items = 快照 flow 数）
+    assert restored["restored_items"] == 2, restored
+    # 关键：必须整包 POST /flows，不得逐条 PUT（旧实现写崩实例的根因）
+    assert posts, "还原必须整包 POST /flows"
+    assert len(posts[0]) == 2, posts
+    assert puts == [], f"还原不得逐条 PUT flow：{puts}"
 
 
 def test_create_or_update_rolls_back_on_failure():
@@ -145,6 +151,35 @@ def test_circuit_breaker_delete_big_flow():
         assert False, "大 flow 删除应被熔断"
     except nr.NRGuardError as e:
         assert "熔断" in str(e), str(e)
+
+
+def test_take_instance_snapshot_then_restore_posts_whole_package():
+    """#16 端到端：take_instance_snapshot 落盘 → restore_snapshot 整包 POST /flows 还原。"""
+    flows = [_minimal_flow("af_snap"), _minimal_flow("af_other2")]
+    posts = []
+    puts = []
+    client = nr.NodeRedClient(url="http://x:1880")
+
+    def _fake_json(method, endpoint, **kw):
+        if method == "GET" and endpoint == "/flows":
+            return flows  # 模拟「部署前整实例」状态
+        if method == "POST" and endpoint == "/flows":
+            posts.append(kw.get("json"))
+            return {"rev": "ok"}
+        if method == "PUT":
+            puts.append(endpoint)
+        return {"id": "x"}
+
+    client._json = _fake_json
+    snap_path = client.take_instance_snapshot("before_test")
+    assert snap_path and os.path.exists(snap_path), "快照应落盘"
+    with open(snap_path, "r", encoding="utf-8") as f:
+        snap = json.load(f)
+    assert len(snap["flows"]) == 2, snap
+    res = client.restore_snapshot(snap_path)
+    assert res["restored_items"] == 2, res
+    assert posts and len(posts[0]) == 2, posts
+    assert puts == [], f"还原不得逐条 PUT：{puts}"
 
 
 if __name__ == "__main__":

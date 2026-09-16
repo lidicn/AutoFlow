@@ -127,6 +127,27 @@ class NRLayer:
         """
         return self.client.put_flow_raw(flow_id, flow_data)
 
+    def take_instance_snapshot(self, label: str) -> Optional[str]:
+        """#16/T011：整实例快照（GET /flows 全包），落盘前留底。
+
+        委托底层 client.take_instance_snapshot（_snapshot_raw）；还原走
+        restore_instance_snapshot（POST /flows 整包，T011 安全）。
+        命名避开 NRLayer banned 属性 `deploy_all`/`replace_all`。
+        """
+        return self.client.take_instance_snapshot(label)
+
+    def restore_instance_snapshot(self, path: str, allow_prod: bool = False,
+                                   allow_partial: bool = True) -> Dict[str, Any]:
+        """#16/T011：整实例还原（POST /flows 全包，经 client.restore_snapshot）。
+
+        把 take_instance_snapshot 生成的快照还原到 NR；绝不可逐条 PUT（旧实现写崩实例）。
+        allow_partial 默认 True（还原即回滚：删差集是预期行为）。
+        命名避开 NRLayer  banned 属性 `restore_snapshot`（CONTRACTS.md §2.1：整实例替换入口
+        不得上浮到 Layer；本方法只是「还原到指定快照」，且走 client 的 POST /flows 全量重部署）。
+        """
+        return self.client.restore_snapshot(path, allow_prod=allow_prod,
+                                            allow_partial=allow_partial)
+
     # ── 端到端执行追踪（E2E）透传 ──
     def inject_flow(self, flow_id: str) -> None:
         """触发 flow 中所有 inject 节点（P5 E2E 用）。"""

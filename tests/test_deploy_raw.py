@@ -159,6 +159,8 @@ class _FakeNR:
         self.last_id = fid
         self.last_flow = flow_data
         return {"id": fid, "created": True}
+    def take_instance_snapshot(self, label):
+        return f"/tmp/af_snap_{label}.json"
 
 
 def test_deploy_raw_remaps_before_nr():

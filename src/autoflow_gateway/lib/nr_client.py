@@ -487,33 +487,42 @@ class NodeRedClient:
             _log_operation("GUARD_SNAPSHOT_WRITE_FAIL", f"{e}")
             return None
 
-    def restore_snapshot(self, path: str, allow_prod: bool = False) -> int:
-        """把 _snapshot_raw 生成的快照回滚（重放）到 NR。
+    def take_instance_snapshot(self, label: str) -> Optional[str]:
+        """#16：公开整实例快照入口（GET /flows 全包留底到磁盘）。
 
-        行为级回滚的核心逃逸口：deploy_all / create_tab 写前已拍全量快照，
-        任一写操作失败时可调用本方法把整实例恢复到部署前 last-good。
-        逐 flow 走 create_or_update_flow（force=True 跳过节点数熔断，
-        lint 仍拦数据损坏；prod 需 allow_prod 显式 opt-in）。
-        返回成功恢复的 flow 数。
+        供网关部署前/手动操作前调用，返回快照路径；失败返回 None 不阻塞主流程。
+        回滚走 restore_snapshot(path)（POST /flows 整包，T011 安全）。
+        """
+        return self._snapshot_raw(label)
+
+    def restore_snapshot(self, path: str, allow_prod: bool = False,
+                         allow_partial: bool = True) -> Dict[str, Any]:
+        """全实例原子还原（#16/T011 修复：经 deploy_all 整包 POST /flows）。
+
+        ⚠️ 旧实现的历史缺陷（T011 §6 实测，会把实例写崩，已废弃）：
+        逐条遍历扁平 GET /flows 数组，把 tab 条目与 node 条目都当成独立 flow 交给
+        create_or_update_flow → tab 被 PUT 成空 tab（原节点全清），node 被当成新 tab
+        重建（孤儿化）。结果：全实例节点数归零。
+
+        正解：NR 的 /flows 是全量扁平数组（tab + 各 tab 节点以 z 归属），还原必须整包
+        POST 交回 NR 自己重建归属关系 —— 即 deploy_all（POST /flows 全量重部署）。
+        故本方法现在是 deploy_all 的薄封装（force=True 跳过节点数熔断；护栏(0)(3) 与 lint 仍生效）。
+
+        allow_partial 默认 True（还原即回滚）：坏部署往往在快照后新增了 flow，差集会被删除，
+        这正是回滚的预期行为；若误设 False，护栏(0) 会因「线上多了快照没有的 flow」而拦下回滚。
+        返回 {"restored_items": n, "result": deploy_all 结果}。
         """
         if not os.path.exists(path):
             raise FileNotFoundError(f"快照不存在：{path}")
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         flows = data.get("flows", [])
-        restored = 0
-        for fl in flows:
-            if not isinstance(fl, dict) or "id" not in fl:
-                continue
-            try:
-                self.create_or_update_flow(
-                    fl["id"], fl, force=True, allow_prod=allow_prod)
-                restored += 1
-            except Exception as e:  # pragma: no cover - 回滚自身失败兜底
-                _log_operation("RESTORE_FAIL",
-                               f"flow={fl.get('id')} | {e}")
-        _log_operation("RESTORE", f"path={path} | restored={restored}/{len(flows)}")
-        return restored
+        if not flows:
+            raise ValueError(f"快照无 flows 内容，拒绝还原（空 payload 会清场）：{path}")
+        res = self.deploy_all(flows, force=True, allow_prod=allow_prod,
+                              allow_partial=allow_partial)
+        _log_operation("RESTORE", f"path={path} | items={len(flows)} | deploy_all")
+        return {"restored_items": len(flows), "result": res}
 
     def _live_counts(self):
         """返回 (tab_count, node_count, flows_list)。

@@ -3847,6 +3847,8 @@ class Gateway:
         _t0 = time.perf_counter()
         _slog(_tid, "deploy_proposal.start", pid=pid, agent_id=agent_id,
               target=target, validate=validate)
+        # #16 部署前整实例快照（GET /flows 全包）——落盘前留底，失败可 autoflow_restore_snapshot 回滚
+        snap_before = self.nr.take_instance_snapshot("deploy_proposal_before") if not dry_run else None
         store = ProposalStore(self.cfg)
         p = store.get(pid)
         if p is None:
@@ -4281,6 +4283,7 @@ class Gateway:
         # D5-a（C5）：回显 authored→minted 映射，与 deploy_raw 一致
         _resp = {
             "ok": True,
+            "snapshot_before": snap_before,
             "flow_id": fid,
             "created": created,
             "_trace_id": _tid,
@@ -5091,11 +5094,13 @@ class Gateway:
             日常部署由 Step 8.5 结构金丝雀快速把关，e2e 退为手动/周期回归用。
 
         返回 {ok, flow_id, created, label, node_count, validation:[], gate:{}, deployed_at,
-              logic:{ok, logic_issues, unreachable_actions, action_endpoints, reachable_actions,
-                     scenarios, summary}}。
+             logic:{ok, logic_issues, unreachable_actions, action_endpoints, reachable_actions,
+                    scenarios, summary}}。
         """
         _tid = _new_trace_id()
         _t0 = time.perf_counter()
+        # #16 部署前整实例快照在「实际落 NR 前」(Step 8) 才拍，避免预算/闸早期返回误触 NR
+        snap_before = None
         _slog(_tid, "deploy_raw.start", agent_id=agent_id, target=target, run_gate=run_gate,
               node_count=len(flow_json.get("nodes", []) if isinstance(flow_json, dict) else []))
         # Step 1: 输入校验
@@ -5480,6 +5485,8 @@ class Gateway:
                 }
 
         # Step 8: 部署到 NR
+        # #16 部署前整实例快照（GET /flows 全包）——落盘前留底，失败可 autoflow_restore_snapshot 回滚
+        snap_before = self.nr.take_instance_snapshot("deploy_raw_before")
         try:
             result = self.nr.create_or_update_flow(fid, flow, force=True,
                                                    allow_prod=allow_prod)
@@ -5555,6 +5562,7 @@ class Gateway:
         # （NR 只接受 16 位 hex），真实落盘 id 与请求 id 不同时透明回显。
         _resp = {
             "ok": True,
+            "snapshot_before": snap_before,
             # WB24 NEW-F5（透明性）：回显最终归一化后的 flow_json，便于调用方/测试核对
             # 部署前的归一化结果（如 trigger-state 的 version/entities 改写、HA server 注入、id 重映射）。
             "flow_json": flow,

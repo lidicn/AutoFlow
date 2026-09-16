@@ -65,6 +65,8 @@ class FakeNR:
 
     def validate_flow(self, flow):
         return []
+    def take_instance_snapshot(self, label):
+        return f"/tmp/af_snap_{label}.json"
 
 
 class FakeHA:

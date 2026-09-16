@@ -75,6 +75,8 @@ class FakeNR:
 
     def validate_flow(self, flow):
         return []
+    def take_instance_snapshot(self, label):
+        return f"/tmp/af_snap_{label}.json"
 
     def simulate_out_of_band_delete(self, fid):
         """用户手动在 NR UI 删掉 tab（带外）。"""

@@ -90,6 +90,7 @@ _DEPLOY_KNIVES = {
     "autoflow_set_tab_state", "autoflow_verify_flow",
     "autoflow_apply", "autoflow_apply_rollback", "autoflow_apply_state_from_debug",
     "autoflow_get_trace",
+    "autoflow_snapshot_instance", "autoflow_restore_snapshot",  # #16 实例快照/还原运维刀（对 black 隐藏）
 }
 
 # ───────────── 读：自然语言设备名 → 实体候选（跨域，不引导猜域）─────────────
@@ -1534,6 +1535,50 @@ def autoflow_apply_rollback(trace_id: str, auto_approve: bool = False) -> str:
                     "apply 回滚属原生手写能力，请改用『原生手写身份码』调用本工具。"})
     return _js(_gw().apply_rollback(trace_id, agent_id=agent.agent_id,
                                     auto_approve=auto_approve, allow_prod=True))
+
+@mcp_admin.tool()
+@mcp.tool()
+def autoflow_snapshot_instance(label: str = "manual_before") -> str:
+    """【部署前·整实例快照】对真实 Node-RED 实例拍一份 GET /flows 全包快照到磁盘。
+
+    #16：任何高风险操作（手动改流/批量部署）前先拍一份，出事可用 autoflow_restore_snapshot 回滚。
+    - label 仅作文件名标识（如 'before_big_deploy'）。
+    - 返回 {ok, snapshot_path, label}；失败返回 {ok:False, error}。
+    - 只读 GET /flows，不改任何状态；⚠️ 普通身份不可见也不可调（_DEPLOY_KNIVES）。"""
+    agent = get_current_agent()
+    if agent is None:
+        return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
+    if agent.mode == "normal":
+        return _js({"ok": False, "error": "当前身份为『普通』(mode=normal)；"
+                    "实例快照属运维能力，请改用『原生手写身份码』调用本工具。"})
+    path = _gw().nr.take_instance_snapshot(label)
+    if not path:
+        return _js({"ok": False, "error": "快照失败（NR 不可达或写盘失败）"})
+    return _js({"ok": True, "snapshot_path": path, "label": label})
+
+
+@mcp_admin.tool()
+@mcp.tool()
+def autoflow_restore_snapshot(path: str, allow_prod: bool = False) -> str:
+    """【部署前·整实例还原】把 autoflow_snapshot_instance / 部署返回 snapshot_before 的快照还原到 NR。
+
+    #16/T011 安全：内部走 POST /flows 整包重部署（原子、整实例），绝不可逐条 PUT（旧实现写崩实例）。
+    - path：快照文件绝对路径（来自 autoflow_snapshot_instance 或部署返回的 snapshot_before）。
+    - allow_prod=True 才允许还原 prod 实例（默认 False 拦下，防误清场）。
+    - 返回 {ok, restored_items, result}；空快照/不存在返回 {ok:False, error}。
+    - ⚠️ 普通身份不可见也不可调（_DEPLOY_KNIVES）。"""
+    agent = get_current_agent()
+    if agent is None:
+        return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
+    if agent.mode == "normal":
+        return _js({"ok": False, "error": "当前身份为『普通』(mode=normal)；"
+                    "实例还原属运维能力，请改用『原生手写身份码』调用本工具。"})
+    try:
+        res = _gw().nr.restore_instance_snapshot(path, allow_prod=allow_prod)
+        return _js({"ok": True, **res})
+    except Exception as e:
+        return _js({"ok": False, "error": f"还原失败：{e}"})
+
 
 @mcp_admin.tool()
 @mcp.tool()

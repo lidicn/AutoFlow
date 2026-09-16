@@ -84,6 +84,13 @@ def _mcp_tools(tree):
                 hit = isinstance(inner, ast.Name) and inner.id in ("_gw", "gw")
             elif isinstance(recv, ast.Name):
                 hit = recv.id in ("_gw", "gw")
+            elif isinstance(recv, ast.Attribute) and recv.attr == "nr":
+                # 支持经 NRLayer 转发：_gw().nr.X / gw.nr.X（如快照/还原运维刀）
+                base = recv.value
+                if isinstance(base, ast.Call):
+                    hit = isinstance(base.func, ast.Name) and base.func.id in ("_gw", "gw")
+                elif isinstance(base, ast.Name):
+                    hit = base.id in ("_gw", "gw")
             if hit:
                 calls.append((f.attr, [k.arg for k in call.keywords if k.arg]))
         tools.append((node.name, params, calls))

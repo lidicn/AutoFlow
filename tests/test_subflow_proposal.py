@@ -76,6 +76,8 @@ class FakeNR:
 
     def validate_flow(self, flow):
         return []
+    def take_instance_snapshot(self, label):
+        return f"/tmp/af_snap_{label}.json"
 
     def create_subflow(self, subflow_id, name, in_ports, out_ports, nodes,
                        info="", category="subflows", env=None, allow_prod=False):
