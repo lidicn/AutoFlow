@@ -42,7 +42,7 @@
 |---|---|---|---|---|
 | **v2.1.0** | 收口稳定 | 共用 | 94 测试红清帐 / MA 消费点 / 守卫测试绿 / 安全不变量固化进闸 | 进行中 |
 | **v2.2.0** | 双档成型 | Core+Pro | Core：手术刀编辑+diff+多 flow 安全部署；Pro：引导式 DSL+极简批准；共用 verify_flow 核 | 进行中（Core 档先行，2026-09-14 起；#7/#9 引擎已落地） |
-| **v2.3.0** | 实体解析决策智能 + 可信闭环 | 共用 | 实体解析决策层（device 归并/集成优选/弱信号降权/遥测）；快照/回滚稳定化；Arena 转正回归台；防假绿四件套+幽灵实体固化 | 待排期 |
+| **v2.3.0** | 实体解析决策智能 + 可信闭环 | 共用 | 实体解析决策层（device 归并/集成优选/弱信号降权/遥测）；快照/回滚稳定化；Arena 转正回归台；防假绿四件套+幽灵实体固化 | 进行中（#13/#14/#15 实体解析决策层已落地 2026-09-16；#16/#17/#18 待排期） |
 | **v3.0.0** | 平台成熟 | 共用 | 最小稳定工具面(Core/Pro MCP+UI)；部署/验证/回滚审计；安全扩展接口(预留关) | 待排期 |
 | **v4.0.0** | 生态共存 | 跨 | AutoForge→AutoFlow 交接协议（导出+验证+部署）；明确非重叠 | **可选/延后** |
 
@@ -78,14 +78,14 @@
 | # | 项 | 内容 | 验收门 |
 |---|---|---|---|
 | 7 | 🔧 **手术刀式单节点/单 flow 编辑**（引擎✅ 2026-09-14） | `nr_client.modify_node_field` 支持结构键守卫（禁改 id/type/z/wires/inputs/outputs）+ `dry_run` diff 预览 + 兄弟节点数 0 变化断言（fail-closed）；连线走 `add_wire`/`remove_wire`。**待续**：WebUI/MCP 工具面暴露（人批准路径，agent 不写非 `af_*` 流） | ✅ 引擎单测 `test_nr_client_core_surgical.py` 9 例全绿（守卫/diff/兄弟数/节点缺失）；验收门「兄弟节点数 0 变化 + diff 可读」已满足 |
-| 8 | **多 flow 安全部署** | 一次部署多个 flow，逐个 node-count/structural guard；任一个不达标整体回退，不半部署 | ✅ 部分失败时已部署部分可一键回滚到部署前快照 |
+| 8 | ✅ **多 flow 安全部署**（commit d8c583f 后端 + 8a00acd 前端，2026-09-16/17） | 一次部署多个 flow，逐个 node-count/structural guard；任一个不达标整体回退，不半部署（WebUI 提案多选 + 批量部署到 NR，任一失败整体回滚） | ✅ 部分失败时已部署部分可一键回滚到部署前快照；前端批量部署 UI + 单测 4 passed |
 | 9 | 🔧 **只读 inventory 增强**（引擎✅ 2026-09-14） | `nr_client.get_inventory()` 纯 GET 清点 tabs→nodes，含 `owned_by_af`（label `af_` 前缀）+ 风险标注（`unknown_node_type` / `protected_flow`）；零写路径。**待续**：WebUI 只读面板暴露 | ✅ 引擎单测 `test_nr_client_core_surgical.py` 3 例全绿（结构/归属/受保护/纯只读）；验收门「列得全、标注准、只读」已满足 |
 
 **Pro 档（小白）**
 | # | 项 | 内容 | 验收门 |
 |---|---|---|---|
 | 10 | **引导式 DSL 编写** | 对话/表单引导产出 DSL；编译后即 verify_flow 可视化（不暴露 NR 细节） | ✅ 小白按引导产出 1 条可验证 DSL |
-| 11 | **极简批准 UX** | 一键批准 / 一键回滚；展示"意图 + 验证结果 + 影响设备"三句话，无技术噪音 | ✅ 非技术用户能独立完成批准/回滚 |
+| 11 | ✅ **极简批准 UX**（commit 8a00acd，2026-09-17） | 一键批准 / 一键回滚；展示"意图 + 验证结果 + 影响设备"三句话（💡 人话卡，提案卡内插），无技术噪音 | ✅ 非技术用户能独立完成批准/回滚；三句话卡前端+端点已落地（test_webui_proposals_v22 4 passed） |
 
 **共用**
 | # | 项 | 内容 | 验收门 |
@@ -100,9 +100,9 @@
 
 | # | 项 | 内容 | 验收门 | 优先级 |
 |---|---|---|---|---|
-| 13 | 🔧 **实体解析·设备归并与集成优选（P0）** | `refresh_catalog` 抓取 `integration`/`platform`（HA websocket `entity_registry` 直给 `platform`/`config_entry_id`，零成本）；`resolve_entity` 按 `device_id` 归并同物理设备多 entity_id、去重展示并标注各接入路径；默认开启 `state.add_mapping` 沉淀人工选择为精确映射（high 置信），下次直中 | ✅ 同 device_id 双集成实体在候选中归并为一条设备卡、首选本地集成；"书房电脑"二次解析直中（不再每轮重排） | 速赢可随 v2.2 插队 |
-| 14 | **实体解析·连通性与健康度（P1）** | catalog 增 `connectivity_tier`（local>cloud>polling，由 integration/config_entry 推导）+ `entity_health`（`offline_rate`，由 state 历史 `unavailable`/`unknown` 频次 + `last_seen` 间隔推导）；`resolve_entity` 打分纳入降权/优选并显式回传 agent（"设备 Y 常离线，建议优先 X"） | ✅ 弱信号设备候选降权且带 health 标注；本地集成排序优先于云集成；离线设备不被静默置顶 | 紧随 P0 |
-| 15 | **实体解析·遥测与消歧闭环（P2）** | `resolve` 出口记 `exact/medium/low/ambiguous/none` 计数（落指标/`intent_log`），给出真实成功率；歧义时回自然语言消歧提示（"书房电脑 是 switch 开机卡，不是 light"）；与 `verify_flow` 联动——离线/低健康度设备不进自动化候选或明确标注，防假绿 | ✅ 遥测可读出成功率漏斗；歧义提示驱动 agent 澄清；离线设备被 verify 标记不可靠 | 收尾 |
+| 13 | ✅ **实体解析·设备归并与集成优选（P0）**（commit 4b703f5，2026-09-16） | `refresh_catalog` 抓取 `integration`/`platform`（HA websocket `entity_registry` 直给 `platform`/`config_entry_id`，零成本）；`resolve_entity` 按 `device_id` 归并同物理设备多 entity_id、去重展示并标注各接入路径；默认开启 `state.add_mapping` 沉淀人工选择为精确映射（high 置信），下次直中 | ✅ 同 device_id 双集成实体在候选中归并为一条设备卡、首选本地集成；"书房电脑"二次解析直中（不再每轮重排） | 已落地（速赢插队 v2.2 完成） |
+| 14 | ✅ **实体解析·连通性与健康度（P1）**（commit b4888ef，2026-09-16） | catalog 增 `connectivity_tier`（local>cloud>polling，由 integration/config_entry 推导）+ `entity_health`（`offline_rate`，由 state 历史 `unavailable`/`unknown` 频次 + `last_seen` 间隔推导）；`resolve_entity` 打分纳入降权/优选并显式回传 agent（"设备 Y 常离线，建议优先 X"） | ✅ 弱信号设备候选降权且带 health 标注；本地集成排序优先于云集成；离线设备不被静默置顶 | 已落地 |
+| 15 | ✅ **实体解析·遥测与消歧闭环（P2）**（commit 54fbe6e，2026-09-16） | `resolve` 出口记 `exact/medium/low/ambiguous/none` 计数（落指标/`intent_log`），给出真实成功率；歧义时回自然语言消歧提示（"书房电脑 是 switch 开机卡，不是 light"）；与 `verify_flow` 联动——离线/低健康度设备不进自动化候选或明确标注，防假绿 | ✅ 遥测可读出成功率漏斗；歧义提示驱动 agent 澄清；离线设备被 verify 标记不可靠 | 已落地 |
 | 16 | **快照/回滚稳定化** | 部署前自动整实例快照；失败/异常一键回滚（修掉 T011 逐条扁平 PUT 全 tab 归零坑，坚持 `POST /flows` 整包） | ✅ 回滚后状态 == 部署前；无归零 | — |
 | 17 | **Arena 转正回归台** | 每次发版用 Arena 跑回归断言（不进生产，纯验收）；从"实验场"变"回归台" | ✅ 发版阻塞于 Arena 回归红 | — |
 | 18 | **防假绿四件套 + 幽灵实体固化** | B20 空转 / B22 未激活分支 / F-R5-01 死锁 / F-R6.5 数值当字符串 + 幽灵实体检测，固化进 verify 闸门，不可旁路 | ✅ 针对性用例全绿，旁路即失败 | — |
