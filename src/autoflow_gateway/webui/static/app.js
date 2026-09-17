@@ -1845,7 +1845,7 @@ let _propTotal = 0;
 
 async function loadProposals() {
   const v = $("#view-proposals");
-  v.innerHTML = `<div class="view-head"><h2>提案</h2><span class="sub">Agent 提交的 flow，经安全闸验证后可部署到 Node-RED</span></div>
+  v.innerHTML = `<div class="view-head"><h2>提案</h2><span class="sub">Agent 提交的 flow，经安全闸验证后可部署到 Node-RED</span><button class="btn sm primary" style="margin-left:auto" onclick="wizardModal()">➕ 引导创建（Pro）</button></div>
     <div class="search-bar" style="margin:10px 0;display:flex;gap:8px;align-items:center">
       <input id="p-search" type="text" placeholder="🔍 搜索当前页提案（标题 / ID / DSL 内容）…" style="flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--bg);color:var(--text)">
       <span id="p-filter-count" style="font-size:12px;color:var(--text-dim);white-space:nowrap"></span>
@@ -2148,6 +2148,142 @@ async function batchDeployProposals() {
     if (bd) bd.disabled = false;
     loadProposals();
   }
+}
+
+// ── #10 Pro 引导式 DSL 向导 ──
+function wizardModal() {
+  window._wz = {}; window._wz_step = 1;
+  modal("引导式创建自动化（Pro）", `
+    <div id="wz-steps" style="display:flex;gap:6px;margin-bottom:12px;font-size:12px;color:var(--text-dim)">
+      <span data-s="1" style="font-weight:600;color:var(--accent,#27ae60)">① 触发</span><span>→</span>
+      <span data-s="2">② 动作</span><span>→</span>
+      <span data-s="3">③ 预览验证</span>
+    </div>
+    <div id="wz-1">
+      <div class="field"><label>场景标题</label><input class="input" id="wz-title" placeholder="如：电脑开机打开显示器灯"></div>
+      <div class="field"><label>触发设备（自然语言，如「显示器灯」「书房电脑」）</label>
+        <div style="display:flex;gap:6px"><input class="input" id="wz-t-name" placeholder="设备名 / 房间"><button class="btn sm" id="wz-t-search">搜索</button></div></div>
+      <div id="wz-t-cands"></div>
+      <div class="field" id="wz-t-state-wrap" style="display:none"><label>触发状态</label>
+        <select class="input" id="wz-t-state"><option value="on">变为 开 (on)</option><option value="off">变为 关 (off)</option></select></div>
+    </div>
+    <div id="wz-2" style="display:none">
+      <div class="field"><label>动作设备</label>
+        <div style="display:flex;gap:6px"><input class="input" id="wz-a-name" placeholder="设备名 / 房间"><button class="btn sm" id="wz-a-search">搜索</button></div></div>
+      <div id="wz-a-cands"></div>
+      <div class="field" id="wz-a-act-wrap" style="display:none"><label>动作</label>
+        <select class="input" id="wz-a-act"><option value="turn_on">打开 (turn_on)</option><option value="turn_off">关闭 (turn_off)</option><option value="toggle">切换 (toggle)</option></select></div>
+    </div>
+    <div id="wz-3" style="display:none">
+      <pre id="wz-dsl" style="background:var(--bg-soft,#f5f5f5);padding:10px;border-radius:6px;white-space:pre-wrap;font-size:12px"></pre>
+      <div id="wz-gate"></div>
+    </div>
+    <div style="text-align:right;margin-top:12px">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn" id="wz-prev" style="display:none">上一步</button>
+      <button class="btn btn-primary" id="wz-next">下一步</button>
+    </div>`);
+  $("#wz-title").addEventListener("input", () => { window._wz.title = $("#wz-title").value.trim(); wzUpdateNext(); });
+  $("#wz-t-search").onclick = () => wzSearch("t");
+  $("#wz-a-search").onclick = () => wzSearch("a");
+  $("#wz-next").onclick = wzNext;
+  $("#wz-prev").onclick = wzPrev;
+  wzStepUI();
+}
+
+async function wzSearch(side) {
+  const name = $("#wz-" + side + "-name").value.trim();
+  if (!name) { toast("请输入设备名"); return; }
+  const r = await api("GET", "/wizard/resolve?name=" + encodeURIComponent(name) + "&top_n=8");
+  const box = $("#wz-" + side + "-cands");
+  if (!r.ok) { box.innerHTML = `<div class="desc">搜索失败：${esc(r.error || "")}</div>`; return; }
+  const cands = (r.data && r.data.candidates) || [];
+  if (!cands.length) { box.innerHTML = `<div class="desc">无匹配候选，请换关键词或先 refresh_catalog()</div>`; return; }
+  box.innerHTML = cands.map((c) => `
+    <label style="display:block;margin:4px 0;font-size:13px">
+      <input type="radio" name="wz-${side}" value="${esc(c.entity_id)}" data-domain="${esc(c.domain)}" data-fn="${esc(c.friendly_name || "")}">
+      ${esc(c.friendly_name || c.entity_id)} <span class="meta">(${esc(c.entity_id)} · ${esc(c.domain)} · ${esc(c.confidence)})</span>
+    </label>`).join("");
+  box.querySelectorAll('input[name="wz-' + side + '"]').forEach((rb) => rb.onchange = () => {
+    window._wz[side + "_eid"] = rb.value;
+    window._wz[side + "_domain"] = rb.dataset.domain;
+    window._wz[side + "_fn"] = rb.dataset.fn;
+    if (side === "t") { $("#wz-t-state-wrap").style.display = "block"; window._wz.t_state = $("#wz-t-state").value;
+      $("#wz-t-state").onchange = () => { window._wz.t_state = $("#wz-t-state").value; wzUpdateNext(); }; }
+    if (side === "a") { $("#wz-a-act-wrap").style.display = "block"; window._wz.a_act = $("#wz-a-act").value;
+      $("#wz-a-act").onchange = () => { window._wz.a_act = $("#wz-a-act").value; wzUpdateNext(); }; }
+    wzUpdateNext();
+  });
+}
+
+function wzBuildDsl() {
+  const w = window._wz;
+  return `场景: ${w.title}\n触发: ${w.t_eid} ${w.t_state}\n动作: ${w.a_domain}.${w.a_act}(${w.a_eid})`;
+}
+
+function wzUpdateNext() {
+  const w = window._wz, s = window._wz_step;
+  let ok = false;
+  if (s === 1) ok = !!(w.title && w.t_eid && w.t_state);
+  else if (s === 2) ok = !!(w.a_eid && w.a_act);
+  const nx = $("#wz-next"); if (nx) nx.disabled = !ok;
+}
+
+function wzStepUI() {
+  const s = window._wz_step;
+  $("#wz-1").style.display = s === 1 ? "block" : "none";
+  $("#wz-2").style.display = s === 2 ? "block" : "none";
+  $("#wz-3").style.display = s === 3 ? "block" : "none";
+  $("#wz-prev").style.display = s > 1 ? "inline-block" : "none";
+  $("#wz-next").style.display = s === 3 ? "none" : "inline-block";
+  document.querySelectorAll("#wz-steps span[data-s]").forEach((sp) => {
+    const n = parseInt(sp.dataset.s, 10);
+    sp.style.color = (n === s) ? "var(--accent,#27ae60)" : "var(--text-dim)";
+    sp.style.fontWeight = (n === s) ? "600" : "400";
+  });
+  wzUpdateNext();
+}
+
+function wzNext() {
+  const w = window._wz, s = window._wz_step;
+  if (s === 1) {
+    if (!(w.title && w.t_eid && w.t_state)) { toast("请先填标题、选触发设备与状态"); return; }
+    window._wz_step = 2; wzStepUI();
+  } else if (s === 2) {
+    if (!(w.a_eid && w.a_act)) { toast("请先选动作设备与动作"); return; }
+    window._wz_step = 3; wzStepUI();
+    const dsl = wzBuildDsl();
+    $("#wz-dsl").textContent = dsl;
+    wzSubmit(dsl);
+  }
+}
+
+function wzPrev() {
+  if (window._wz_step > 1) { window._wz_step -= 1; wzStepUI(); }
+}
+
+async function wzSubmit(dsl) {
+  const gate = $("#wz-gate");
+  gate.innerHTML = `<div class="desc">正在编译 + verify_flow 验证…</div>`;
+  const r = await api("POST", "/wizard/propose", {
+    title: window._wz.title, dsl: dsl,
+    resolved_entities: [window._wz.t_eid, window._wz.a_eid],
+  });
+  if (!r.ok) {
+    const d = r.data || {};
+    gate.innerHTML = `<div class="human-card" style="border-left-color:#e74c3c;margin:8px 0;padding:8px 10px;background:var(--bg-soft,#f5f5f5);border-radius:6px">
+      ❌ 未通过（${esc(d.stage || "error")}）：${esc(d.error || JSON.stringify(r.data || ""))}</div>`;
+    return;
+  }
+  const p = (r.data && r.data.proposal) || {};
+  const g = (r.data && r.data.gate) || {};
+  const asserts = (g.assertions || []).map((a) => `<div style="margin:2px 0">· ${esc(a)}</div>`).join("");
+  gate.innerHTML = `<div class="human-card" style="border-left-color:${g.passed ? "#27ae60" : "#e74c3c"};margin:8px 0;padding:8px 10px;background:var(--bg-soft,#f5f5f5);border-radius:6px;font-size:13px;line-height:1.6">
+    ✅ 提案已创建：<b>${esc(p.id || "")}</b><br>
+    安全闸：<b>${g.passed ? "PASS" : "FAIL"}</b>${g.verdict ? "（" + esc(g.verdict) + "）" : ""}<br>
+    ${asserts}
+    <div style="margin-top:8px"><button class="btn sm primary" onclick="loadProposals();closeModal()">去提案列表查看</button></div>
+  </div>`;
 }
 
 async function triggerFlow(id) {

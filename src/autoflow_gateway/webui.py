@@ -2383,6 +2383,52 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             return _js({"ok": False, "error": str(e)}, 400)
         return _js(res)
 
+    async def wizard_resolve(request: Request):
+        """#10 Pro 引导向导：自然语言设备名 → entity_id 候选（WebUI 人面，复用 resolve_entity）。
+
+        与 MCP 风格 /api/core/resolve-entity（需 API key）不同，本端点走 WebUI 人面鉴权，
+        供小白向导的设备选择器使用；返回结果与 resolve_entity 一致（含 device_groups/notes）。
+        """
+        qp = request.query_params
+        name = (qp.get("name") or "").strip()
+        if not name:
+            return _js({"ok": False, "error": "name 参数不能为空"}, 400)
+        try:
+            result = await asyncio.to_thread(
+                gw.resolve_entity, name,
+                area=qp.get("area") or None,
+                top_n=int(qp.get("top_n", 8)),
+            )
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+        return _js(result)
+
+    async def wizard_propose(request: Request):
+        """#10 Pro 引导向导：结构化意图 → DSL 模板 → propose_dsl 全链路（编译+verify_flow 闸+建提案）。
+
+        前端多步表单把「触发设备+状态 / 动作设备+动作」模板成 DSL 文本后提交；
+        复用 propose_dsl 既有链路，提案自带 gate（verify_flow 可视化），小白无需碰 NR 细节。
+        """
+        b = await _body(request)
+        title = (b.get("title") or "").strip()
+        dsl = (b.get("dsl") or "").strip()
+        if not title:
+            return _js({"ok": False, "error": "title 必填"}, 400)
+        if not dsl:
+            return _js({"ok": False, "error": "dsl 不能为空（向导未生成 DSL？）"}, 400)
+        resolved = b.get("resolved_entities") or []
+        try:
+            res = await asyncio.to_thread(
+                gw.propose_dsl, dsl, "human",
+                resolved_entities=resolved if isinstance(resolved, list) else None,
+            )
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 400)
+        if not res.get("ok"):
+            # 编译/校验失败（stage=compile/empty_dsl/...）：结构化结果透传给向导第 3 步预览
+            return _js(res, 422)
+        return _js(res, 201)
+
     # ── 已部署（flow_catalog + 注册表↔NR 分叉对账）──
     async def list_deployed(request: Request):
         return _js({"deployed": await asyncio.to_thread(gw.list_deployed, stale_check=True)})
@@ -3683,6 +3729,9 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/proposals/{id}/unarchive", unarchive_proposal, methods=["POST"]),
         Route("/api/proposals/{id}/summary", summary_proposal, methods=["POST"]),
         Route("/api/proposals/batch_deploy", batch_deploy_proposals, methods=["POST"]),
+        # #10 Pro 引导式 DSL 向导（WebUI 人面）
+        Route("/api/wizard/resolve", wizard_resolve, methods=["GET"]),
+        Route("/api/wizard/propose", wizard_propose, methods=["POST"]),
         # 已部署
         Route("/api/deployed", list_deployed, methods=["GET"]),
         Route("/api/deployed/{id}/undeploy", undeploy_flow, methods=["POST"]),
