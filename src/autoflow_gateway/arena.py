@@ -1481,15 +1481,6 @@ class ArenaManager:
                     "触发——真机 HA 触发链路未被重放验证（F-R10-T0），fully_verified "
                     "不视为完整验证。")
                 result["gate"]["fully_verified"] = False
-            # ★ F-R8-02 语义保真 lint（A 项 · 创造力保真）：方向-only 断言不查
-            # 触发实体/时间触发/死分支 →「标题创意」蒙混过关。三类语义缺陷降级
-            # fully_verified（不锁、任务回 available 供重试），逼出真创意。
-            _fid = self._lint_dsl_vs_task(task, dsl)
-            if _fid["warnings"]:
-                result["gate"].setdefault("warnings", []).extend(_fid["warnings"])
-                if _fid["fidelity_violations"]:
-                    result["gate"]["fully_verified"] = False
-                result["dsl_fidelity"] = _fid
             return result
         except Exception as e:
             # 异常路径也喂经验库（兜底调用点）
@@ -1499,7 +1490,6 @@ class ArenaManager:
     # 题面「状态/事件触发」信号词（F-R10-T0）：命中即认为该题期望 HA 状态/时间触发，
     # 而非手动 inject 触发。宁可漏判（不降级）也不误伤手动题。
     _TASK_STATE_TRIGGER_RE = None  # 懒编译（见 _is_inject_only_for_state_task）
-    _TASK_TIME_SIGNAL_RE = None    # 懒编译（见 _lint_dsl_vs_task · F-R8-02 语义保真）
 
     @classmethod
     def _is_inject_only_for_state_task(cls, task: Dict, dsl: str) -> bool:
@@ -1513,126 +1503,6 @@ class ArenaManager:
             return False
         # DSL 触发行是 inject / 手动 → 触发保真降级；带实体状态或时间触发的不算
         return bool(_re2.search(r"^\s*触发:\s*(inject\b|手动)", dsl or "", _re2.M))
-
-    def _lint_dsl_vs_task(self, task: Dict, dsl: str) -> Dict:
-        """【F-R8-02 盲区修复】题面语义 vs 提交 DSL 的一致性静态比对。
-
-        方向-only 断言（_infer_postconditions）只校验动作目标被拨到题面推断方向，
-        不校验触发实体 / 时间触发 / 分支语义 →「门开超时关空调」DSL 实为 turn_on、
-        「每晚十点半」DSL 却对开门触发 这类 title≠impl 仍能 fully_verified 通过，
-        等于把「标题创意」算成「实现创造力」污染排行榜。
-
-        返回 {"ok", "warnings", "fidelity_violations"}：
-        - fidelity_violations 非空 → 调用方降级 fully_verified（不锁、任务回 available 供重试）。
-        - 仅检查①（触发实体 ∈ 题面设备集）为**纯告警不降级**：entity_ids 编写不全的旧题
-          会误伤正确 flow（F-R8-03 同族坑），故只透出信号、不卡验收；②③为明确语义缺陷，降级。
-        仅静态 DSL 解析比对，绝不重放、不碰 prod；解析失败静默跳过（不误伤）。
-        """
-        import re as _re
-        from .dsl_engine import (parse as _dsl_parse, Action,
-                                 Switch, TimeRange, CurrentState, Parallel)
-
-        out: Dict = {"ok": True, "warnings": [], "fidelity_violations": []}
-        entity_ids = set(task.get("entity_ids") or [])
-        text = f"{task.get('title') or ''} {task.get('description') or ''}"
-
-        try:
-            scene = _dsl_parse(dsl or "")
-        except Exception:
-            return out  # DSL 无法解析（propose_dsl 会另行报错），lint 跳过
-
-        # 递归收集所有步骤（含嵌套分支体 / 时间段门体 / 并行体）
-        steps: List = []
-
-        def _walk(step_list):
-            for st in step_list:
-                steps.append(st)
-                if isinstance(st, Switch):
-                    for _br in st.branches:
-                        _walk(getattr(_br, "body", []) or [])
-                    _walk(getattr(st, "else_body", []) or [])
-                elif isinstance(st, (TimeRange, CurrentState)):
-                    _walk(getattr(st, "body", []) or [])
-                    _walk(getattr(st, "else_body", []) or [])
-                elif isinstance(st, Parallel):
-                    for _ch in getattr(st, "children", []) or []:
-                        if isinstance(_ch, list):
-                            _walk(_ch)
-                        else:
-                            steps.append(_ch)
-
-        _walk(list(scene.body))
-
-        def _collect_actions(step_list):
-            """收集步骤树中所有 Action 的（domain,target,service）签名。"""
-            sigs = []
-            for st in step_list:
-                if isinstance(st, Action):
-                    sigs.append((st.domain, st.target, st.service))
-                elif isinstance(st, Switch):
-                    for _br in st.branches:
-                        sigs.extend(_collect_actions(getattr(_br, "body", []) or []))
-                    sigs.extend(_collect_actions(getattr(st, "else_body", []) or []))
-                elif isinstance(st, (TimeRange, CurrentState)):
-                    sigs.extend(_collect_actions(getattr(st, "body", []) or []))
-                    sigs.extend(_collect_actions(getattr(st, "else_body", []) or []))
-                elif isinstance(st, Parallel):
-                    for _ch in getattr(st, "children", []) or []:
-                        if isinstance(_ch, list):
-                            sigs.extend(_collect_actions(_ch))
-                        elif isinstance(_ch, Action):
-                            sigs.append((_ch.domain, _ch.target, _ch.service))
-            return sigs
-
-        has_time_range = any(isinstance(st, TimeRange) for st in steps)
-        has_time_trigger = any(getattr(t, "kind", None) == "time"
-                               for t in scene.triggers)
-
-        # ── 检查①：触发实体须 ∈ 题面设备集（纯告警，不降级，见方法 docstring）──
-        if entity_ids:
-            for _tg in scene.triggers:
-                if getattr(_tg, "kind", None) == "state" and getattr(_tg, "entity", None):
-                    if _tg.entity not in entity_ids:
-                        out["warnings"].append(
-                            f"【触发保真】触发实体 {_tg.entity} 不在题面设备集 "
-                            f"{sorted(entity_ids)} 中（F-R8-02：触发实体须 ∈ 题面实体集，"
-                            f"否则实现与题面脱节；仅告警不卡验收）")
-
-        # ── 检查②：时间信号词须有 时间段/定时 触发（语义缺陷 → 降级）──
-        if self._TASK_TIME_SIGNAL_RE is None:
-            self._TASK_TIME_SIGNAL_RE = _re.compile(
-                r"深夜|凌晨|早晨|早上|上午|中午|下午|傍晚|晚上|每晚|每天|每日|"
-                r"定时|时间段|工作日|周末|整点|睡前|起床|"
-                r"(\d{1,2})\s*点|(\d{1,2}):(\d{2})")
-        if (self._TASK_TIME_SIGNAL_RE.search(text)
-                and not (has_time_range or has_time_trigger)):
-            _msg = ("【时间保真】题面含时间信号词但提交 flow 无 时间段/定时 触发"
-                    "（F-R8-02：题面要「每晚/定时/工作时间」须有 时间段: 或 定时 触发，"
-                    "否则时间语义未实现）")
-            out["warnings"].append(_msg)
-            out["fidelity_violations"].append(_msg)
-
-        # ── 检查③：死分支（多分支动作完全相同 → 否则分支形同虚设 → 降级）──
-        for _sw in (st for st in steps if isinstance(st, Switch)):
-            _branch_sigs = [_collect_actions(getattr(_br, "body", []) or [])
-                            for _br in _sw.branches]
-            _branch_sigs.append(_collect_actions(getattr(_sw, "else_body", []) or []))
-            _found = False
-            for _a in range(len(_branch_sigs)):
-                if not _branch_sigs[_a]:
-                    continue
-                for _b in range(_a + 1, len(_branch_sigs)):
-                    if _branch_sigs[_a] == _branch_sigs[_b]:
-                        _msg = ("【死分支】多个分支动作完全相同（否则分支形同虚设，"
-                                "条件分支退化为恒执行，F-R8-02 语义缺陷）")
-                        out["warnings"].append(_msg)
-                        out["fidelity_violations"].append(_msg)
-                        _found = True
-                        break
-                if _found:
-                    break
-
-        return out
 
     def _llm_judge_duplicate(self, new_task: Dict, existing_task: Dict) -> Optional[Dict]:
         """第三层 LLM 考官：判断两个题目是否为同一自动化场景。
