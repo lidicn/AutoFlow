@@ -1779,9 +1779,9 @@ function _renderProposals(items) {
       }
       const _pStatusCls = gatePassed ? " status-pass" : (gate.passed === false ? " status-fail" : (p.requires_review ? " status-review" : ""));
       return `
-      <div class="item proposal-item${_pStatusCls}">
+      <div class="item proposal-item${_pStatusCls}" data-pid="${esc(p.id)}">
         <div class="row">
-          <div><span class="title">${esc(p.title)}</span> ${p.id ? `<span class="meta" title="${esc(p.id)}">(${esc(p.id)})</span>` : ""}</div>
+          <div><label class="p-sel-wrap" style="margin-right:6px"><input type="checkbox" class="p-sel" data-sel="${esc(p.id)}" ${canDeploy?"":"disabled"}> 选</label><span class="title">${esc(p.title)}</span> ${p.id ? `<span class="meta" title="${esc(p.id)}">(${esc(p.id)})</span>` : ""}</div>
           <div>${badge("kind-" + kindBadge, kindBadge)} ${badge("st-" + p.status, p.status)}
             ${gatePassed ? badge("ok", "安全闸 PASS") : (gate.passed === false ? badge("danger", "安全闸 FAIL") : "")}
             ${badge(srcBadgeCls, srcBadgeTxt)} ${badge(reviewBadgeCls, reviewBadgeTxt)}
@@ -1800,6 +1800,7 @@ function _renderProposals(items) {
         ${nodeCount && isDsl ? `<div class="desc">编译产物：${nodeCount} 节点 ｜ 无 Function 节点：✅</div>` : ""}
         <div class="actions">
           ${canDeploy ? `<button class="btn sm primary" data-dep="${esc(p.id)}">${isSubflow ? "注册子流程" : (p.deployed_flow_id ? "重新部署到 NR" : "部署到 NR")}</button>` : ""}
+          <button class="btn sm" data-sum="${esc(p.id)}" ${canDeploy?"":"disabled"}>💡 人话卡</button>
           ${p.status !== "rejected" ? `<button class="btn sm danger" data-prej="${esc(p.id)}">拒绝</button>` : ""}
           <button class="btn sm" data-del="${esc(p.id)}">删除</button>
           ${p.archived_at ? `<button class="btn sm" data-unarch="${esc(p.id)}">取消归档</button>` : `<button class="btn sm" data-arch="${esc(p.id)}">归档</button>`}
@@ -1815,6 +1816,8 @@ function _renderProposals(items) {
     $$("[data-undep]").forEach((b) => (b.onclick = () => undeployProposal(b.dataset.undep)));
     $$("[data-arch]").forEach((b) => (b.onclick = () => archiveProposal(b.dataset.arch)));
     $$("[data-unarch]").forEach((b) => (b.onclick = () => unarchiveProposal(b.dataset.unarch)));
+    $$("[data-sum]").forEach((b) => (b.onclick = () => summaryProposal(b.dataset.sum)));
+    $$(".p-sel").forEach((c) => (c.onchange = _updateSelCount));
 }
 
 function _filterProposals(q) {
@@ -1848,6 +1851,11 @@ async function loadProposals() {
       <span id="p-filter-count" style="font-size:12px;color:var(--text-dim);white-space:nowrap"></span>
     </div>
     <div id="p-pager" class="pager"></div>
+    <div id="p-batch" class="batch-bar" style="display:flex;gap:8px;align-items:center;margin:8px 0;flex-wrap:wrap">
+      <button class="btn sm" id="p-selall">全选可部署</button>
+      <button class="btn sm primary" id="p-batchdeploy">批量部署到 NR (<span id="p-selcnt">0</span>)</button>
+      <span class="meta">勾选多个提案后原子部署；任一失败整体回滚</span>
+    </div>
     <div id="p-list" style="margin-top:14px"><div class="empty">加载中…</div></div>`;
   // 绑定搜索（仅绑定一次，翻页不重复绑定）
   const sb = $("#p-search");
@@ -1855,6 +1863,16 @@ async function loadProposals() {
     sb.addEventListener("input", () => _filterProposals(sb.value));
     sb.addEventListener("keydown", (e) => { if (e.key === "Enter") _filterProposals(sb.value); });
   }
+  const selall = $("#p-selall");
+  if (selall) selall.onclick = () => {
+    const cs = $$(".p-sel:not([disabled])");
+    const allOn = cs.length && cs.every((c) => c.checked);
+    cs.forEach((c) => (c.checked = !allOn));
+    _updateSelCount();
+  };
+  const bd = $("#p-batchdeploy");
+  if (bd) bd.onclick = batchDeployProposals;
+  _updateSelCount();
   await _loadProposalPage();
 }
 
@@ -2084,6 +2102,52 @@ async function undeployProposal(id) {
     return;
   }
   toast("撤回失败：" + (r.data?.error || r.status));
+}
+
+function _updateSelCount() {
+  const n = document.querySelectorAll(".p-sel:checked").length;
+  const el = $("#p-selcnt");
+  if (el) el.textContent = String(n);
+  const bd = $("#p-batchdeploy");
+  if (bd) bd.disabled = n === 0;
+}
+
+async function summaryProposal(id) {
+  let card = null;
+  document.querySelectorAll(".proposal-item").forEach((el) => { if (el.dataset.pid === id) card = el; });
+  if (!card) return;
+  if (card.querySelector(".human-card")) return;  // 已展开，防重复
+  const r = await api("POST", `/proposals/${id}/summary`, {});
+  if (!r.ok) { toast("人话卡失败：" + (r.error || JSON.stringify(r.data || ""))); return; }
+  const s = (r.data && r.data.summary) || {};
+  const plain = Array.isArray(s.plain) ? s.plain : [];
+  const html = `<div class="human-card" style="margin:8px 0;padding:8px 10px;border-left:3px solid var(--accent,#27ae60);background:var(--bg-soft,#f5f5f5);border-radius:6px;font-size:13px;line-height:1.6">
+    ${plain.map((t) => `<div style="margin:2px 0">💡 ${esc(t)}</div>`).join("")}
+  </div>`;
+  card.insertAdjacentHTML("afterbegin", html);
+}
+
+async function batchDeployProposals() {
+  const ids = [...document.querySelectorAll(".p-sel:checked")].map((c) => c.dataset.sel).filter(Boolean);
+  if (!ids.length) { toast("请先勾选至少一个可部署提案"); return; }
+  if (!confirm(`确认批量部署 ${ids.length} 个提案到 NR？\n任一失败将整体回滚到部署前快照。`)) return;
+  const bd = $("#p-batchdeploy");
+  if (bd) bd.disabled = true;
+  try {
+    const r = await api("POST", `/proposals/batch_deploy`, { ids, target: "prod", validate: true, allow_prod: true });
+    if (r.ok) {
+      const d = r.data || {};
+      const n = (d.deployed || []).length, f = (d.failed || []).length;
+      toast("批量部署完成：成功 " + n + " / 失败 " + f + (d.rolled_back ? "（已整体回滚）" : ""));
+    } else {
+      toast("批量部署失败：" + (r.error || JSON.stringify(r.data || "")));
+    }
+  } catch (e) {
+    toast("批量部署异常：" + (e.message || e));
+  } finally {
+    if (bd) bd.disabled = false;
+    loadProposals();
+  }
 }
 
 async function triggerFlow(id) {
@@ -5237,7 +5301,7 @@ function arenaProposeModal() {
     <div class="field"><label>题目标题</label><input class="input" id="ap-title" placeholder="如：电脑开机同步打开显示器挂灯" /></div>
     <div class="field"><label>题目描述</label><textarea class="input" id="ap-desc" rows="3" placeholder="详细描述自动化场景，包括触发条件和期望效果"></textarea></div>
     <div class="field"><label>涉及设备（entity_id，逗号分隔）</label><input class="input" id="ap-entities" placeholder="switch.computer, light.monitor_lamp" /></div>
-    <div class="field"><label>Agent ID（可选）</label><input class="input" id="ap-agent" placeholder="arena-agent" /></div>
+    <div class="field"><label>Agent ID（必填，F-R10-B1-01）</label><input class="input" id="ap-agent" placeholder="如 ffl-r11-a1" /></div>
     <div style="text-align:right;margin-top:12px">
       <button class="btn" onclick="closeModal()">取消</button>
       <button class="btn btn-primary" onclick="arenaProposeSubmit()">提交审核</button>
@@ -5250,8 +5314,8 @@ async function arenaProposeSubmit() {
   const title = $("#ap-title").value.trim();
   const desc = $("#ap-desc").value.trim();
   const entities = $("#ap-entities").value.split(",").map(s => s.trim()).filter(Boolean);
-  const agent = $("#ap-agent").value.trim() || "arena-agent";
-  if (!title || !desc || !entities.length) { toast("请填写完整", "error"); return; }
+  const agent = $("#ap-agent").value.trim();
+  if (!title || !desc || !entities.length || !agent) { toast("请填写完整（Agent ID 必填）", "error"); return; }
   try {
     const r = await api("POST", `/arena/arenas/${a}/propose`, { title, description: desc, entity_ids: entities, agent_id: agent });
     if (r.ok) {
@@ -5270,7 +5334,7 @@ function arenaSubmitModal(taskId) {
   window._arena_submit_task = taskId;
   modal("提交 DSL Flow 验收", `
     <div class="field"><label>DSL 代码</label><textarea class="input" id="as-dsl" rows="10" placeholder="scene 电脑开机亮挂灯:\n  trigger switch.computer state=on\n  action light.monitor_lamp turn_on"></textarea></div>
-    <div class="field"><label>Agent ID（可选）</label><input class="input" id="as-agent" placeholder="arena-agent" /></div>
+    <div class="field"><label>Agent ID（必填，F-R10-B1-01）</label><input class="input" id="as-agent" placeholder="如 ffl-r11-b2" /></div>
     <div style="font-size:12px;color:var(--text-muted)">验收将在 vhass 虚拟环境中重放 flow，检查后置状态是否符合预期。</div>
     <div style="text-align:right;margin-top:12px">
       <button class="btn" onclick="closeModal()">取消</button>
@@ -5283,8 +5347,9 @@ async function arenaSubmitSubmit() {
   const a = _arena_current;
   const taskId = window._arena_submit_task;
   const dsl = $("#as-dsl").value.trim();
-  const agent = $("#as-agent").value.trim() || "arena-agent";
+  const agent = $("#as-agent").value.trim();
   if (!dsl) { toast("DSL 不能为空", "error"); return; }
+  if (!agent) { toast("Agent ID 必填（缺失会导致锁定归属错误）", "error"); return; }
   try {
     const r = await api("POST", `/arena/arenas/${a}/submit`, { task_id: taskId, dsl, agent_id: agent });
     if (r.ok) {

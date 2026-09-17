@@ -121,7 +121,7 @@ disable: true
 | `title` | 字符串，`len` 2–50；空 → 拒 |
 | `description` | 字符串，空 → 拒，上限 2000 字符；**20–100 字得分最高** |
 | `entity_ids` | 非空字符串数组，**每一项都必须在分区设备清单内**（否则回 `unknown_entities`） |
-| `agent_id` | 字符串，缺省 `arena-agent`；**建议固定且带轮次前缀**（如 `ffl-r8-t1`） |
+| `agent_id` | 字符串，**必填**（F-R10-B1-01：缺失/空 → 400，不再默认 `arena-agent`）；**固定且带轮次前缀**（如 `ffl-r11-b2`） |
 
 > 类型不合法（如 `entity_ids` 传了字符串）会被 webui 层先拦成 400，不会变 500。
 

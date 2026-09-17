@@ -1660,11 +1660,16 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         title = (b.get("title") or "").strip()
         description = (b.get("description") or "").strip()
         entity_ids = b.get("entity_ids") or []
-        agent_id = (b.get("agent_id") or "arena-agent").strip()
+        # 【F-R10-B1-01 同类】出题人归属同样不许静默默认：缺 → 400。
+        agent_id = (b.get("agent_id") or "").strip()
         if isinstance(entity_ids, str):
             entity_ids = [e.strip() for e in entity_ids.split(",") if e.strip()]
         if not isinstance(entity_ids, list) or not all(isinstance(e, str) for e in entity_ids):
             return _js({"ok": False, "error": "entity_ids 必须是字符串数组"}, 400)
+        if not agent_id:
+            return _js({"ok": False,
+                        "error": "agent_id 不能为空（缺失会导致出题归属错误，F-R10-B1-01）"},
+                       400)
         try:
             result = await asyncio.to_thread(
                 arena_mgr.propose_task, arena_id, title, description, entity_ids, agent_id
@@ -1683,13 +1688,19 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                 return _js({"ok": False, "error": f"{_f} 必须是字符串"}, 400)
         task_id = (b.get("task_id") or "").strip()
         dsl = (b.get("dsl") or "").strip()
-        agent_id = (b.get("agent_id") or "arena-agent").strip()
+        # 【F-R10-B1-01】不得默认归属：缺失 agent_id 曾静默落成 locked_by="arena-agent"，
+        # 战报/排行榜归属失真。缺 → 400，让调用方显式上报身份。
+        agent_id = (b.get("agent_id") or "").strip()
         if not isinstance(task_id, str) or not isinstance(dsl, str):
             return _js({"ok": False, "error": "task_id / dsl 必须是字符串"}, 400)
         if not task_id:
             return _js({"ok": False, "error": "task_id 不能为空"}, 400)
         if not dsl:
             return _js({"ok": False, "error": "dsl 不能为空"}, 400)
+        if not agent_id:
+            return _js({"ok": False,
+                        "error": "agent_id 不能为空（缺失会导致 locked_by 归属错误，F-R10-B1-01）"},
+                       400)
         try:
             result = await asyncio.to_thread(
                 arena_mgr.submit_flow, arena_id, task_id, dsl, agent_id
@@ -1701,8 +1712,8 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     async def arena_inspiration(request: Request):
         """★ 记忆联动（读侧，ROADMAP #4）：取本分区灵感。
 
-        首选 memory-agent 的 ACP 工具（洞察 + LLM 包装）；对端未配置/失败时
-        网关自动降级为「快照自建灵感」，故本端点始终能给出可用结果（除非分区无快照）。
+        【F-R10-T0 转正】确定性快照自建灵感为首选（entity_ids 可直用、零 LLM 中介）；
+        ACP-LLM 工具降为快照为空时的兜底。故本端点始终能给出可用结果（除非分区无快照）。
         """
         arena_id = request.path_params.get("arena_id", "")
         try:
@@ -2340,6 +2351,36 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         if not res.get("ok"):
             status = 409 if res.get("conflict") else 400
             return _js(res, status)
+        return _js(res)
+
+    async def summary_proposal(request: Request):
+        """#11 三句话人话卡：把提案压缩成意图/验证/影响设备三句，供 WebUI 批准前秒懂。"""
+        pid = request.path_params["id"]
+        try:
+            res = await asyncio.to_thread(gw.proposal_summary, pid)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 400)
+        if not res.get("ok"):
+            return _js(res, 404 if "不存在" in (res.get("error") or "") else 400)
+        return _js({"ok": True, "summary": res})
+
+    async def batch_deploy_proposals(request: Request):
+        """#8 批量安全部署：一次部署多个已通过提案，任一失败整体回滚（与 deploy_proposal 互补）。"""
+        b = await _body(request)
+        ids = b.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return _js({"ok": False, "error": "ids 不能为空"}, 400)
+        target = b.get("target", "prod")
+        force = bool(b.get("force", False))
+        validate = b.get("validate", True)
+        require_e2e = b.get("require_e2e", None)
+        allow_prod = b.get("allow_prod", True)
+        try:
+            res = await asyncio.to_thread(gw.deploy_proposals, ids, agent_id="human",
+                                          target=target, force=force, validate=validate,
+                                          require_e2e=require_e2e, allow_prod=allow_prod)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 400)
         return _js(res)
 
     # ── 已部署（flow_catalog + 注册表↔NR 分叉对账）──
@@ -3640,6 +3681,8 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/proposals/{id}/deploy", deploy_proposal, methods=["POST"]),
         Route("/api/proposals/{id}/archive", archive_proposal, methods=["POST"]),
         Route("/api/proposals/{id}/unarchive", unarchive_proposal, methods=["POST"]),
+        Route("/api/proposals/{id}/summary", summary_proposal, methods=["POST"]),
+        Route("/api/proposals/batch_deploy", batch_deploy_proposals, methods=["POST"]),
         # 已部署
         Route("/api/deployed", list_deployed, methods=["GET"]),
         Route("/api/deployed/{id}/undeploy", undeploy_flow, methods=["POST"]),

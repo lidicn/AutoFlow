@@ -117,29 +117,33 @@ def test_inspiration_from_snapshot_isomorphic():
         {"snapshot": {"snapshot_json": "not-json"}}) == []
 
 
-def test_fetch_inspiration_falls_back_to_snapshot(monkeypatch):
+def test_fetch_inspiration_snapshot_is_primary(monkeypatch):
+    """【F-R10-T0 转正】确定性快照为首选；快照可用时不得再走 ACP-LLM。"""
     mgr = ArenaManager(tempfile.mkdtemp(prefix="af_chan_"), gateway=object())
+    called = {"acp": False}
     monkeypatch.setattr(acp_client, "arena_fetch_inspiration",
-                        lambda *a, **k: {"ok": False, "error": "对端未返回可用灵感", "items": []})
+                        lambda *a, **k: called.__setitem__("acp", True)
+                        or {"ok": True, "count": 5, "items": [{"id": "x"}]})
     monkeypatch.setattr(acp_client, "arena_fetch_snapshot", lambda *a, **k: _SNAP)
     r = mgr.fetch_memory_inspiration("study_room", limit=1, agent_id="agent-x")
-    assert r["ok"] is True and r["source"] == "snapshot-fallback"
+    assert r["ok"] is True and r["source"] == "snapshot"
     assert len(r["items"]) == 1 and r["items"][0]["entity_ids"] == ["binary_sensor.motion_a"]
-    # 降级路径也算「真实读取」，遥测必须记账
+    assert called["acp"] is False  # 首选（快照）成功则不触发 ACP 兜底
+    # 读取路径也算「真实读取」，遥测必须记账
     assert ("study_room", "agent-x") in mgr._memory_inspiration_seen
 
 
-def test_fetch_inspiration_prefers_acp(monkeypatch):
+def test_fetch_inspiration_acp_is_fallback(monkeypatch):
+    """【F-R10-T0 转正】快照为空时降级 ACP-LLM 灵感，source 显式标注兜底。"""
     mgr = ArenaManager(tempfile.mkdtemp(prefix="af_chan_"), gateway=object())
     monkeypatch.setattr(acp_client, "arena_fetch_inspiration",
                         lambda *a, **k: {"ok": True, "count": 5,
                                          "items": [{"id": "ins_001", "entity_ids": ["light.x"]}]})
-    called = {"snap": False}
     monkeypatch.setattr(acp_client, "arena_fetch_snapshot",
-                        lambda *a, **k: called.__setitem__("snap", True) or _SNAP)
+                        lambda *a, **k: {"ok": True, "error": "无快照"})
     r = mgr.fetch_memory_inspiration("study_room", agent_id="agent-x")
-    assert r["source"] == "memory-agent" and r["count"] == 5
-    assert called["snap"] is False  # 首选成功则不触发降级
+    assert r["source"] == "memory-agent-fallback" and r["count"] == 5
+    assert r.get("degraded_reason")
 
 
 def test_fetch_inspiration_all_fail(monkeypatch):

@@ -20,6 +20,8 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from .error_knowledge import ErrorKnowledgeStore
+
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -446,6 +448,11 @@ class ArenaManager:
         # 失败样本从这里进知识库，get_suggestion() 才能反哺 agent。
         from .error_knowledge import ErrorKnowledgeStore
         self._error_kb = ErrorKnowledgeStore(os.path.join(data_dir, "error_knowledge"))
+        # 【F-R10-KB-01】经验库分区隔离开关（AUTOFLOW_ARENA_KB_ISOLATION=1 启用）：
+        # 按分区懒加载独立 ErrorKnowledgeStore / ExperienceLogger，杜绝 A/B 两臂
+        # 经共享 error_kb / experience 互相串答案（破坏对照实验隔离）。缺省关闭。
+        self._kb_by_arena: Dict[str, ErrorKnowledgeStore] = {}
+        self._exp_by_arena: Dict[str, Any] = {}
         # ★ 记忆联动②③（2026-09-10）：经验管道兜底懒加载（suggest_fix 兜底源）
         self._exp_logger = None
         # ★ 记忆联动（ROADMAP #4）：A/B 遥测——记录哪些 (分区, agent) 真的取过灵感，
@@ -454,27 +461,60 @@ class ArenaManager:
         os.makedirs(self.data_dir, exist_ok=True)
         self._init_arenas()
 
+    @staticmethod
+    def _kb_isolation_enabled() -> bool:
+        return os.environ.get("AUTOFLOW_ARENA_KB_ISOLATION", "").strip().lower() in (
+            "1", "true", "yes")
+
+    def _kb_store_for(self, arena_id: str = "") -> ErrorKnowledgeStore:
+        """【F-R10-KB-01】经验库取用口：隔离开关开启且带分区时返回分区独享实例
+        （data_dir/arena_kb/<arena_id>/error_knowledge/），否则全局共享（旧行为）。"""
+        if not self._kb_isolation_enabled() or not arena_id:
+            return self._error_kb
+        st = self._kb_by_arena.get(arena_id)
+        if st is None:
+            st = ErrorKnowledgeStore(
+                os.path.join(self.data_dir, "arena_kb", arena_id, "error_knowledge"))
+            self._kb_by_arena[arena_id] = st
+        return st
+
+    def _exp_for(self, arena_id: str = ""):
+        """【F-R10-KB-01】experience 兜底源取用口（隔离开关同上，分区独享目录）。"""
+        from .experience import ExperienceLogger
+        if not self._kb_isolation_enabled() or not arena_id:
+            if self._exp_logger is None:
+                self._exp_logger = ExperienceLogger(self.data_dir)
+            return self._exp_logger
+        lg = self._exp_by_arena.get(arena_id)
+        if lg is None:
+            lg = ExperienceLogger(os.path.join(self.data_dir, "arena_kb", arena_id))
+            self._exp_by_arena[arena_id] = lg
+        return lg
+
     def _record_error_kb(self, task: Optional[Dict], dsl: str, error_msg: str,
                          stage: str, agent_id: str = "",
                          proposal_id: str = "") -> None:
         """把验收失败样本写入错误知识库。经验收集永不影响主流程。"""
         try:
             prefix = f"[{task.get('id', '?')}]" if task else ""
-            self._error_kb.record(dsl=dsl, error_msg=prefix + " " + error_msg,
-                                  stage=stage, agent_id=agent_id,
-                                  proposal_id=proposal_id)
+            store = self._kb_store_for(str((task or {}).get("arena_id") or ""))
+            store.record(dsl=dsl, error_msg=prefix + " " + error_msg,
+                         stage=stage, agent_id=agent_id,
+                         proposal_id=proposal_id)
         except Exception:
             pass
 
-    def _kb_feedback(self, error_msg: str, stage: str = "") -> Optional[Dict]:
+    def _kb_feedback(self, error_msg: str, stage: str = "",
+                     arena_id: str = "") -> Optional[Dict]:
         """★ 经验库回读闭环（2026-09-09）：失败反馈附历史同类错误「前车之鉴」。
 
         之前经验库只写不读——失败样本入库后没有回路喂给考生，重试只能盲试。
         现在拒绝/降级时按 ERROR_PATTERNS 分类查历史同类样本，附进 submit 回执。
         永不影响主流程（任何异常静默吞掉）。
+        【F-R10-KB-01】arena_id 传入且隔离开关开启时，只回读本分区自己的经验。
         """
         try:
-            sug = self._error_kb.get_suggestion(error_msg, stage)
+            sug = self._kb_store_for(arena_id).get_suggestion(error_msg, stage)
         except Exception:
             sug = None
         if not sug or not sug.get("ok"):
@@ -499,10 +539,8 @@ class ArenaManager:
         # 任何指引；两者不叠加输出，knowledge_feedback 始终是唯一回读出口。
         if not feedback["total_same_type"]:
             try:
-                from .experience import ExperienceLogger
-                if self._exp_logger is None:
-                    self._exp_logger = ExperienceLogger(self.data_dir)
-                sf = self._exp_logger.suggest_fix(error_msg, stage)
+                _exp = self._exp_for(arena_id)
+                sf = _exp.suggest_fix(error_msg, stage)
                 if sf and sf.get("ok"):
                     feedback["suggestion"] = "；".join(
                         str(x) for x in (sf.get("fixes") or sf.get("suggestions")
@@ -660,11 +698,10 @@ class ArenaManager:
             return None
         try:
             from .vhass import VHassStore
-            seed = {"areas": {arena_id: arena["name"]}, "entities": arena["devices"]}
+            # F-R11-01 根因修复：种子必须以「当前 arena.devices」为准，不能一次性懒写后永远 stale。
+            # 克隆/直接改 arenas.json 创建的分区不会走 sync_devices，旧逻辑下种子不会被重写 → staging 缺实体。
+            self._rewrite_seed(arena_id, arena)
             seed_path = os.path.join(self.data_dir, f"{arena_id}_seed.json")
-            if not os.path.exists(seed_path):
-                with open(seed_path, "w", encoding="utf-8") as f:
-                    json.dump(seed, f, ensure_ascii=False, indent=2)
             state_path = os.path.join(self.data_dir, f"{arena_id}_state.json")
             store = VHassStore(seed_path=seed_path, state_path=state_path)
             self._vhass_stores[arena_id] = store
@@ -680,6 +717,8 @@ class ArenaManager:
             return
         try:
             from .vhass import VHassStore
+            # F-R11-01 根因修复：重置前先按当前 arena.devices 重写种子，避免从 stale 种子重载。
+            self._rewrite_seed(arena_id, arena)
             seed_path = os.path.join(self.data_dir, f"{arena_id}_seed.json")
             state_path = os.path.join(self.data_dir, f"{arena_id}_state.json")
             # 删除状态文件，强制从 seed 重新加载
@@ -1172,28 +1211,29 @@ class ArenaManager:
 
     def fetch_memory_inspiration(self, arena_id: str, limit: int = 5,
                                  agent_id: str = "") -> Dict:
-        """★ 记忆联动（读侧）：向 memory-agent 取本分区灵感。
+        """★ 记忆联动（读侧）：取本分区灵感。
 
-        首选对端 ACP 工具 get_arena_inspiration（设计即为「洞察 + LLM 包装」）；
-        对端未配置 / 调用失败 / 返回空时，**降级用确定性 HTTP 快照自建灵感**，
-        保证读侧永不空转（ROADMAP 验收：有真实读取行为，不做只写不读）。
+        【F-R10-T0·转正（2026-09-11）】确定性 HTTP 快照自建灵感升为**首选**：
+        entity_ids 可直用、零 LLM 中介、无幻觉、毫秒级；对端 ACP 工具
+        get_arena_inspiration（洞察 + LLM 包装）降为快照不可用时的兜底。
+        任何一路成功都保证读侧不空转（ROADMAP 验收：有真实读取行为）。
         """
         from . import acp_client
         limit = max(1, int(limit or 5))
+        primary = self._inspiration_from_snapshot(acp_client.arena_fetch_snapshot(arena_id))
+        if primary:
+            if agent_id:
+                self._memory_inspiration_seen.add((arena_id, agent_id))
+            return {"ok": True, "source": "snapshot", "arena_id": arena_id,
+                    "count": len(primary[:limit]), "items": primary[:limit]}
         out = acp_client.arena_fetch_inspiration(arena_id, limit=limit)
         items = out.get("items") or []
         if out.get("ok") and items:
             if agent_id:
                 self._memory_inspiration_seen.add((arena_id, agent_id))
-            return {"ok": True, "source": "memory-agent", "arena_id": arena_id,
-                    "count": out.get("count", len(items)), "items": items}
-        fallback = self._inspiration_from_snapshot(acp_client.arena_fetch_snapshot(arena_id))
-        if fallback:
-            if agent_id:
-                self._memory_inspiration_seen.add((arena_id, agent_id))
-            return {"ok": True, "source": "snapshot-fallback", "arena_id": arena_id,
-                    "count": len(fallback[:limit]), "items": fallback[:limit],
-                    "degraded_reason": out.get("error") or "对端灵感为空"}
+            return {"ok": True, "source": "memory-agent-fallback", "arena_id": arena_id,
+                    "count": out.get("count", len(items)), "items": items,
+                    "degraded_reason": "分区快照为空，降级 ACP-LLM 灵感（F-R10-T0 转正后为兜底）"}
         return {"ok": False, "arena_id": arena_id, "items": [],
                 "error": out.get("error") or "灵感不可用",
                 "hint": "对端竞技场联动未配置（MEMORY_AGENT_ARENA_TOKEN 缺失）"
@@ -1243,6 +1283,11 @@ class ArenaManager:
         if not arena:
             return {"ok": False, "error": f"分区 {arena_id} 不存在"}
 
+        # 【F-R10-B1-01】深度防御：HTTP 层已 400 拦空 agent_id，这里兜底内部调用方，
+        # 杜绝任何路径把题目锁给空/匿名归属（locked_by 失真会污染战报与排行榜）。
+        if not str(agent_id or "").strip():
+            return {"ok": False, "error": "agent_id 不能为空（F-R10-B1-01）"}
+
         with self._lock:
             tasks = self._load_tasks()
             task = next((t for t in tasks if t["id"] == task_id and t.get("arena_id") == arena_id), None)
@@ -1290,7 +1335,8 @@ class ArenaManager:
         if _kb_fail:
             self._record_error_kb(task, dsl, _kb_fail[0], _kb_fail[1], agent_id,
                                   str(result.get("proposal_id") or ""))
-            _fb = self._kb_feedback(_kb_fail[0], _kb_fail[1])
+            _fb = self._kb_feedback(_kb_fail[0], _kb_fail[1],
+                                    arena_id=str(task.get("arena_id") or ""))
             if _fb:
                 result["knowledge_feedback"] = _fb
 
@@ -1422,11 +1468,171 @@ class ArenaManager:
                             "B20 前置已满足；标 assertion_target_unavailable 的目标无法"
                             "翻转，请确认设备已同步。",
                 }
+            # 【F-R10-T0·触发保真】题面是「状态/事件触发」型自动化（当/每当/检测到/超过…），
+            # 提交的 DSL 却仅以 inject 触发 → 真机 HA 触发链路从未被重放覆盖
+            # （inject 恒激活，任何世界态都执行），属触发保真降级（R10 a3 方案）。
+            # 非硬拦：fully_verified 诚实降级，WebUI 人工复核后仍可批准部署。
+            if (isinstance(result, dict) and result.get("ok")
+                    and isinstance(result.get("gate"), dict)
+                    and result["gate"].get("fully_verified", True)
+                    and self._is_inject_only_for_state_task(task, dsl)):
+                result["gate"].setdefault("warnings", []).append(
+                    "【触发保真降级】题面为状态/事件触发型自动化，提交 flow 仅以 inject "
+                    "触发——真机 HA 触发链路未被重放验证（F-R10-T0），fully_verified "
+                    "不视为完整验证。")
+                result["gate"]["fully_verified"] = False
+            # ★ F-R8-02 语义保真 lint（A 项 · 创造力保真）：方向-only 断言不查
+            # 触发实体/时间触发/死分支 →「标题创意」蒙混过关。三类语义缺陷降级
+            # fully_verified（不锁、任务回 available 供重试），逼出真创意。
+            _fid = self._lint_dsl_vs_task(task, dsl)
+            if _fid["warnings"]:
+                result["gate"].setdefault("warnings", []).extend(_fid["warnings"])
+                if _fid["fidelity_violations"]:
+                    result["gate"]["fully_verified"] = False
+                result["dsl_fidelity"] = _fid
             return result
         except Exception as e:
             # 异常路径也喂经验库（兜底调用点）
             self._record_error_kb(task, dsl, f"验收异常: {e}", "verify_exception")
             return {"ok": False, "error": str(e), "stage": "propose_dsl_exception"}
+
+    # 题面「状态/事件触发」信号词（F-R10-T0）：命中即认为该题期望 HA 状态/时间触发，
+    # 而非手动 inject 触发。宁可漏判（不降级）也不误伤手动题。
+    _TASK_STATE_TRIGGER_RE = None  # 懒编译（见 _is_inject_only_for_state_task）
+    _TASK_TIME_SIGNAL_RE = None    # 懒编译（见 _lint_dsl_vs_task · F-R8-02 语义保真）
+
+    @classmethod
+    def _is_inject_only_for_state_task(cls, task: Dict, dsl: str) -> bool:
+        """【F-R10-T0】题面要状态/事件触发、DSL 却是 inject-only → True（保真降级）。"""
+        import re as _re2
+        if cls._TASK_STATE_TRIGGER_RE is None:
+            cls._TASK_STATE_TRIGGER_RE = _re2.compile(
+                r"当|每当|一旦|检测到|超过|低于|达到|开门时|关门时|打开时|关闭时")
+        text = f"{task.get('title') or ''} {task.get('description') or ''}"
+        if not cls._TASK_STATE_TRIGGER_RE.search(text):
+            return False
+        # DSL 触发行是 inject / 手动 → 触发保真降级；带实体状态或时间触发的不算
+        return bool(_re2.search(r"^\s*触发:\s*(inject\b|手动)", dsl or "", _re2.M))
+
+    def _lint_dsl_vs_task(self, task: Dict, dsl: str) -> Dict:
+        """【F-R8-02 盲区修复】题面语义 vs 提交 DSL 的一致性静态比对。
+
+        方向-only 断言（_infer_postconditions）只校验动作目标被拨到题面推断方向，
+        不校验触发实体 / 时间触发 / 分支语义 →「门开超时关空调」DSL 实为 turn_on、
+        「每晚十点半」DSL 却对开门触发 这类 title≠impl 仍能 fully_verified 通过，
+        等于把「标题创意」算成「实现创造力」污染排行榜。
+
+        返回 {"ok", "warnings", "fidelity_violations"}：
+        - fidelity_violations 非空 → 调用方降级 fully_verified（不锁、任务回 available 供重试）。
+        - 仅检查①（触发实体 ∈ 题面设备集）为**纯告警不降级**：entity_ids 编写不全的旧题
+          会误伤正确 flow（F-R8-03 同族坑），故只透出信号、不卡验收；②③为明确语义缺陷，降级。
+        仅静态 DSL 解析比对，绝不重放、不碰 prod；解析失败静默跳过（不误伤）。
+        """
+        import re as _re
+        from .dsl_engine import (parse as _dsl_parse, Action,
+                                 Switch, TimeRange, CurrentState, Parallel)
+
+        out: Dict = {"ok": True, "warnings": [], "fidelity_violations": []}
+        entity_ids = set(task.get("entity_ids") or [])
+        text = f"{task.get('title') or ''} {task.get('description') or ''}"
+
+        try:
+            scene = _dsl_parse(dsl or "")
+        except Exception:
+            return out  # DSL 无法解析（propose_dsl 会另行报错），lint 跳过
+
+        # 递归收集所有步骤（含嵌套分支体 / 时间段门体 / 并行体）
+        steps: List = []
+
+        def _walk(step_list):
+            for st in step_list:
+                steps.append(st)
+                if isinstance(st, Switch):
+                    for _br in st.branches:
+                        _walk(getattr(_br, "body", []) or [])
+                    _walk(getattr(st, "else_body", []) or [])
+                elif isinstance(st, (TimeRange, CurrentState)):
+                    _walk(getattr(st, "body", []) or [])
+                    _walk(getattr(st, "else_body", []) or [])
+                elif isinstance(st, Parallel):
+                    for _ch in getattr(st, "children", []) or []:
+                        if isinstance(_ch, list):
+                            _walk(_ch)
+                        else:
+                            steps.append(_ch)
+
+        _walk(list(scene.body))
+
+        def _collect_actions(step_list):
+            """收集步骤树中所有 Action 的（domain,target,service）签名。"""
+            sigs = []
+            for st in step_list:
+                if isinstance(st, Action):
+                    sigs.append((st.domain, st.target, st.service))
+                elif isinstance(st, Switch):
+                    for _br in st.branches:
+                        sigs.extend(_collect_actions(getattr(_br, "body", []) or []))
+                    sigs.extend(_collect_actions(getattr(st, "else_body", []) or []))
+                elif isinstance(st, (TimeRange, CurrentState)):
+                    sigs.extend(_collect_actions(getattr(st, "body", []) or []))
+                    sigs.extend(_collect_actions(getattr(st, "else_body", []) or []))
+                elif isinstance(st, Parallel):
+                    for _ch in getattr(st, "children", []) or []:
+                        if isinstance(_ch, list):
+                            sigs.extend(_collect_actions(_ch))
+                        elif isinstance(_ch, Action):
+                            sigs.append((_ch.domain, _ch.target, _ch.service))
+            return sigs
+
+        has_time_range = any(isinstance(st, TimeRange) for st in steps)
+        has_time_trigger = any(getattr(t, "kind", None) == "time"
+                               for t in scene.triggers)
+
+        # ── 检查①：触发实体须 ∈ 题面设备集（纯告警，不降级，见方法 docstring）──
+        if entity_ids:
+            for _tg in scene.triggers:
+                if getattr(_tg, "kind", None) == "state" and getattr(_tg, "entity", None):
+                    if _tg.entity not in entity_ids:
+                        out["warnings"].append(
+                            f"【触发保真】触发实体 {_tg.entity} 不在题面设备集 "
+                            f"{sorted(entity_ids)} 中（F-R8-02：触发实体须 ∈ 题面实体集，"
+                            f"否则实现与题面脱节；仅告警不卡验收）")
+
+        # ── 检查②：时间信号词须有 时间段/定时 触发（语义缺陷 → 降级）──
+        if self._TASK_TIME_SIGNAL_RE is None:
+            self._TASK_TIME_SIGNAL_RE = _re.compile(
+                r"深夜|凌晨|早晨|早上|上午|中午|下午|傍晚|晚上|每晚|每天|每日|"
+                r"定时|时间段|工作日|周末|整点|睡前|起床|"
+                r"(\d{1,2})\s*点|(\d{1,2}):(\d{2})")
+        if (self._TASK_TIME_SIGNAL_RE.search(text)
+                and not (has_time_range or has_time_trigger)):
+            _msg = ("【时间保真】题面含时间信号词但提交 flow 无 时间段/定时 触发"
+                    "（F-R8-02：题面要「每晚/定时/工作时间」须有 时间段: 或 定时 触发，"
+                    "否则时间语义未实现）")
+            out["warnings"].append(_msg)
+            out["fidelity_violations"].append(_msg)
+
+        # ── 检查③：死分支（多分支动作完全相同 → 否则分支形同虚设 → 降级）──
+        for _sw in (st for st in steps if isinstance(st, Switch)):
+            _branch_sigs = [_collect_actions(getattr(_br, "body", []) or [])
+                            for _br in _sw.branches]
+            _branch_sigs.append(_collect_actions(getattr(_sw, "else_body", []) or []))
+            _found = False
+            for _a in range(len(_branch_sigs)):
+                if not _branch_sigs[_a]:
+                    continue
+                for _b in range(_a + 1, len(_branch_sigs)):
+                    if _branch_sigs[_a] == _branch_sigs[_b]:
+                        _msg = ("【死分支】多个分支动作完全相同（否则分支形同虚设，"
+                                "条件分支退化为恒执行，F-R8-02 语义缺陷）")
+                        out["warnings"].append(_msg)
+                        out["fidelity_violations"].append(_msg)
+                        _found = True
+                        break
+                if _found:
+                    break
+
+        return out
 
     def _llm_judge_duplicate(self, new_task: Dict, existing_task: Dict) -> Optional[Dict]:
         """第三层 LLM 考官：判断两个题目是否为同一自动化场景。
