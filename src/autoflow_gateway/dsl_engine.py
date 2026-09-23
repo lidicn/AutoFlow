@@ -14,6 +14,7 @@ switch / delay / change / link out / subflow 实例。
 
 from __future__ import annotations
 
+import contextvars
 import json
 import re
 from dataclasses import dataclass, field
@@ -26,20 +27,25 @@ from .flow_linter import lint_flow, _check_jsonata, _strip_strings_and_comments
 # ── 实体解析钩子（友好名/语义标签 → entity_id）─────────────────────────────
 # DSL 设计 §2：实体用语义标签或原始 entity_id 均可，引擎经 Tier2 实体映射解析。
 # 解析器由网关注入（gateway.state.resolve），引擎本身零依赖、不持有映射。
-_entity_resolver = None
+# D-01：改用 contextvars，使并发请求的解析器互相隔离（模块级全局会在多请求
+# 编译交错时互相覆盖，导致跨 agent 实体解析串味 / 数据泄露）。
+_entity_resolver = contextvars.ContextVar("autoflow_entity_resolver", default=None)
 
 
 def set_entity_resolver(fn):
-    """注入 友好名/标签 → entity_id 解析器（网关在 compile 前调用）。"""
-    global _entity_resolver
-    _entity_resolver = fn
+    """注入 友好名/标签 → entity_id 解析器（网关在 compile 前调用）。
+
+    D-01：写入当前执行上下文的 ContextVar，仅对本请求后续的 compile 可见，
+    不被并发请求的解析器覆盖。"""
+    _entity_resolver.set(fn)
 
 
 def _resolve_entity(target: str) -> str:
-    if _entity_resolver is None:
+    fn = _entity_resolver.get()
+    if fn is None:
         return target
     try:
-        r = _entity_resolver(target)
+        r = fn(target)
     except Exception:
         r = None
     return r or target
@@ -49,7 +55,8 @@ def _resolve_entity(target: str) -> str:
 # 用于编译期属性名校验（WB24 NEW-F1 defense-in-depth）：子流程/取值引用某实体的
 # 属性时，若解析器可用且能拿到该实体的属性集合，则校验属性名是否合法。
 # 解析器返回 None 表示「无法判定」（未知实体/取属性失败）→ 调用方跳过校验（fail-open）。
-_entity_attributes_resolver = None
+_entity_attributes_resolver = contextvars.ContextVar(
+    "autoflow_entity_attributes_resolver", default=None)
 
 
 def set_entity_attributes_resolver(fn):
@@ -57,9 +64,9 @@ def set_entity_attributes_resolver(fn):
 
     fn(entity_id) -> set[str] | None：返回该实体已知属性名集合；返回 None 或抛异常
     均表示「无法判定」，调用方据此跳过校验（fail-open），绝不因属性查询失败而阻断编译。
-    """
-    global _entity_attributes_resolver
-    _entity_attributes_resolver = fn
+
+    D-01：写入当前执行上下文的 ContextVar，与并发请求隔离。"""
+    _entity_attributes_resolver.set(fn)
 
 
 def _is_template_entity(s: str) -> bool:
@@ -74,7 +81,8 @@ def _resolve_entity_attributes(entity: str) -> Optional[set]:
 
     fail-open：任何异常都返回 None，调用方据此跳过校验，绝不因属性查询失败而阻断编译。
     """
-    if _entity_attributes_resolver is None:
+    fn = _entity_attributes_resolver.get()  # D-01：当前上下文的解析器
+    if fn is None:
         return None
     if _is_template_entity(entity):
         return None
@@ -82,7 +90,7 @@ def _resolve_entity_attributes(entity: str) -> Optional[set]:
     if not eid or _is_template_entity(eid):
         return None
     try:
-        attrs = _entity_attributes_resolver(eid)
+        attrs = fn(eid)
     except Exception:
         return None
     return attrs
@@ -1461,12 +1469,13 @@ def _unresolved_name_issue(name: str, where: str) -> Optional[Issue]:
     定为 warning 而非 error：实体目录可能为空/未同步（离线网关、测试环境），
     fail-open 哲学下不因目录状态阻断编译——但不再静默，agent/gate 可据码自查。
     ASCII entity_id 的存在性校验仍归 gate/linter；无解析器（离线编译）时跳过。"""
-    if not name or _entity_resolver is None or _is_template_entity(name):
+    fn = _entity_resolver.get()  # D-01：当前上下文的解析器
+    if not name or fn is None or _is_template_entity(name):
         return None
     if not _CJK_RE.search(name):
         return None
     try:
-        r = _entity_resolver(name)
+        r = fn(name)
     except Exception:
         r = None
     if r:

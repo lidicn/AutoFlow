@@ -105,3 +105,8 @@ skills_backup*/
 /gen_r21_flows.py
 /outputs/
 /tmp/
+# 仓库根散落的一次性 pytest / 调试产物（tmp_pytest_*.txt、tmp_v220_recheck.txt 等）。
+# 与上面的 /tmp/ 目录互补：这些是躺在仓库根、名字以 tmp_ 开头的临时文本，历史上多次
+# 被 `git add -A` 误夹带进提交，统一排除，杜绝再犯。
+/tmp_*.txt
+/tmp_*.json

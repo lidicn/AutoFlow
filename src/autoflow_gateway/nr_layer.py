@@ -107,13 +107,16 @@ class NRLayer:
             info=info, category=category, env=env, allow_prod=allow_prod)
 
     def modify_node_field(self, flow_id: str, node_id: str, fields: Dict,
-                           dry_run: bool = False, allow_structural: bool = False) -> Dict:
+                           dry_run: bool = False, allow_structural: bool = False,
+                           allow_prod: bool = False) -> Dict:
         """Core 档 #7 手术刀编辑：改单节点字段并部署（结构键默认禁止）。
 
-        委托底层 client.modify_node_field（nr_client.py:1711）；allow_structural 透传，
-        用于显式绕过结构键守卫（危险，仅内部用）。"""
+        委托底层 client.modify_node_field（nr_client.py:1711）；allow_structural / allow_prod 透传。
+        allow_structural 用于显式绕过结构键守卫（危险，仅内部用）；allow_prod 是写 prod 护栏的
+        显式 opt-in（默认 False，fail-closed），WebUI 人面在「人点击应用」时传 True。"""
         return self.client.modify_node_field(
-            flow_id, node_id, fields, dry_run=dry_run, allow_structural=allow_structural)
+            flow_id, node_id, fields, dry_run=dry_run,
+            allow_structural=allow_structural, allow_prod=allow_prod)
 
     def modify_function_code(self, flow_id: str, node_id: str, code: str, name: str = None) -> Dict:
         return self.client.modify_function_code(flow_id, node_id, code, name=name)
@@ -147,8 +150,9 @@ class NRLayer:
 
         把 take_instance_snapshot 生成的快照还原到 NR；绝不可逐条 PUT（旧实现写崩实例）。
         allow_partial 默认 True（还原即回滚：删差集是预期行为）。
-        命名避开 NRLayer  banned 属性 `restore_snapshot`（CONTRACTS.md §2.1：整实例替换入口
-        不得上浮到 Layer；本方法只是「还原到指定快照」，且走 client 的 POST /flows 全量重部署）。
+        命名避开 NRLayer banned 属性 `restore_snapshot`（整实例替换入口不得上浮到 Layer，
+        见 tests/test_contracts_surface.py::test_nr_layer_does_not_expose_replace_all；
+        本方法只是「还原到指定快照」，且走 client 的 POST /flows 全量重部署）。
         """
         return self.client.restore_snapshot(path, allow_prod=allow_prod,
                                             allow_partial=allow_partial)

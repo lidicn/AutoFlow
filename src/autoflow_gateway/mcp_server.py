@@ -26,13 +26,14 @@ AutoFlow Gateway — MCP 服务（双面板）+ 身份鉴权 + WebUI 合一
 import argparse
 import asyncio
 import json
+import logging
 import os
 import re
 import secrets
 import threading
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from mcp.server.fastmcp import FastMCP
 
@@ -45,6 +46,8 @@ from .webui import build_webui_asgi
 from .config import get_config, is_task_pool_enabled, is_submit_gate_enabled, is_acp_enabled
 from typing import Optional
 from . import acp_client  # 仅用 stdlib(urllib)，安全常驻导入
+
+_log = logging.getLogger("autoflow.mcp")
 # llm_client 含 `import httpx` —— 改为惰性导入（见 autoflow_ask_llm），
 # 避免 httpx 未安装时网关启动期 ImportError 全功能宕机（ACP 属小众，不应绑架 boot）。
 
@@ -90,8 +93,10 @@ _DEPLOY_KNIVES = {
     "autoflow_set_tab_state", "autoflow_verify_flow",
     "autoflow_apply", "autoflow_apply_rollback", "autoflow_apply_state_from_debug",
     "autoflow_get_trace",
+    "autoflow_list_apply_traces",  # #20 审计轨迹索引（枚举部署/回滚，与 get_trace 同层）
     "autoflow_snapshot_instance", "autoflow_restore_snapshot",  # #16 实例快照/还原运维刀（对 black 隐藏）
     "autoflow_surgical_edit",  # #7 Core 档手术刀编辑（对 black 隐藏；get_inventory 只读不藏）
+    "autoflow_trigger_inject",  # #19：手动扳机（可让设备真实动作、跳过审批）→ 收进专家档
 }
 
 # ───────────── 读：自然语言设备名 → 实体候选（跨域，不引导猜域）─────────────
@@ -368,9 +373,13 @@ def autoflow_debug_read(flow_id: str = "", node_id: str = "", since: int = 0,
         flow_id=flow_id or None, node_id=node_id or None,
         since=since or None, limit=limit, full=full))
 
+@mcp_admin.tool()
 @mcp.tool()
 def autoflow_trigger_inject(flow_id: str = "", inject_id: str = "") -> str:
     """【诊断·触发】真实触发 Node-RED 中的 inject 节点（让 flow 跑一次，产生 debug 帧供 debug 回读）。
+
+    ⚠️ 属 _DEPLOY_KNIVES（#19 决策1）：会让设备真实动作、且跳过人工审批闸，故<b>仅专家/管理员可见</b>，
+    普通身份不可见也不可调。
 
     这是 #644 debug 回读闭环的「触发」半环：先经本工具触发 → 节点运行产生 debug 事件 →
     再由 autoflow_debug_read 从本地缓冲读回（两条热路径都不碰）。仅点火 inject，**不修改**任何 flow。
@@ -800,6 +809,13 @@ def autoflow_submit_result(task_id: str, dsl: str) -> str:
         return _js({"ok": False, "result_kind": "tier_forbidden",
                     "error": f"task_id={task_id} 属 tier={_task_tier}，不属于你身份可提交的 tier"
                              f"（身份={agent_mode}，允许 {_tiers}）。提交越界被拒——请只提交你身份对应的任务池。"})
+    # 二次校验（D-06）：提交必须与领用同口径——该任务须由本 agent 实际认领
+    # （tasks.get 已按 agent_id 回带 claim 记录到 my_status）。否则普通 agent 可拿他人
+    # task_id 直接 submit，写入 claim 记录污染任务池（越权代交）。
+    if not (t or {}).get("my_status"):
+        return _js({"ok": False, "result_kind": "not_claimed",
+                    "error": f"task_id={task_id} 你尚未认领（无 claim 记录）。请先 autoflow_claim_task 领用，"
+                             f"再提交你自己的结果——禁止代交他人任务。"})
     if not dsl or not dsl.strip():
         _gw().tasks.submit(task_id, agent.agent_id, "", "no_response", "空 DSL")
         return _js({"ok": False, "result_kind": "no_response", "error": "DSL 为空，未提交。"})
@@ -1664,6 +1680,30 @@ def autoflow_get_trace(trace_id: str) -> str:
 
 @mcp_admin.tool()
 @mcp.tool()
+def autoflow_list_apply_traces(limit: int = 50, flow_id: str = "",
+                               agent_id: str = "", mode: str = "") -> str:
+    """【审计·轨迹索引】列出最近的部署/验证/回滚审计轨迹（data/apply_traces/），按时间倒序。
+
+    与 autoflow_get_trace（按 trace_id 读明细）互补：本工具是**枚举**，无需预先知道 id，
+    直接回答「都发生过哪些部署/回滚、谁做的、验证了什么、有没有回滚」——即
+    「任一次部署可回溯」的入口。覆盖 apply 闭环 / 直写 / 提案部署 / 批量部署 / 回滚。
+    - limit：返回条数（默认 50，上限 500）。
+    - flow_id / agent_id：精确过滤（留空不过滤）；mode：A/B/C/DIRECT/DEPLOY_PROPOSAL/
+      DEPLOY_BATCH/ROLLBACK（大小写不敏感）。
+    - 返回 {ok, count, total, items:[{trace_id, flow_id, mode, agent_id, ok, applied,
+      pending, stage, rolled_back, verified, gate, updated_at, ...}]}。
+    - 只读，不改任何状态；坏文件跳过不报错。⚠️ 普通身份不可见也不可调（_DEPLOY_KNIVES）。"""
+    agent = get_current_agent()
+    if agent is None:
+        return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
+    if agent.mode == "normal":
+        return _js({"ok": False, "error": "当前身份为『普通』(mode=normal)；"
+                    "审计轨迹索引属原生手写/运维能力，请改用『原生手写身份码』调用本工具。"})
+    return _js(_gw().list_apply_traces(limit=limit, flow_id=flow_id,
+                                       agent_id=agent_id, mode=mode))
+
+@mcp_admin.tool()
+@mcp.tool()
 def autoflow_apply_state_from_debug(flow_id: str = "", node_id: str = "", since: int = 0,
                                     limit: int = 50, entity_id: str = "", state: str = "",
                                     reason: str = "", auto_approve: bool = False,
@@ -2211,6 +2251,11 @@ class AgentAuthMiddleware:
 # _acp_agent_run 的实现，外层 SSE/会话/分发逻辑不变。会话存储为单进程内存（规格 §9，重启丢上下文可接受）。
 _ACP_SESSIONS: "dict[str, _ACPSession]" = {}
 _ACP_SESSIONS_LOCK = threading.Lock()
+# ACP 会话内存 TTL（D-08）：超过此时间无活动的会话在下次访问时被惰性清理，防内存无限增长。
+# 可调：AUTOFLLOW_ACP_SESSION_TTL_SECONDS（默认 30 分钟）、AUTOFLLOW_ACP_SESSION_SWEEP_INTERVAL_SECONDS（清理节流间隔，默认 5 分钟）。
+_ACP_SESSION_TTL_SECONDS = float(os.environ.get("AUTOFLLOW_ACP_SESSION_TTL_SECONDS", 30 * 60))
+_ACP_SESSION_SWEEP_INTERVAL_SECONDS = float(os.environ.get("AUTOFLLOW_ACP_SESSION_SWEEP_INTERVAL_SECONDS", 5 * 60))
+_acp_last_sweep_dt: "Optional[datetime]" = None
 _ACP_VERSION = "1.0.0"
 
 # ── ACP /acp 工具面：从 MCP 工具注册表派生（★单一真相源，v2.0.12-2）──
@@ -2282,13 +2327,25 @@ class _ACPSession:
         self.status = "running"
         self.history: list = []          # 累积 content 块（tool_call / text）
         self.cancel_event = None         # asyncio.Event，由 cancel 方法 set
-        self.created_at = _acp_now()
+        self.created_dt = datetime.now(timezone.utc)
+        self.created_at = self.created_dt.isoformat()
+        self.last_activity_dt = self.created_dt
+        self.last_activity = self.created_at
+
+    def touch(self) -> None:
+        """刷新最近活动时间戳，供 TTL 清理判定（D-08）。"""
+        self.last_activity_dt = datetime.now(timezone.utc)
+        self.last_activity = self.last_activity_dt.isoformat()
 
     def is_cancelled(self) -> bool:
         return bool(self.cancel_event and self.cancel_event.is_set())
 
 
 def _acp_get_or_create_session(session_id: str) -> "_ACPSession":
+    global _acp_last_sweep_dt
+    now = datetime.now(timezone.utc)
+    if _acp_last_sweep_dt is None or (now - _acp_last_sweep_dt) >= timedelta(seconds=_ACP_SESSION_SWEEP_INTERVAL_SECONDS):
+        _acp_sweep_stale_sessions()
     with _ACP_SESSIONS_LOCK:
         s = _ACP_SESSIONS.get(session_id)
         if s is None:
@@ -2297,10 +2354,31 @@ def _acp_get_or_create_session(session_id: str) -> "_ACPSession":
         return s
 
 
+def _acp_sweep_stale_sessions() -> int:
+    """清理超过 TTL 未活动的 ACP 会话，避免内存无限增长（D-08）。返回清理数。
+    仅在 _acp_get_or_create_session 中按节流间隔惰性触发，不引入独立后台线程
+    （与项目『低频按需、避免常驻消费者』原则一致）。"""
+    global _acp_last_sweep_dt
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=_ACP_SESSION_TTL_SECONDS)
+    removed = 0
+    with _ACP_SESSIONS_LOCK:
+        stale = [sid for sid, s in _ACP_SESSIONS.items()
+                 if (s.last_activity_dt or s.created_dt) < cutoff]
+        for sid in stale:
+            _ACP_SESSIONS.pop(sid, None)
+            removed += 1
+        _acp_last_sweep_dt = now
+    if removed:
+        _log.info("acp session sweep: removed %d stale session(s) (ttl=%.0fs)", removed, _ACP_SESSION_TTL_SECONDS)
+    return removed
+
+
 def _acp_list_sessions() -> list:
     with _ACP_SESSIONS_LOCK:
         return [{"sessionId": s.session_id, "status": s.status,
-                 "created_at": s.created_at, "block_count": len(s.history)}
+                 "created_at": s.created_at, "last_activity": s.last_activity,
+                 "block_count": len(s.history)}
                 for s in _ACP_SESSIONS.values()]
 
 
@@ -2344,6 +2422,7 @@ def _acp_agent_run(messages, context, session: "_ACPSession") -> None:
             "type": "text",
             "text": (result if isinstance(result, str) else json.dumps(result, ensure_ascii=False))[:4000],
         })
+        session.touch()
 
     if session.is_cancelled():
         return
@@ -2779,12 +2858,13 @@ def main():
     app = build_app(cfg, with_webui=args.webui)
     host = args.host or cfg.mcp_host
     port = args.port or cfg.mcp_port
-    print(f"[AutoFlow] serving MCP(user/white={cfg.mcp_path} (white 经 {cfg.mcp_white_path} 兼容别名), "
-          f"admin={cfg.mcp_admin_path})"
-          f"{' + WebUI(/)' if args.webui else ''} at http://{host}:{port}")
-    print(f"[AutoFlow] 拒绝匿名 MCP 连接；agent 需在 WebUI 生成身份码后配置。")
-    print(f"[AutoFlow] 单用户端点 {cfg.mcp_path}：工具按 agent.mode 分层显隐"
-          f"（normal=用户工具；expert/developer=用户工具+部署刀）；开发者连 {cfg.mcp_admin_path}（全量+运维刀）。")
+    _log.info("[AutoFlow] serving MCP(user/white=%s (white 经 %s 兼容别名), admin=%s)%s at http://%s:%s",
+              cfg.mcp_path, cfg.mcp_white_path, cfg.mcp_admin_path,
+              " + WebUI(/)" if args.webui else "", host, port)
+    _log.info("[AutoFlow] 拒绝匿名 MCP 连接；agent 需在 WebUI 生成身份码后配置。")
+    _log.info("[AutoFlow] 单用户端点 %s：工具按 agent.mode 分层显隐"
+              "（normal=用户工具；expert/developer=用户工具+部署刀）；开发者连 %s（全量+运维刀）。",
+              cfg.mcp_path, cfg.mcp_admin_path)
     uvicorn.run(app, host=host, port=port)
 
 if __name__ == "__main__":

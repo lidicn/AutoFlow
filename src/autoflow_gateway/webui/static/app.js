@@ -91,6 +91,32 @@ function modeLabel(m) {
 function endpointForMode(m) {
   return ({ normal: "/mcp", expert: "/mcp-white", developer: "/mcp-admin" })[m] || "/mcp";
 }
+// ── 决策1：专家模式风险告知（选择时内联提示 + 生成/切换为专家时强制弹窗确认）──
+let _editingPrevMode = "normal";   // 编辑弹窗打开时记录原模式，用于判断「切换为专家」才告警
+function expertInlineWarn(mode) {
+  return mode === "expert"
+    ? `<div class="desc" style="color:#c0392b;margin-top:6px">⚠️ 高级模式＝高权限：该 Agent 可<b>绕过人工批准直接部署</b>、让设备真实动作、手动触发自动化。仅授予你完全信任的内部 Agent。</div>`
+    : "";
+}
+function expertRiskGate(onConfirm) {
+  modal("⚠️ 高级模式风险告知（请完整阅读）", `
+    <p style="color:#c0392b;font-weight:700">⚠️ 高级模式 ＝ 高权限。请完整阅读以下风险后再确认。</p>
+    <ul style="line-height:1.75;margin:8px 0 8px 18px">
+      <li><b>绕过人工批准闸</b>：该 Agent 能直接部署/修改自动化，<b>无需你在 WebUI 点同意</b>。</li>
+      <li><b>设备真实动作</b>：可开关灯/空调/窗帘、播放音箱/TTS、发送消息等，有现实副作用。</li>
+      <li><b>手动触发（扳机）</b>：可自行触发一条自动化，跳过审批。</li>
+      <li><b>可见底层结构</b>：能看到并改写流程的原始技术结构。</li>
+      <li><b>可能写生产</b>：授权时可直接改动你正在使用的生产自动化。</li>
+      <li><b>影响面大</b>：一旦被误配置或滥用，可能改动或删除多条自动化。</li>
+    </ul>
+    <p class="desc">只应授予<b>你完全信任</b>的内部 Agent；普通/不可信 Agent 请用<b>标准模式</b>（仅提 DSL，永远需你批准）。</p>
+    <div class="row" style="gap:8px;margin-top:12px">
+      <button class="btn danger" id="expert-confirm">我已完整阅读风险，确认使用高级模式</button>
+      <button class="btn" id="expert-cancel">取消</button>
+    </div>`);
+  $("#expert-cancel").onclick = closeModal;
+  $("#expert-confirm").onclick = () => { closeModal(); onConfirm(); };
+}
 // 新建 Agent 页右侧的身份模式说明面板
 function renderAgentModeGuide() {
   return `
@@ -137,6 +163,7 @@ function setTab(tab) {
   else if (tab === "safe") loadSafeGate();
   else if (tab === "proposals") loadProposals();
   else if (tab === "deployed") loadDeployed();
+  else if (tab === "inventory") loadInventory();
   else if (tab === "notes") loadNotes();
   else if (tab === "diagnostics") loadDiagnostics();
   else if (tab === "subflows") loadSubflows();
@@ -1621,7 +1648,8 @@ async function loadAgents() {
           <h3>新建 Agent</h3>
           <div class="field"><label>名称（如 deepseek++）</label><input id="a-name" placeholder="deepseek++"></div>
           <div class="field"><label>权限模式</label>
-            <select id="a-mode">${MODES.map((m) => `<option value="${m}">${modeLabel(m)}</option>`).join("")}</select></div>
+            <select id="a-mode">${MODES.map((m) => `<option value="${m}">${modeLabel(m)}</option>`).join("")}</select>
+            <div id="a-mode-warn"></div></div>
           <div class="field"><label>备注</label><textarea id="a-notes" placeholder="可选"></textarea></div>
           <button class="btn primary" id="a-create">生成接入令牌</button>
         </div>
@@ -1630,6 +1658,11 @@ async function loadAgents() {
     </div>
     <div id="a-list" style="margin-top:14px"><div class="empty">加载中…</div></div>`;
   $("#a-create").onclick = createAgent;
+  {
+    const aMode = $("#a-mode"), aWarn = $("#a-mode-warn");
+    aMode.onchange = () => { aWarn.innerHTML = expertInlineWarn(aMode.value); };
+    aWarn.innerHTML = expertInlineWarn(aMode.value);
+  }
   try {
     const r = await api("GET", "/agents");
     const list = $("#a-list");
@@ -1661,7 +1694,15 @@ async function loadAgents() {
 async function createAgent() {
   const name = $("#a-name").value.trim();
   if (!name) return toast("请填写名称");
-  const r = await api("POST", "/agents", { name, mode: $("#a-mode").value, notes: $("#a-notes").value });
+  const mode = $("#a-mode").value;
+  const notes = $("#a-notes").value;
+  const run = () => _createAgentNow(name, mode, notes);
+  // 决策1：创建「高级模式(expert)」Agent 前，强制完整阅读风险并确认
+  if (mode === "expert") return expertRiskGate(run);
+  return run();
+}
+async function _createAgentNow(name, mode, notes) {
+  const r = await api("POST", "/agents", { name, mode, notes });
   if (!r.ok) return toast("创建失败：" + (r.data?.error || r.status));
   const a = r.data.agent;
   const ep = endpointForMode(a.mode);
@@ -1699,7 +1740,8 @@ async function editAgent(id) {
     <p class="desc">接入令牌不可改（需重置请点卡片上「重置接入令牌」）。身份模式（普通/专家/开发者）用下方下拉框设置，无需再写 notes 魔法串。</p>
     <div class="field"><label>名称</label><input id="e-name" value="${esc(a.name)}"></div>
     <div class="field"><label>身份模式</label>
-      <select id="e-mode">${MODES.map((m) => `<option value="${m}" ${m === (a.mode || "normal") ? "selected" : ""}>${modeLabel(m)}</option>`).join("")}</select></div>
+      <select id="e-mode">${MODES.map((m) => `<option value="${m}" ${m === (a.mode || "normal") ? "selected" : ""}>${modeLabel(m)}</option>`).join("")}</select>
+      <div id="e-mode-warn"></div></div>
     <div class="field"><label>状态</label>
       <select id="e-status"><option value="active" ${a.status === "active" ? "selected" : ""}>active</option><option value="revoked" ${a.status === "revoked" ? "selected" : ""}>revoked</option></select></div>
     <div class="field"><label>备注（其他说明）</label><textarea id="e-notes" placeholder="可选">${esc(a.notes || "")}</textarea></div>
@@ -1709,18 +1751,31 @@ async function editAgent(id) {
     </div>`);
   $("#e-cancel").onclick = closeModal;
   $("#e-save").onclick = () => saveAgent(id);
+  _editingPrevMode = a.mode || "normal";
+  {
+    const eMode = $("#e-mode"), eWarn = $("#e-mode-warn");
+    eMode.onchange = () => { eWarn.innerHTML = expertInlineWarn(eMode.value); };
+    eWarn.innerHTML = expertInlineWarn(eMode.value);
+  }
 }
 async function saveAgent(id) {
-  const r = await api("PUT", `/agents/${id}`, {
+  // 先取值（弹窗会替换 #modalBody，稍后再读会取不到）
+  const payload = {
     name: $("#e-name").value.trim(),
     mode: $("#e-mode").value,
     status: $("#e-status").value,
     notes: $("#e-notes").value,
-  });
-  if (!r.ok) return toast("保存失败：" + (r.data?.error || r.status));
-  toast("已保存");
-  closeModal();
-  loadAgents();
+  };
+  const run = async () => {
+    const r = await api("PUT", `/agents/${id}`, payload);
+    if (!r.ok) return toast("保存失败：" + (r.data?.error || r.status));
+    toast("已保存");
+    closeModal();
+    loadAgents();
+  };
+  // 决策1：切换为「高级模式(expert)」前，强制完整阅读风险并确认（已在专家则不再重复告警）
+  if (payload.mode === "expert" && _editingPrevMode !== "expert") return expertRiskGate(run);
+  return run();
 }
 
 

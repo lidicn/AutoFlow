@@ -55,7 +55,7 @@ class _SurgicalClient:
         return {"ok": True}
 
     def modify_node_field(self, flow_id, node_id, fields, *, dry_run=False,
-                          allow_structural=False):
+                          allow_structural=False, allow_prod=False):
         return {"success": not dry_run, "dry_run": dry_run, "node_id": node_id,
                 "node_count": 1,
                 "diff": {k: {"old": "old", "new": fields[k]} for k in fields}}

@@ -8,7 +8,8 @@ AutoFlow Gateway — ACP 客户端（autoflow 侧调用对端 memory-worker 的 
   · 非流式方法（initialize/cancel/session.*）→ application/json 响应。
   · prompt → text/event-stream，每事件 `event: message\\ndata: <JSON-RPC 通知>`。
     流结束 = 本轮会话结束，不再单独发 JSON-RPC result；完成态经 session_update.status 表达。
-  · 鉴权头：`Authorization: Bearer acp_xxx` 或 `x-acp-token: acp_xxx`。
+  · 鉴权头：`Authorization: Bearer acp_xxx`（C-A1 已统一，不再双传冗余的 x-acp-token，
+    避免中间代理丢弃自定义 header；对端 memory-worker 须优先读 Authorization）。
 
 仅用标准库（urllib.request）手写 SSE 行解析，零新依赖，与网关既有 HTTP 风格一致。
 所有对外调用失败一律返回 {ok:False, error:...}（不抛异常），便于上层给 agent 友好提示。
@@ -59,7 +60,6 @@ def call_acp(url: str, token: str, method: str,
         "Content-Type": "application/json",
         "Accept": "application/json",
         "Authorization": f"Bearer {token}",
-        "x-acp-token": token,
     }
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
@@ -98,7 +98,6 @@ def prompt_acp(url: str, token: str, messages: List[Dict[str, str]],
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
         "Authorization": f"Bearer {token}",
-        "x-acp-token": token,
     }
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     blocks: List[Dict[str, Any]] = []

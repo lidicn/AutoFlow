@@ -301,7 +301,7 @@ NR flow JSON
 | 模块 | 一句话 |
 |---|---|
 | `gateway.py` (9172 行) | 核心门面，聚合一切；`_GOLDEN_JOBS` + `_TRACE_RING` |
-| `mcp_server.py` | MCP 服务 + Bearer 中间件；47 个 `autoflow_*` 工具 |
+| `mcp_server.py` | MCP 服务 + Bearer 中间件；用户服务器 **45** 个 `autoflow_*` 工具（普通身份可见 **27**，其余经 `_DEPLOY_KNIVES` 过滤）/ 管理服务器 **47** 个 |
 | `webui.py` (3789 行) | WebUI ASGI 应用（治理/控制面，无业务逻辑）+ OAuth 发现端点 |
 | **`webui_auth.py`** | **WebUI 账号密码登录 + 服务端会话（三套令牌隔离）** |
 | `cli.py` | 无 MCP 客户端的 JSON 入口 |
@@ -341,7 +341,7 @@ NR flow JSON
 | `notes.py` / `plan_store.py` / `decision_store.py` / `command_store.py` | 用户笔记 / 计划 / 决策 / 命令 |
 | **`task_store.py`** | **DSL 验证任务池；`tasks` + `task_claims`（多 agent 各自独立做同一任务）** |
 | **`api_config_store.py`** | **Link API 运行时配置（独立 SQLite 表，真实密钥不进 git）** |
-| **`audit.py`** | **审计日志统一读取入口** |
+| **`audit.py`** | **审计日志统一读取入口**（#20 起同时覆盖：进程内 trace 环 + `data/apply_traces/` **落盘**轨迹索引 → `GET /api/audit/deploys`） |
 | ☆ `api_keys.py` (310) | **API Key 管理**：`af_pro_<32hex>`，存 SHA-256 hash；授权 tabs + 权限 + 过期（**fail-closed**） |
 | ☆ `deploy_tokens.py` (365) | **部署授权码**：Tab 级授权，信任 Agent 可在指定 tab 自动部署；含节点阈值转人工、配额、限流 |
 | ☆ `templates.py` (275) | **模板库**（Pro 版，与 DSL 的 `template_lib.py` 不同层：这是可复用 flow 模板） |

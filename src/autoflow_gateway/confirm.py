@@ -8,6 +8,8 @@ AutoFlow Gateway — 人工确认闸（写必人工确认）
 """
 import json
 import os
+import tempfile
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
@@ -53,20 +55,44 @@ class ConfirmationGate:
         self.cfg = config or get_config()
         self.base = os.path.join(self.cfg.data_dir, self.cfg.env_subdir(), "pending")
         os.makedirs(self.base, exist_ok=True)
+        # 序列化 request() 的「读后写」，防止并发绕过速率熔断（D-03）
+        self._lock = threading.Lock()
 
     def _path(self, op_id: str) -> str:
         return os.path.join(self.base, f"{op_id}.json")
 
+    def _atomic_write(self, path: str, data: Dict[str, Any]) -> None:
+        """原子写：tempfile + os.replace，崩溃/断电不残留半截文件（D-12）。
+
+        先写临时文件并 fsync，再 rename 落盘；任一环节失败删除临时文件，
+        绝不留下截断的 pending 状态，避免 confirm 状态丢失导致永久悬空。
+        """
+        d = os.path.dirname(path)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".pending-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
     def request(self, op: PendingOp) -> PendingOp:
-        # 速率熔断：单 agent 待确认上限
-        pending = self.list_pending(agent_id=op.agent_id, statuses=("pending",))
-        if len(pending) >= self.cfg.max_pending_per_agent:
-            raise ConfirmationError(
-                f"agent '{op.agent_id}' 待确认数已达上限 {self.cfg.max_pending_per_agent}，"
-                f"请先处理积压或等待批准。"
-            )
-        with open(self._path(op.id), "w", encoding="utf-8") as f:
-            json.dump(op.to_dict(), f, indent=2, ensure_ascii=False)
+        # 速率熔断：单 agent 待确认上限。
+        # 加锁保证「先读后写」原子性，防止并发请求绕过熔断（D-03）。
+        with self._lock:
+            pending = self.list_pending(agent_id=op.agent_id, statuses=("pending",))
+            if len(pending) >= self.cfg.max_pending_per_agent:
+                raise ConfirmationError(
+                    f"agent '{op.agent_id}' 待确认数已达上限 {self.cfg.max_pending_per_agent}，"
+                    f"请先处理积压或等待批准。"
+                )
+            self._atomic_write(self._path(op.id), op.to_dict())
         return op
 
     def get(self, op_id: str) -> Optional[PendingOp]:
@@ -86,8 +112,7 @@ class ConfirmationGate:
         op.decided_at = datetime.now(timezone.utc).isoformat()
         op.reviewer = reviewer
         op.reason = reason
-        with open(self._path(op_id), "w", encoding="utf-8") as f:
-            json.dump(op.to_dict(), f, indent=2, ensure_ascii=False)
+        self._atomic_write(self._path(op_id), op.to_dict())
         return op
 
     def approve(self, op_id: str, reviewer: str = "human") -> PendingOp:

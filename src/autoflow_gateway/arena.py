@@ -11,6 +11,7 @@ MVP 阶段：验收用 propose-dsl 的 vhass staging 闸门，不真实部署到
 """
 
 import json
+import logging
 import os
 import re
 import time
@@ -21,6 +22,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from .error_knowledge import ErrorKnowledgeStore
+
+_log = logging.getLogger("autoflow.arena")
 
 
 def _utcnow_iso() -> str:
@@ -1261,8 +1264,9 @@ class ArenaManager:
                 agent_id=agent_id,
                 used_memory_tools=used,
             )
-        except Exception:
-            pass
+        except Exception as _e:  # C-A9：战报推送失败须告警，不得静默吞掉（数据完整性风险）
+            _log.warning("arena memory report push failed (arena_id=%s, agent_id=%s): %s",
+                         arena_id, agent_id, _e)
 
     def submit_flow(
         self,

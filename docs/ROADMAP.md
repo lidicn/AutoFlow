@@ -24,6 +24,8 @@
 - **Pro 档（小白）**：agent 辅助写 DSL → verify_flow 可视化 → 极简一键批准/回滚；默认隐藏 NR 细节，只给"设备 + 意图 + 验证结果"。
 - **Agent 主导的"从零创作自动化"归 AutoForge**。AutoFlow 的 Pro 档只做"agent 辅助 + 人批准"，agent **不自我批准、不自我创作**——这是与 AutoForge 的硬边界。
 
+> **MA 对接（设计稿，暂缓）**：AutoFlow 与 memory-agent 已有 ACP 双向委派 + 竞技场 4 消费点；更广的对接（读通道/写通道/实时事件/健康度出口）设计见 [`03_dev/MA_interop_design.md`](03_dev/MA_interop_design.md)。**2026-09-22 用户决策：MA 仍在快速迭代，对接了也会改来改去 → 暂缓**，设计稿留档待时机成熟再启。
+
 ---
 
 ## 1. 当前基线
@@ -111,8 +113,8 @@
 
 | # | 项 | 内容 | 验收门 |
 |---|---|---|---|
-| 19 | **最小稳定工具面** | Core/Pro 各一套**最小 MCP + UI 工具集**（使用者视角，无运维刀：重启/清库等不暴露）；工具面变更走"提案→评审" | ✅ 工具数 = 最小可用集；运维动作不可达 |
-| 20 | **部署/验证/回滚审计** | 基于现有 `_slog`，补部署/验证/回滚事件的结构化审计（**不引入 OpenTelemetry**） | ✅ 任一次部署可回溯"谁/何时/验证了什么/回滚了没" |
+| 19 | 🔧 **最小稳定工具面**（进行中：守卫✅ + 契约单一真相源✅ + 收敛提案待评审） | Core/Pro 各一套**最小 MCP + UI 工具集**（使用者视角，无运维刀：重启/清库等不暴露）；工具面变更走"提案→评审"。**已落地**：① 守卫 `tests/test_toolface_minimal.py`（锁「运维刀仅 admin-only / 黑名单无幽灵 / admin 全量」）；② **★ 契约单一真相源** `tests/mcp_toolface_contract.py`（工具面清单的**唯一登记处**，`DEPLOY_KNIVES` / `OPS_KNIVES` / `USER_VISIBLE` / `ADMIN_USER_VISIBLE` 四集 + 派生量，守卫改用**集合相等**对账、报错给 symdiff —— 从此不再有 `45/47/27` 这类改一处漏三处的魔数）；**提案**：`03_dev/v3.0_19_toolface_minimal_proposal.md`（工具归属收敛待评审） | 🟡 运维动作不可达（已回归锁定 ✅）；⚠️ 工具数=最小可用集（待评审收敛） |
+| 20 | 🔧 **部署/验证/回滚审计**（已实现，待集中提交） | 基于现有 `_slog` + `apply_traces` 落盘轨迹，补部署/验证/回滚事件的结构化审计（**不引入 OpenTelemetry**）。**已落地**：① 审计**索引** `gateway.list_apply_traces()`（**枚举**，无需预知 trace_id）→ MCP `autoflow_list_apply_traces`（治理面，入 `_DEPLOY_KNIVES`）+ WebUI `GET /api/audit/deploys`（viewer）；② **人路径**（`deploy_proposal` / `deploy_proposals`）补落**持久**审计（此前只有进程内 `_slog`，环形 200 条重启即失）+ 批量整批回滚亦落痕（`mode=ROLLBACK, stage=rolled_back_batch`）；③ 索引行含四要素 | 🟡 四要素齐备：`test_deploy_audit.py` 10 例 + `test_deploy_proposal` 人路径 1 例 + `test_toolface_minimal` 治理面 1 例，全绿 |
 | 21 | **安全扩展接口（预留关）** | 留 pluggable executor 接口占位（默认关），供极客接外部执行器；**不实现 NR 替换** | ✅ 接口存在且默认关；接错不崩主流程 |
 
 ## 8. v4.0.0 —— 生态共存（可选 / 延后）

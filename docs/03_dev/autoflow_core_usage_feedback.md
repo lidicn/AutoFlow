@@ -21,7 +21,7 @@ Content-Type: application/json
   "grant_type": "password",
   "scope": "*",
   "username": "lidicn",
-  "password": "longyin1003"
+  "password": "<REDACTED-弱口令 len=11>"
 }
 ```
 
@@ -40,7 +40,7 @@ Content-Type: application/json
 
 | 问题 | 原因 | 解决方案 |
 |------|------|---------|
-| 首次认证失败 `invalid_grant` | 密码拼写错误（longying → longyin） | 确认正确密码后重试成功 |
+| 首次认证失败 `invalid_grant` | 密码拼写错误（longying → <REDACTED-弱口令 len=7>） | 确认正确密码后重试成功 |
 | PowerShell `Invoke-WebRequest` 报错 "NonInteractive mode" | 非交互模式下 IWR 有已知问题 | 改用 `Invoke-RestMethod` |
 | `/flows` 返回类型为 String 而非 JSON 对象 | Node-RED 返回 `Content-Type: text/plain` | 手动 `ConvertFrom-Json` 或用 Python 解析 |
 | PowerShell `ConvertFrom-Json` 报错重复键 `mergeContext`/`mergecontext` | Node-RED 节点同时包含新旧版本字段名 | 改用 Python `json.load()`（允许重复键，后者覆盖前者） |

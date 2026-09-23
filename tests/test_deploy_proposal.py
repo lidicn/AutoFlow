@@ -396,6 +396,27 @@ def test_e2e_gate_blocks_and_inherits():
         GW.run_e2e_trace_raw = real_e2e
 
 
+def test_deploy_proposal_writes_persistent_audit():
+    """#20：人路径（提案部署）必须落**持久**审计。
+
+    此前只有进程内 `_slog`（环形 200 条、重启即失），而提案部署是 WebUI 人批准部署的
+    主路径——缺它则「任一次部署可回溯」不成立。断言四要素在审计索引里可查：
+    谁（agent_id）/ 何时（updated_at）/ 验证了什么（verified）/ 回滚了没（rolled_back）。
+    """
+    _reset()
+    fid, pid = _deploy_and_check()
+    out = GW.list_apply_traces(flow_id=fid)
+    assert out["ok"] and out["total"] >= 1, out
+    row = out["items"][0]
+    assert row["mode"] == "DEPLOY_PROPOSAL", row
+    assert row["agent_id"] == "human", row            # 谁
+    assert row["updated_at"], row                     # 何时
+    assert row["verified"]["gate_passed"] is True, row  # 验证了什么
+    assert row["rolled_back"] is False, row           # 回滚了没
+    print(f"  ✓ 审计可回溯：trace={row['trace_id']} mode={row['mode']} stage={row['stage']}")
+    assert pid  # 提案 id 参与过部署
+
+
 def _run():
     test_deploy_direct_and_catalog()
     test_undeploy_only_ours_not_user_flow()
@@ -406,7 +427,8 @@ def _run():
     test_deploy_gate_passes_on_matching_expected()
     test_deploy_proposal_dry_run_no_write()
     test_e2e_gate_blocks_and_inherits()
-    print(f"\n全部测试通过 ✅  (9/9)")
+    test_deploy_proposal_writes_persistent_audit()
+    print(f"\n全部测试通过 ✅  (10/10)")
 
 
 if __name__ == "__main__":

@@ -343,3 +343,48 @@ CRLF 辨伪 4 文件 NAS==HEAD（实质差异 0）→ scp `gateway.py / arena.py
 
 **安全不变量守恒**：手术刀写路径只经 `nr_client`（人批准/用户自跑）；agent 仍只写 `af_*` 流，本批未向 agent MCP 暴露非 `af_*` 写工具（暴露层留待 WebUI 人批准界面，符合「批准/升格只在 WebUI」）。
 **待续（未含本批）**：#7/#9 的 WebUI/MCP 使用者视角工具面暴露；#8 多 flow 安全部署（与 v2.3 #13 回滚稳定化耦合）；#10/#11 Pro 引导 UX；#12 共用 verify_flow 核。
+
+---
+
+## F. Phase D v3.0.0（#19 工具面守卫 / #20 部署审计，2026-09-22）
+
+| 项 | 改动 | 验收证据 | commit |
+|---|---|---|---|
+| #20 审计**索引** | 新增 `_list_apply_traces(limit, flow_id, agent_id, mode)`（枚举 `data/apply_traces/*.json`；坏文件跳过、无目录返空、**绝不抛**、limit≤500、倒序）+ `Gateway.list_apply_traces()`。索引行含**四要素**：谁（`agent_id`）/ 何时（`updated_at`）/ 验证了什么（`verified`+`gate`）/ 回滚了没（`rolled_back`）。覆盖 mode：`A/B/C`/`DIRECT`/`DEPLOY_PROPOSAL`/`DEPLOY_BATCH`/`ROLLBACK` | `tests/test_deploy_audit.py` **10 例全绿** | 待提交 |
+| #20 **人路径落盘** | 此前**只有 apply 闭环**写 `data/apply_traces`；人路径（`deploy_proposal` / `deploy_proposals`）只写进程内 `_slog`（环形 200、重启即失）→ 现补齐：单提案成功落 `DEPLOY_PROPOSAL`；批量成功落 `DEPLOY_BATCH` 摘要；**整批回滚落 `ROLLBACK`/`rolled_back_batch`**（写进 `_rollback()` 闭包，`dry_run`/无快照 early-return 时不伪造回滚） | `test_deploy_proposal.py::test_deploy_proposal_writes_persistent_audit`（10/10）+ `test_deploy_audit.py` 批量成功/失败/dry_run 3 例 | 待提交 |
+| #20 治理面暴露 | MCP `autoflow_list_apply_traces`（admin+user 注册但**入 `_DEPLOY_KNIVES`** + normal 自守卫，与 `autoflow_get_trace` 同层）；WebUI `GET /api/audit/deploys`（`PERM_RULES` viewer）| `test_toolface_minimal.py::test_audit_index_expert_only` | 待提交 |
+| **★ 回归修复：D-09 误杀「旧令牌兼容通道」** | `webui.py` 的 Bearer API Key 闸门由 `if _auth.startswith("Bearer ")` 收窄为 **`...startswith("af_pro_")`**：非 API Key 前缀的 Bearer 回落会话/旧令牌通道。**根因**：D-09（"API Key 验证失败显式 401，去 except: pass"）把「任意 Bearer」都当 API Key，失败即 401 → 把步骤 3 的 `AF_WEBUI_TOKEN` 旧令牌通道（注释明写"给脚本/CI 留活路"）整条打死，webui 系 **15 用例红**；实为**产品级回归**（前端/脚本用旧令牌 Bearer 全 401），非测试漂移 | 修前 **15 failed**（统一 `401 {"error":"API Key 无效"}`）；修后 `test_webui* + test_api_keys + test_subflow_webui + test_llm_webui_agent` = **70 passed**；新增守卫 2 例：`af_pro_` 假 key→401（fail-closed 保留）/ 旧令牌 Bearer→200（不误杀） | 待提交 |
+
+**教训（写入方法论）**：审计期做安全硬化（"失败 fail-closed、不静默回落"）时，必须**先摸清同一入口上挂了哪几条身份通道**——此处 `Bearer` 一词被「API Key」与「旧令牌」**共用**，收窄一条通道会误杀另一条。判据应绑定**凭据形态**（前缀），而非载体（header 名）。
+
+**安全不变量守恒**：审计读取（索引 + 明细）属治理面，普通身份不可见亦不可调；`_DEPLOY_KNIVES` 机制未放宽。写类路径未新增 agent 可达工具。
+
+---
+
+## G. 元层面加固（v3.0.0 路线 A，2026-09-22）
+
+> **缘起**：用户质询「38 项修复是脱胎换骨还是表面好看？还要不要再来一轮审计？」。
+> 实测取证（全量 1774 passed / 1 skipped / 0 failed）后给结论：**既非脱胎换骨（无架构级重构），
+> 也非表面好看（S-01 代码注入 / D-01 并发全局污染是真洞）**，并指出「38」是审计轮次去重数、
+> 本仓实际改动 17 项、含 2 项审计假阳性（D-02/D-07）。更重要的是**本轮暴露的元层面缺陷比 38 项本身更值钱**。
+> 用户拍板执行路线 A（先补元层面三洞，再谈第二轮审计）。
+
+### 本轮暴露的元层面缺陷（成因分析）
+| # | 缺陷 | 实证 |
+|---|---|---|
+| M1 | **修复自身引入回归** | D-09 硬化 API Key 通道时把**共用同一 `Bearer` 头**的旧令牌通道整条打死 → webui 系 **15 用例全红**（统一 `401 API Key 无效`）。**若非跑全量，该回归会直上 prod** |
+| M2 | **契约硬编码散落** | 全仓 **84 处 `assertEqual(len(X), N)`**；其中工具面/白名单/签名类是「改代码就要手动同步测试」，漏一处红一片（当日漏 **3 处**：工具数 3 个魔数 + stage 白名单 + stub 签名） |
+| M3 | **幽灵引用** | `test_contracts_surface.py` 通篇引用 `docs/CONTRACTS.md §X` 作为「要同步的文档」，该文件**从未入库**（非 gitignore、git 历史无删除记录）→ 守卫把开发者指向死路 |
+| M4 | **前端零覆盖** | `app.js` 285KB / `index.html` 37KB / `tutorials.js` 32KB **无任何 Python 测试触及**；tests 下仅 2 个 JS（history 计算） |
+| M5 | 审计假阳性率 ≈10% | 38 中 D-02 / D-07 核查后本就正确 |
+
+### 路线 A 落地（三项，均含**变异测试**验证「守卫真会红」）
+| 项 | 产物 | 验证证据 |
+|---|---|---|
+| **A1 契约单一真相源** | 新增 `tests/mcp_toolface_contract.py`（工具面**唯一登记处**：`DEPLOY_KNIVES` 18 / `OPS_KNIVES` 7 / `USER_VISIBLE` 27 / `ADMIN_USER_VISIBLE` 22 + 派生量 `EXPECTED_MCP_TOOLS` 等 + `contract_self_check()` + `symdiff_msg()`）；`test_mcp_server_merge.py` 改写为**全部从契约导入 + 集合相等断言**（4 个魔数 45/47/27 及手抄 `_KNIVES` 副本全部移除）；`test_toolface_minimal.py` 的 `OPS_KNIVES` 改由契约导入并新增 `test_ops_knives_match_runtime_face_diff` | **22 passed**；**变异测试**：抹掉契约里的 `autoflow_whoami` → 立刻红，报错为 `新增未登记（请在 mcp_toolface_contract.py 补登）: ['autoflow_whoami']`（不再是「46 != 47」）；源码哈希校验已还原 |
+| **A2 幽灵引用修复** | 按 `docs/README.md` 维护约定 #2「**能自动生成的不要手写**」→ 取「**改指真实源**」而非补一份手抄文档：`test_contracts_surface.py` 去掉全部 `docs/CONTRACTS.md §X`，改为引用**代码内登记处**；新增 `CONTRACT_ANCHORS` 表（契约→登记处路径+符号）+ **元守卫 `test_contract_anchors_exist`**（校验登记处「文件存在 + 符号存在」，从根上消灭幽灵引用复发）；提取 `_DI_SEAMS` 常量使锚点可解析；同步修 `nr_layer.py:153` 与 `test_c28_*` 的引用 | **24 passed**；**变异测试**（两次）：① 锚点指向 `docs/CONTRACTS.md` → 红并列出 `[2.1 NodeRedClient] 登记处文件不存在`；② 锚点指向改名符号 → 红并列出 `[4 存储层构造] 找不到符号`。**首轮变异发现元守卫自身缺陷**（符号只写在 `CONTRACT_ANCHORS` 表里会「自证成立」）→ 补 `_strip_anchors_table()` 剔表后再搜，两条才都被抓到 |
+| **A3 身份通道矩阵** | 新增 `tests/test_webui_identity_matrix.py`（9 例 / 13 subtests）：把 `guarded` 中间的 **5 条身份通道**（公开白名单 / `af_pro_` API Key / `af_session` 会话 / 旧令牌 / 无身份）枚举成矩阵，逐格断言落点；含 8 条不变量 I-1~I-8（含 **I-1「非 `af_pro_` 的 Bearer 绝不进 API Key 通道」= D-09 根因**、**I-2「无效 API Key 不得回落旧令牌」= D-09 本意**、**I-7 回环开放/远端 403 的 S-4 两半**）。观测手法：在 `guarded` 外再包一层 spy —— `guarded` **就地**改写 `scope["af_auth"]`，外层可读到本请求解析出的通道 | **9 passed / 13 subtests**；**变异测试**：把闸门改回 `if _auth.startswith("Bearer ")`（还原 D-09 写法）→ `test_I1` + 矩阵对应格立刻红（**正是当初漏掉的回归**），源码哈希校验已还原。**注**：首版 I-7 断言写错（误以为 `token_only` 未初始化时回环也拒），实为「仅**远端** 403、回环放行」——是**测试假设错**而非产品 bug，已按代码事实订正并借此补齐「回环 vs 远端」维度 |
+
+### 结论与后续
+- **本轮不新增第二轮审计**：并发/原子性/注入这批标的已扫透，边际收益低。**建议换标的**（路线 B）：① 前端（XSS/状态同步/API 契约，当前最大单点风险，M4）；② 测试基建自身（恒真断言 / `except: pass` 吞断言 / mock 过度）；③ 跨仓契约漂移（ACP 4 工具 + arena）；④ 部署/配置面（NAS prod ↔ 本地树漂移 + env 默认值安全性）。
+- **待用户签收**后开 B；A 的三项已使后续所有审计站在更硬的地基上（契约不可漂移、守卫不可悬空、身份通道不可互相误杀）。

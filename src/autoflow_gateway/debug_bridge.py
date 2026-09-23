@@ -315,8 +315,20 @@ class DebugBridge:
                 # 否则主接收循环会继承 5s 超时，在两次心跳（约 15s）之间的静默期
                 # 误判为断开而反复重连（#649 稳定性 bug）。
                 sock.settimeout(5)
-                self._recv_frame(sock)
+                _fin, _op, _payload = self._recv_frame(sock)
+                try:
+                    _msg = json.loads(_payload.decode("utf-8", "ignore"))
+                except Exception:
+                    _msg = {}
+                # S-05 fail-closed：NR 明确拒绝鉴权（auth=fail）时停止连接，
+                # 绝不静默 ingest 未授权事件流。
+                if isinstance(_msg, dict) and _msg.get("auth") == "fail":
+                    raise RuntimeError("debug_bridge 应用层鉴权被 NR 拒绝 (auth=fail)")
+                if isinstance(_msg, dict) and _msg.get("auth") not in ("ok", None):
+                    logger.warning("debug_bridge 应用层鉴权回执异常（fail-open 兜底）：%r", _msg)
             except Exception as e:
+                if isinstance(e, RuntimeError) and "鉴权被 NR 拒绝" in str(e):
+                    raise  # S-05：鉴权失败 fail-closed，上抛使本次连接失败
                 logger.warning("debug_bridge 应用层鉴权回执读取跳过（fail-open）：%s", e)
             finally:
                 sock.settimeout(None)  # 还原阻塞模式：主循环靠 recv 返回空字节感知真实断连

@@ -73,6 +73,25 @@ class TestWebUI(TmpCfgMixin, unittest.TestCase):
             else:
                 os.environ[k] = v
 
+    def test_af_pro_bearer_invalid_is_401_fail_closed(self):
+        """D-09：**API Key 前缀（af_pro_）** 的 Bearer 验证失败 → 显式 401，不静默回落。
+
+        防「吊销/错误的 API Key 静默降级为匿名或旧令牌身份」——那等于凭据作废后仍能进。
+        """
+        r = self.client.get("/api/config",
+                            headers={"Authorization": "Bearer af_pro_deadbeef" * 1})
+        self.assertEqual(r.status_code, 401, r.text)
+        self.assertTrue(r.json().get("auth_required"))
+
+    def test_legacy_token_bearer_still_works_not_api_key(self):
+        """D-09 护栏不能误杀**旧令牌兼容通道**：非 af_pro_ 前缀的 Bearer 须落到步骤 3。
+
+        （回归：曾把「任意 Bearer」都当 API Key → both 模式的 AF_WEBUI_TOKEN 与脚本/CI 全被 401。）
+        """
+        r = self.client.get("/api/config",
+                            headers={"Authorization": "Bearer test-webui-shared-token"})
+        self.assertEqual(r.status_code, 200, r.text)
+
     def test_health_and_config(self):
         self.assertEqual(self.client.get("/api/health").status_code, 200)
         r = self.client.get("/api/config")

@@ -169,6 +169,43 @@ def _is_loopback(scope: dict) -> bool:
     return _client_host(scope) in _LOOPBACK_HOSTS
 
 
+# ── S-06 全局请求速率限制 ──────────────────────────────────────────────────
+# 轻量令牌桶（进程内，无外部依赖）。仅对「远端（非回环）」生效；本机/测试客户端
+# 豁免，避免误伤本地运维与自动化测试。登录/注册等公开端点额外加严，防凭据爆破。
+import time as _rl_time
+
+
+class _TokenBucketRateLimiter:
+    def __init__(self, global_per_min: float, login_per_min: float):
+        self.global_per_min = float(global_per_min)
+        self.login_per_min = float(login_per_min)
+        self._buckets: "dict[tuple, list]" = {}  # (host, bucket) -> [tokens, last_ts]
+
+    def _limit(self, bucket: str) -> float:
+        return self.login_per_min if bucket == "login" else self.global_per_min
+
+    def hit(self, host: str, bucket: str):
+        """消耗一个令牌；返回 (allowed, retry_after_seconds)。"""
+        now = _rl_time.time()
+        key = (host, bucket)
+        limit = self._limit(bucket)
+        rate = limit / 60.0  # tokens/秒
+        tok, ts = self._buckets.get(key, [limit, now])  # 初始满桶
+        tok = min(limit, tok + (now - ts) * rate)
+        if tok >= 1.0:
+            self._buckets[key] = [tok - 1.0, now]
+            return True, 0.0
+        need = (1.0 - tok) / rate if rate > 0 else 0.0
+        return False, max(0.0, need)
+
+
+_RATE_LIMIT_ENABLED = os.environ.get("AUTOFLLOW_RATE_LIMIT_ENABLED", "1") != "0"
+_RATE_LIMITER = _TokenBucketRateLimiter(
+    os.environ.get("AUTOFLLOW_RATE_LIMIT_GLOBAL_PER_MIN", 1000),
+    os.environ.get("AUTOFLLOW_RATE_LIMIT_LOGIN_PER_MIN", 30),
+)
+
+
 def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
     cfg = cfg or get_config()
     _bootstrap_webui_token(cfg)   # 首跑无令牌时自动生成，确保能从外部 IP 进 WebUI 填连接设置
@@ -783,12 +820,15 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         except Exception as e:
             return _js({"ok": False, "error": str(e)}, 500)
 
-    # ── 错误知识库（v1.5.7）──
+    # ── 错误知识库（v1.5.7，自进化闭环升级：统一走 Evo 库）──
     def _error_knowledge_store():
-        from .error_knowledge import ErrorKnowledgeStore
+        from .knowledge_evo import EvoErrorKnowledgeStore
         data_dir = getattr(cfg, "data_dir", None) or os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
-        return ErrorKnowledgeStore(os.path.join(data_dir, "error_knowledge"))
+        # auto_expire=False：避免每次 GET 都重写文件（懒过期改由写入/治理任务触发）。
+        # Evo 是 ErrorKnowledgeStore 的子类，list_errors/get_stats 等旧接口完全兼容。
+        return EvoErrorKnowledgeStore(os.path.join(data_dir, "error_knowledge"),
+                                     auto_expire=False)
 
     async def error_knowledge_list(request: Request):
         """列出错误案例。"""
@@ -812,6 +852,23 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             days = int(request.query_params.get("days", 7))
             store = _error_knowledge_store()
             result = store.get_stats(days=days)
+            return _js(result)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
+    async def error_knowledge_funnel(request: Request):
+        """效果度量漏斗（P2 自进化闭环）：再犯 / 恢复率 / by_error_type 聚合。
+
+        原设计与 mimo 初稿均漏掉了「把漏斗暴露给人类」这一步 —— 不暴露就无法
+        验证闭环是否真的在帮 agent 少犯、证明知识库有价值。故补此端点。
+        agent_id 可选（给定则只看该 agent）；days 默认 7。
+        """
+        try:
+            qp = request.query_params
+            days = int(qp.get("days", 7))
+            agent_id = qp.get("agent_id") or None
+            store = _error_knowledge_store()
+            result = store.get_effect_funnel(agent_id=agent_id, days=days)
             return _js(result)
         except Exception as e:
             return _js({"ok": False, "error": str(e)}, 500)
@@ -1030,18 +1087,9 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
                 )
             except Exception:
                 pass
-            # 失败时自动记录到错误知识库
-            if not result.get("ok"):
-                try:
-                    _error_knowledge_store().record(
-                        dsl=dsl,
-                        error_msg=result.get("error", "") or result.get("gate", {}).get("reason", ""),
-                        stage=result.get("stage", ""),
-                        agent_id=agent_id,
-                        proposal_id=result.get("proposal_id", ""),
-                    )
-                except Exception:
-                    pass
+            # 错误知识库记录已由 gateway.propose_dsl 中央接线统一完成
+            # （_record_and_attach_prior_art：失败即记录 + 注入 prior_art），
+            # 此处不再冗余 record，避免双写导致同一失败被记两次、漏斗计数失真。
             # 智能推荐（v1.6.3）
             try:
                 exp_logger = _experience_logger()
@@ -2446,6 +2494,52 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             return _js(res, status)
         return _js(res)
 
+    # ── Flow 清单（Core 档 #9 只读清点 + #7 手术刀编辑，人面）──
+    async def inventory_view(request: Request):
+        """只读清点 Node-RED 全部 tab→node 树（含 af_* 归属 + 风险标注）。纯 GET，无写路径。"""
+        area = (request.query_params.get("area") or "").strip()
+        try:
+            protected = set(gw.state.get_flow_catalog().get("flows", {}).keys())
+        except Exception:
+            protected = set()
+        try:
+            inv = await asyncio.to_thread(gw.nr.get_inventory, protected_flow_ids=protected)
+        except Exception as e:
+            return _js({"ok": False, "error": f"清点失败（NR 不可达）: {e}"}, 502)
+        if area:
+            inv = dict(inv)
+            inv["tabs"] = [t for t in inv.get("tabs", []) if area in (t.get("label") or "")]
+            inv["tab_count"] = len(inv["tabs"])
+        inv.setdefault("ok", True)
+        return _js(inv)
+
+    async def inventory_surgical_edit(request: Request):
+        """手术刀式修改单节点字段（Core 档 #7），人批准路径。
+
+        - dry_run=True（默认）：仅返回字段级 diff，不写、不部署（预览首选）。
+        - dry_run=False：写回并部署；因人类在 WebUI 显式点击「应用」，故 allow_prod=True
+          （人即批准方）；部署前引擎断言兄弟节点数 0 变化（fail-closed）。
+        """
+        b = await _body(request)
+        flow_id = (b.get("flow_id") or "").strip()
+        node_id = (b.get("node_id") or "").strip()
+        fields = b.get("fields")
+        if not flow_id or not node_id:
+            return _js({"ok": False, "error": "flow_id 与 node_id 必填"}, 400)
+        if not isinstance(fields, dict) or not fields:
+            return _js({"ok": False, "error": "fields 必须是非空 JSON 对象"}, 400)
+        dry_run = bool(b.get("dry_run", True))
+        allow_structural = bool(b.get("allow_structural", False))
+        try:
+            res = await asyncio.to_thread(
+                gw.nr.modify_node_field, flow_id, node_id, fields,
+                dry_run=dry_run, allow_structural=allow_structural,
+                allow_prod=(not dry_run),
+            )
+        except Exception as e:
+            return _js({"ok": False, "error": f"手术刀编辑失败: {e}"}, 400)
+        return _js({"ok": True, **res})
+
     # ── 白盒部署面板已随开源化从网关剥离（C2）；白盒部署能力保留于 MCP 工具 autoflow_deploy_raw ──
 
     # ── 工作区 plan（总体/当前/最近完成）──
@@ -3444,6 +3538,21 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             limit = 100
         return _js({"audit": audit_store.list(limit)})
 
+    async def audit_deploys(request: Request):
+        """#20：部署/验证/回滚审计索引（**持久** apply_traces，非进程内环形缓冲）。
+
+        与 /api/audit（进程内 trace 环、重启即失）不同的是：这里读的是落盘轨迹，
+        回答「任一次部署 谁/何时/验证了什么/回滚了没」，可跨重启回溯。
+        """
+        q = request.query_params
+        try:
+            limit = int(q.get("limit", "100"))
+        except (TypeError, ValueError):
+            limit = 100
+        return _js(gw.list_apply_traces(
+            limit=limit, flow_id=q.get("flow_id", ""),
+            agent_id=q.get("agent_id", ""), mode=q.get("mode", "")))
+
     # ── 首次运行免责（C11/C21）──
     async def first_run_state(request: Request):
         flag = os.path.join(cfg.data_dir, ".first_run_accepted")
@@ -3612,9 +3721,10 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/experience/similar", experience_similar, methods=["POST"]),
         Route("/api/experience/suggest-fix", experience_suggest_fix, methods=["POST"]),
         Route("/api/experience/recommend-entities", experience_recommend_entities, methods=["GET"]),
-        # 错误知识库（v1.5.7）
+        # 错误知识库（v1.5.7，含 P2 效果漏斗）
         Route("/api/errors", error_knowledge_list, methods=["GET"]),
         Route("/api/errors/stats", error_knowledge_stats, methods=["GET"]),
+        Route("/api/errors/funnel", error_knowledge_funnel, methods=["GET"]),
         # Token 统计（v1.5.3）
         Route("/api/core/token-stats", core_token_stats, methods=["GET"]),
         Route("/api/token-stats", internal_token_stats, methods=["GET"]),
@@ -3672,6 +3782,7 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/catalog/import", catalog_import, methods=["POST"]),
         Route("/api/entities", entities_view, methods=["GET"]),
         Route("/api/audit", audit_list, methods=["GET"]),
+        Route("/api/audit/deploys", audit_deploys, methods=["GET"]),
         Route("/api/first-run", first_run_state, methods=["GET"]),
         Route("/api/first-run", first_run_accept, methods=["POST"]),
         Route("/api/diagnostics", diagnostics_view, methods=["GET"]),
@@ -3736,6 +3847,9 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         Route("/api/deployed", list_deployed, methods=["GET"]),
         Route("/api/deployed/{id}/undeploy", undeploy_flow, methods=["POST"]),
         Route("/api/flows/{flow_id}/trigger", trigger_flow_endpoint, methods=["POST"]),
+        # #9 只读清单 + #7 手术刀编辑（人面；surgical edit 走人批准路径，默认 dry_run 预览）
+        Route("/api/inventory", inventory_view, methods=["GET"]),
+        Route("/api/inventory/edit", inventory_surgical_edit, methods=["POST"]),
         # （C2/C4）白盒部署面板与人工抽查端点已剥离，能力迁 archive/agent-loop-migration/
 
         # 笔记
@@ -3816,29 +3930,59 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             return await raw(scope, receive, send)
         method = (scope.get("method") or "GET").upper()
 
+        # 1.4) 全局请求速率限制（S-06）：防暴力/滥用。仅对远端（非回环）生效；
+        # 本机/测试客户端豁免，避免误伤本地运维与自动化测试。登录/注册等公开端点额外加严。
+        if _RATE_LIMIT_ENABLED and not _is_loopback(scope):
+            _rl_host = _client_host(scope) or "remote"
+            _rl_bucket = "login" if _wa.is_public_path(p) else "global"
+            _rl_ok, _rl_retry = _RATE_LIMITER.hit(_rl_host, _rl_bucket)
+            if not _rl_ok:
+                await JSONResponse(
+                    {"ok": False, "error": "rate limited", "retry_after": int(_rl_retry) + 1},
+                    status_code=429,
+                    headers={"Retry-After": str(int(_rl_retry) + 1)},
+                )(scope, receive, send)
+                return
+
         # 1) 免鉴权白名单：登录/注册/探测必须匿名可达，否则登不进来
         if _wa.is_public_path(p):
             return await raw(scope, receive, send)
 
         # 1.5) Bearer API Key 通道（Pro 版 Agent 调用竞技场等管理面 API）
         # 与 /api/core/* 的 _require_api_key 共用同一套 APIKeyStore
+        # ★ 只把 **API Key 前缀（af_pro_）** 的 Bearer 当 API Key 通道；其它 Bearer 值
+        #   （典型是旧 WebUI 令牌 AF_WEBUI_TOKEN，见步骤 3 兼容通道）必须继续往下走
+        #   会话/旧令牌通道——否则会把脚本/CI 与 both 模式的旧令牌一并误杀成 401。
         _hdr = dict(scope.get("headers", []))
         _auth = _hdr.get(b"authorization", b"").decode("latin-1", "ignore")
-        if _auth.startswith("Bearer "):
+        if _auth.startswith("Bearer ") and _auth[7:].strip().startswith("af_pro_"):
             _key = _auth[7:].strip()
             try:
                 _kstore = _api_key_store()
                 _kresult = _kstore.validate_key(_key)
-                if _kresult.get("ok"):
-                    scope["af_auth"] = {
-                        "mode": "api_key", "user_id": "",
-                        "username": _kresult.get("agent_id", "api-key"),
-                        "role": "admin", "session_id": "",
-                        "agent_id": _kresult.get("agent_id"),
-                    }
-                    return await raw(scope, receive, send)
             except Exception:
-                pass  # API Key 验证失败 → 继续走 session/旧令牌通道
+                # API Key 存储/验证异常：fail-closed，绝不静默降级为匿名（D-09）
+                await JSONResponse(
+                    {"ok": False, "error": "api_key validation error"},
+                    status_code=401,
+                )(scope, receive, send)
+                return
+            if _kresult.get("ok"):
+                scope["af_auth"] = {
+                    "mode": "api_key", "user_id": "",
+                    "username": _kresult.get("agent_id", "api-key"),
+                    "role": "admin", "session_id": "",
+                    "agent_id": _kresult.get("agent_id"),
+                }
+                return await raw(scope, receive, send)
+            # 提供了 API Key 但验证失败（吊销/错误/过期）→ 显式 401，
+            # 不静默回落 session/旧令牌通道（D-09）
+            await JSONResponse(
+                {"ok": False, "error": _kresult.get("error", "invalid api key"),
+                 "auth_required": True},
+                status_code=401,
+            )(scope, receive, send)
+            return
 
         # 2) 主通道：服务端会话（Cookie）。★ token_only 回滚模式：密码子系统关闭，不受理会话
         sess = None if auth.auth_mode == "token_only" else auth.resolve_session(_wa.session_id_from_scope(scope))

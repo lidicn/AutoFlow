@@ -10,6 +10,7 @@ import os
 import json
 import re
 import secrets
+import tempfile
 import time
 import threading
 import uuid
@@ -19,6 +20,7 @@ from collections import deque
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 import logging
+import functools
 
 from .config import get_config, is_raw_node_escape_enabled, get_deploy_policy, load_feature_flags
 from .state import SharedState
@@ -1122,6 +1124,34 @@ _ON_STATES = ("on", "true", "1", "open", "yes", "home", "playing", "unlocked")
 _OFF_STATES = ("off", "false", "0", "closed", "no", "not_home", "idle", "standby", "locked")
 # 设备掉线/未知：明确拒绝，绝不静默 turn_off
 _UNCERTAIN_STATES = ("unavailable", "unknown", "none", "null", "")
+
+
+def _with_evo_recording(func):
+    """统一 propose_dsl 的错误知识闭环接线：把「失败记录 + 注入 prior_art」与「成功闭合
+    P2 循环」从 9 个散点返回点收敛为单一后置钩子，避免新增返回点静默漏接（fail-silent）。
+
+    装饰器不改变 propose_dsl 的控制流与返回语义，仅在其返回 dict 结果后做 fail-safe 后置：
+    - ok=False → record + attach_prior_art（委托既有 _record_and_attach_prior_art）；
+    - ok=True  → 闭合该 agent 最近一条待恢复错误（try_close_loop_success，无待恢复则静默跳过）。
+
+    用 functools.wraps 保留 __wrapped__，使 inspect.signature 仍追溯原始签名
+    （MCP 工具 schema 不因装饰而丢失参数/默认值/注解）。
+    """
+    @functools.wraps(func)
+    def wrapper(self, dsl, agent_id, *args, **kwargs):
+        result = func(self, dsl, agent_id, *args, **kwargs)
+        if not isinstance(result, dict):
+            return result
+        if result.get("ok"):
+            try:
+                from .knowledge_evo import try_close_loop_success
+                try_close_loop_success(self._evo_store(), agent_id or "")
+            except Exception:
+                pass
+            return result
+        return self._record_and_attach_prior_art(result, dsl, agent_id)
+    return wrapper
+
 
 class Gateway:
     def __init__(self, config=None, ha_layer=None, nr_layer=None):
@@ -2426,6 +2456,40 @@ class Gateway:
         }
 
     # ───────────── DSL 场景提案 + staging 闸门（P3 MVP 闸门）─────────────
+    # ── 错误知识库自进化闭环接线（knowledge_evo；与 webui/竞技场共享 error_knowledge 库）──
+    def _evo_store(self):
+        """懒加载共享错误知识库（与 webui/竞技场同路径，避免双写/分流）。"""
+        cache = getattr(self, "_evo_store_cache", None)
+        if cache is None:
+            data_dir = getattr(self.cfg, "data_dir", None) or os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+            from .knowledge_evo import EvoErrorKnowledgeStore
+            cache = EvoErrorKnowledgeStore(os.path.join(data_dir, "error_knowledge"))
+            self._evo_store_cache = cache
+        return cache
+
+    def _record_and_attach_prior_art(self, result, dsl, agent_id):
+        """失败路径接线：先记录本次失败（fail-safe），再注入 prior_art（fail-safe）。
+
+        任何异常都不影响 propose_dsl 主路径（C3）。记录集中在此处（gateway 同时承接
+        human/webui 与 agent/MCP 两条入口），故 webui 的冗余 record 已移除，避免双写。
+        """
+        try:
+            self._evo_store().record(
+                dsl=dsl or "", error_msg=result.get("error", "") or "",
+                stage=result.get("stage", ""), agent_id=agent_id or "",
+                proposal_id=result.get("proposal_id", "") or "")
+        except Exception:
+            pass
+        try:
+            from .knowledge_evo import attach_prior_art
+            result = attach_prior_art(result, self._evo_store(),
+                                     agent_id=agent_id, dsl=dsl or "")
+        except Exception:
+            pass
+        return result
+
+    @_with_evo_recording
     def propose_dsl(self, dsl: str, agent_id: str,
                     expected_postconditions: Optional[List[Dict]] = None,
                     resolved_entities: Optional[List[str]] = None,
@@ -4280,6 +4344,27 @@ class Gateway:
 
         _slog(_tid, "deploy_proposal.done", elapsed=round(time.perf_counter() - _t0, 3),
               flow_id=fid, created=created, node_count=len(flow.get("nodes", [])))
+        # ROADMAP #20：人路径（提案部署）也落**持久**审计——此前只有进程内 _slog（环形 200
+        # 条、重启即失），而这是 WebUI 人批准部署的主路径，「任一次部署可回溯」缺了它就不成立。
+        # 复用既有 apply 轨迹存储（同一 trace_id，与 _slog 可串联），best-effort 不阻塞部署。
+        try:
+            _write_apply_trace({
+                "trace_id": _tid, "flow_id": fid, "mode": "DEPLOY_PROPOSAL",
+                "agent_id": agent_id, "ok": True, "applied": True, "pending": False,
+                "stage": "deployed", "snapshot_path": snap_before,
+                "label": flow.get("label", ""),
+                "reason": (getattr(p, "title", "") or "提案部署") if p is not None else "提案部署",
+                "verified": {
+                    "gate_passed": bool(expected and validate),
+                    "require_e2e": bool(require_e2e),
+                    "deploy_policy": policy,
+                },
+                "gate": self._build_unified_gate(None, _e2e, None),
+                "requires_review": requires_review,
+                "created": created,
+            })
+        except Exception:
+            pass
         # D5-a（C5）：回显 authored→minted 映射，与 deploy_raw 一致
         _resp = {
             "ok": True,
@@ -4342,6 +4427,19 @@ class Gateway:
                 self.nr.restore_instance_snapshot(snap, allow_prod=allow_prod)
             except Exception as _rb:
                 _slog(_tid, "deploy_proposals.rollback_err", error=str(_rb)[:200])
+            # ROADMAP #20：整批回滚也落持久审计（回答「回滚了没」）——dry_run/无快照时
+            # 上面已 early-return，不会伪造一次没发生的回滚。best-effort 不阻塞。
+            try:
+                _write_apply_trace({
+                    "trace_id": _tid, "mode": "ROLLBACK", "agent_id": agent_id,
+                    "ok": True, "applied": False, "pending": False,
+                    "stage": "rolled_back_batch", "snapshot_path": snap,
+                    "reason": f"批量部署部分失败（{len(failed)} 条未过闸），整批回滚到部署前快照",
+                    "verified": {"deployed_count": len(deployed),
+                                 "failed_count": len(failed)},
+                })
+            except Exception:
+                pass
 
         try:
             for pid in ids:
@@ -4383,6 +4481,19 @@ class Gateway:
 
         _slog(_tid, "deploy_proposals.done", deployed=len(deployed),
               elapsed=round(time.perf_counter() - _t0, 3))
+        # ROADMAP #20：批量成功也落持久审计摘要（谁/何时/部署了哪几条、批快照点）
+        try:
+            _write_apply_trace({
+                "trace_id": _tid, "mode": "DEPLOY_BATCH", "agent_id": agent_id,
+                "ok": True, "applied": True, "pending": False,
+                "stage": "deployed_batch", "snapshot_path": snap,
+                "reason": f"批量部署 {len(deployed)} 条提案（一次整实例快照留底）",
+                "label": "、".join(str(d.get("label") or d.get("pid")) for d in deployed)[:200],
+                "verified": {"deployed_count": len(deployed), "failed_count": 0,
+                             "dry_run": bool(dry_run)},
+            })
+        except Exception:
+            pass
         return {
             "ok": True, "rolled_back": False, "snapshot": snap,
             "deployed": deployed, "failed": failed,
@@ -8928,6 +9039,23 @@ class Gateway:
                              f"确认 trace_id 来自 autoflow_apply / autoflow_apply_rollback 返回值）。"}
         return {"ok": True, "trace_id": trace_id, "trace": tr}
 
+    def list_apply_traces(self, limit: int = 100, flow_id: str = "",
+                          agent_id: str = "", mode: str = "") -> Dict[str, Any]:
+        """【审计·索引】列出最近的部署/验证/回滚审计轨迹（data/apply_traces/）。
+
+        与 get_apply_trace（按 id 读明细）互补：本方法是**枚举**，无需预先知道 trace_id，
+        回答「都发生过哪些部署/回滚、谁做的、验证了什么、有没有回滚」——即 ROADMAP #20
+        验收门「任一次部署可回溯『谁/何时/验证了什么/回滚了没』」的入口。
+
+        - 覆盖写入路径：apply 闭环（mode A/B/C）、modify_flow 直写（DIRECT）、
+          提案部署（DEPLOY_PROPOSAL）、批量部署（DEPLOY_BATCH）与其整批回滚（ROLLBACK）。
+        - 过滤：flow_id / agent_id 精确匹配；mode 大小写不敏感（A/B/C/DIRECT/
+          DEPLOY_PROPOSAL/DEPLOY_BATCH/ROLLBACK）。
+        - 只读、best-effort：坏文件跳过，绝不抛。返回 {ok, count, total, items:[...]}。
+        """
+        return _list_apply_traces(limit=limit, flow_id=flow_id,
+                                  agent_id=agent_id, mode=mode)
+
     def _scene_entity_refs(self, scene) -> List[str]:
         """统一收集 DSL 场景内**所有**含实体的原语引用（含嵌套块），去重前的原始列表。
 
@@ -9117,16 +9245,33 @@ class Gateway:
                 real_fid = res.get("id") or fid
                 created = res.get("created", False)
                 # 登记 flow_catalog（owner）
-                self.state.upsert_flow(real_fid, {
-                    "flow_id": real_fid,
-                    "label": flow.get("label", real_fid),
-                    "owner_agent": op.agent_id,
-                    "purpose": flow.get("info", ""),
-                    "entities_touched": self._collect_entities(flow),
-                    "node_count": len(flow.get("nodes", [])),
-                    "source": "manual",
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                })
+                try:
+                    self.state.upsert_flow(real_fid, {
+                        "flow_id": real_fid,
+                        "label": flow.get("label", real_fid),
+                        "owner_agent": op.agent_id,
+                        "purpose": flow.get("info", ""),
+                        "entities_touched": self._collect_entities(flow),
+                        "node_count": len(flow.get("nodes", [])),
+                        "source": "manual",
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                except Exception as _cat_err:
+                    # D-04：catalog 登记失败 → 新建场景回滚 NR 端刚创建的 flow，
+                    # 避免「NR 有 flow 但 confirm 永久 pending」的悬空；
+                    # 更新场景无法干净回滚（无旧版本），记警告后继续批准（NR 已变更）。
+                    _gw_logger.warning(
+                        "approve catalog upsert 失败（fid=%s, created=%s）: %s",
+                        real_fid, created, _cat_err)
+                    if created:
+                        try:
+                            self.nr.delete_flow(real_fid, force=True)
+                        except Exception as _rb:
+                            _gw_logger.error(
+                                "approve NR 回滚失败，可能残留悬空 flow %s: %s",
+                                real_fid, _rb)
+                        return {"ok": False,
+                                "error": f"catalog 登记失败且已回滚 NR flow: {_cat_err}"}
                 self.confirm.approve(op_id, reviewer)
                 return {"ok": True, "executed": "create_flow" if created else "update_flow",
                         "flow_id": real_fid, "nr_result": res.get("raw", res)}
@@ -9833,13 +9978,19 @@ def _apply_trace_dir() -> str:
         pass
     return os.path.join(_project_data_dir(), "apply_traces")
 
+# D-13：同一 trace_id 的多次写入需串行，避免并发 read-modify-write 丢事件
+_apply_trace_lock = threading.Lock()
+
+
 def _write_apply_trace(audit: Dict) -> Optional[str]:
     """把一次 apply 的审计信封追加进 data/apply_traces/<trace_id>.json。
 
     同一 trace_id 会被多次写入（先 pending 后 applied、以及 ROLLBACK），
     故文件内 events 为追加列表；顶层 flow_id / snapshot_path 取**首个非空**值，
     保证「人批准后用同一 trace_id 重调」时回滚点不被后写的空值冲掉。
-    失败返回 None，绝不阻塞 apply 主流程。"""
+    失败返回 None，绝不阻塞 apply 主流程。
+
+    D-13：加锁串行 + tempfile+os.replace 原子写，杜绝并发丢事件 / 崩溃截断。"""
     try:
         tid = audit.get("trace_id")
         if not tid:
@@ -9847,22 +9998,35 @@ def _write_apply_trace(audit: Dict) -> Optional[str]:
         d = _apply_trace_dir()
         os.makedirs(d, exist_ok=True)
         path = os.path.join(d, f"{_sanitize_name(str(tid), 40)}.json")
-        rec = {"trace_id": tid, "events": []}
-        if os.path.exists(path):
+        with _apply_trace_lock:
+            rec = {"trace_id": tid, "events": []}
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        rec = json.load(f) or rec
+                except Exception:
+                    rec = {"trace_id": tid, "events": []}
+            ev = dict(audit)
+            ev["ts"] = datetime.now(timezone.utc).isoformat()
+            rec.setdefault("events", []).append(ev)
+            for k in ("flow_id", "snapshot_path", "mode", "agent_id", "reason", "label"):
+                if not rec.get(k) and audit.get(k):
+                    rec[k] = audit[k]
+            rec["updated_at"] = ev["ts"]
+            # 原子写：临时文件 + fsync + os.replace（D-13）
+            fd, tmp = tempfile.mkstemp(dir=d, prefix=".trace-")
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    rec = json.load(f) or rec
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(rec, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, path)
             except Exception:
-                rec = {"trace_id": tid, "events": []}
-        ev = dict(audit)
-        ev["ts"] = datetime.now(timezone.utc).isoformat()
-        rec.setdefault("events", []).append(ev)
-        for k in ("flow_id", "snapshot_path", "mode", "agent_id", "reason", "label"):
-            if not rec.get(k) and audit.get(k):
-                rec[k] = audit[k]
-        rec["updated_at"] = ev["ts"]
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(rec, f, ensure_ascii=False, indent=2)
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
         return path
     except Exception:
         return None
@@ -9877,4 +10041,84 @@ def _read_apply_trace(trace_id: str) -> Optional[Dict]:
             return json.load(f)
     except Exception:
         return None
+
+
+# ── 审计索引（ROADMAP #20）─────────────────────────────────────────────────
+# 与 _read_apply_trace（按 id 读明细）互补：本函数是**枚举**，回答「都发生过哪些
+# 部署/验证/回滚」，无需预先知道 trace_id。这是 #20 验收门
+# 「任一次部署可回溯 谁/何时/验证了什么/回滚了没」的**入口**——
+# 只有按 id 读明细、没有索引时，不知道 id 就等于查不到，可回溯性名存实亡。
+_ROLLBACK_STAGES = ("restored", "rolled_back", "rolled_back_batch")
+
+
+def _summarize_apply_trace(rec: Dict) -> Dict:
+    """把一条轨迹记录压成索引行（含 谁/何时/验证了什么/回滚了没 四要素）。"""
+    events = rec.get("events") or []
+    last = events[-1] if events else {}
+    # 回滚了没：任一事件的 mode=ROLLBACK 或 stage 命中回滚阶段即视为已回滚
+    rolled_back = any(
+        str(e.get("mode") or "").upper() == "ROLLBACK"
+        or str(e.get("stage") or "") in _ROLLBACK_STAGES
+        for e in events
+    )
+    # 验证了什么：取**首个非空** verified/gate（后写事件常不带，取先写的更全）
+    verified = next((e.get("verified") for e in events if e.get("verified")), None)
+    gate = next((e.get("gate") for e in events if e.get("gate")), None)
+    return {
+        "trace_id": rec.get("trace_id") or last.get("trace_id"),
+        "flow_id": rec.get("flow_id"),
+        "label": rec.get("label") or last.get("label"),
+        "mode": rec.get("mode") or last.get("mode"),
+        "agent_id": rec.get("agent_id") or last.get("agent_id"),
+        "reason": rec.get("reason") or last.get("reason"),
+        "ok": last.get("ok"),
+        "applied": last.get("applied"),
+        "pending": last.get("pending"),
+        "stage": last.get("stage"),
+        "snapshot_path": rec.get("snapshot_path"),
+        "verified": verified,
+        "gate": gate,
+        "rolled_back": rolled_back,
+        "event_count": len(events),
+        "created_at": (events[0].get("ts") if events else None),
+        "updated_at": rec.get("updated_at") or last.get("ts"),
+    }
+
+
+def _list_apply_traces(limit: int = 100, flow_id: str = "", agent_id: str = "",
+                       mode: str = "") -> Dict[str, Any]:
+    """枚举审计轨迹索引（data/apply_traces/*.json），按更新时间倒序。
+
+    只读、best-effort：坏文件/无目录一律跳过，**绝不抛**（审计是旁路，不能拖垮主流程）。
+    limit 上限 500（防一次拉爆内存）。返回 {ok, count, total, items:[索引行...]}。
+    """
+    try:
+        limit = max(1, min(int(limit or 100), 500))
+    except (TypeError, ValueError):
+        limit = 100
+    d = _apply_trace_dir()
+    items: List[Dict] = []
+    try:
+        names = [n for n in os.listdir(d) if n.endswith(".json")]
+    except OSError:
+        return {"ok": True, "count": 0, "total": 0, "items": []}
+    for n in names:
+        try:
+            with open(os.path.join(d, n), "r", encoding="utf-8") as f:
+                rec = json.load(f)
+            if not isinstance(rec, dict):
+                continue
+            row = _summarize_apply_trace(rec)
+        except Exception:
+            continue  # 坏文件跳过，不让一条坏记录毁掉整张索引
+        if flow_id and row.get("flow_id") != flow_id:
+            continue
+        if agent_id and row.get("agent_id") != agent_id:
+            continue
+        if mode and str(row.get("mode") or "").upper() != str(mode).upper():
+            continue
+        items.append(row)
+    items.sort(key=lambda r: str(r.get("updated_at") or ""), reverse=True)
+    total = len(items)
+    return {"ok": True, "count": min(total, limit), "total": total, "items": items[:limit]}
 

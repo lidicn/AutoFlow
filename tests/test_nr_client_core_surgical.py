@@ -109,6 +109,21 @@ def test_apply_updates_field_and_keeps_count():
     assert seen["flow"] is flow                # 部署的是同一 flow 对象
 
 
+def test_apply_passes_allow_prod_through():
+    # ★ 回归：modify_node_field 曾用 allow_prod 却未在签名声明（NameError），
+    #   且必须把 prod opt-in 透传给 update_flow（_guard_prod 护栏依赖它）。
+    flow = {"nodes": [{"id": "n1", "type": "inject", "name": "旧"}]}
+    client.get_flow = lambda fid: flow
+    seen = {}
+    def fake_update(fid, f, **kw):
+        seen["kw"] = kw
+        return {"ok": True}
+    client.update_flow = fake_update
+    res = client.modify_node_field("f", "n1", {"name": "新"}, allow_prod=True)
+    assert res["success"] is True
+    assert seen["kw"].get("allow_prod") is True, seen
+
+
 def test_apply_brother_count_guard_fires():
     flow = {"nodes": [{"id": "n1", "type": "inject"}, {"id": "n2", "type": "inject"}]}
     client.get_flow = lambda fid: flow
@@ -143,6 +158,7 @@ if __name__ == "__main__":
     test_allow_structural_override()
     test_dry_run_returns_diff_no_write()
     test_apply_updates_field_and_keeps_count()
+    test_apply_passes_allow_prod_through()
     test_apply_brother_count_guard_fires()
     test_node_not_found()
     print("✅ test_nr_client_core_surgical 全部通过")

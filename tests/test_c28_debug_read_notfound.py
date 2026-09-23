@@ -6,9 +6,10 @@
   - C 不存在的 flow    -> ok:False, error.code:"NOT_FOUND", 带 flow_id
   - D NR 不可达        -> 优雅降级 ok:True, status:"empty"（不 500 / 不误报 NOT_FOUND）
 
-fake NR backend 经 NRLayer(config, backend=FakeNR) 注入（CONTRACTS.md §1 DI 缝），
-与真实 NodeRedClient.get_flow 行为一致：不存在抛 RuntimeError('...404...')。
-用 tmp_path 隔离 data_dir；debug_bridge_enabled=False 密封不连真 NR ws。
+fake NR backend 经 NRLayer(config, backend=FakeNR) 注入（依赖注入缝，登记处
+tests/test_contracts_surface.py::_DI_SEAMS），与真实 NodeRedClient.get_flow 行为一致：
+不存在抛 RuntimeError('...404...')。用 tmp_path 隔离 data_dir；debug_bridge_enabled=False
+密封不连真 NR ws。
 """
 from autoflow_gateway.gateway import Gateway
 from autoflow_gateway.nr_layer import NRLayer

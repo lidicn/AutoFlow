@@ -44,8 +44,10 @@ class FakeNR:
     def create_or_update_flow(self, fid, flow, force=False, allow_prod=False):
         return self._rec("create_or_update_flow", fid, force=force)
     def add_nodes(self, fid, new_nodes): return self._rec("add_nodes", fid)
-    def modify_node_field(self, fid, nid, fields, dry_run=False, allow_structural=False):
-        return self._rec("modify_node_field", fid, nid, dry_run=dry_run, allow_structural=allow_structural)
+    def modify_node_field(self, fid, nid, fields, dry_run=False, allow_structural=False,
+                          allow_prod=False):
+        return self._rec("modify_node_field", fid, nid, dry_run=dry_run,
+                         allow_structural=allow_structural, allow_prod=allow_prod)
     def modify_function_code(self, fid, nid, code, name=None):
         return self._rec("modify_function_code", fid, nid, node_name=name)
     def delete_flow(self, fid, force=False, allow_prod=False): return self._rec("delete_flow", fid, force=force)

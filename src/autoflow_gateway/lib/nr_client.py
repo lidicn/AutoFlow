@@ -19,12 +19,15 @@ Node-RED Admin API 客户端
   nr.fix_api_current_state_nodes("id")  # 批量修复 api-current-state（NR 5.0 兼容）
 """
 
-import os, sys, json, uuid, re, shutil, time
+import os, sys, json, uuid, re, shutil, time, ast
 import urllib.request
 import urllib.error
 from urllib.parse import quote
 from typing import Optional, Dict, List, Any, Callable
 from datetime import datetime
+import logging
+
+_log = logging.getLogger("autoflow.nr_client")
 
 # ── 配置 ─────────────────────────────────────────────
 
@@ -159,11 +162,12 @@ def ensure_latest(verbose: bool = True) -> Optional[bool]:
     try:
         shutil.copyfile(src, __file__)
         if verbose:
-            print(f"[nr_client] 自动拉取权威版 v{src_ver}（覆盖本文件 v{NR_CLIENT_VERSION}）from {src}")
+            _log.info("[nr_client] 自动拉取权威版 v%s（覆盖本文件 v%s）from %s",
+                      src_ver, NR_CLIENT_VERSION, src)
         return True
     except Exception as e:
         if verbose:
-            print(f"[nr_client] 自动拉取失败: {e}")
+            _log.warning("[nr_client] 自动拉取失败: %s", e)
         return None
 
 
@@ -220,13 +224,23 @@ class NodeRedClient:
         self.username  = username or NR_USER
         self.password  = password or NR_PASS
         self._token: Optional[str] = None
+        self._token_issued_at: float = 0.0           # D-16：token 签发时间（time.time）
+        self._token_ttl: float = float(os.environ.get("AUTOFLLOW_NR_TOKEN_TTL", 24 * 3600))
         self._session_headers: Dict[str, str] = {}  # 复用 Authorization 等头
         self._flow_cache: Dict[str, Dict] = {}  # flow_id -> {nodes_count, timestamp}
 
     # ── 认证 ──────────────────────────────────────────
 
+    def _token_valid(self) -> bool:
+        """D-16：token 未过期（签发后未超过 TTL）才视为可用。"""
+        return self._token is not None and (time.time() - self._token_issued_at) < self._token_ttl
+
     def login(self) -> str:
-        """POST /auth/token → JWT Bearer token（纯标准库 urllib，无外部依赖）"""
+        """POST /auth/token → JWT Bearer token（纯标准库 urllib，无外部依赖）。
+        D-16：未过期的 token 直接复用，避免 debug_bridge / 并发请求反复登录；
+        过期后自动刷新，统一 nr_client 与 debug_bridge 的 token 缓存。"""
+        if self._token_valid():
+            return self._token
         req = urllib.request.Request(
             f"{self.base_url}/auth/token",
             data=json.dumps({
@@ -246,6 +260,7 @@ class NodeRedClient:
             raise RuntimeError(f"Login failed ({e.code}): {e.read().decode('utf-8','replace')[:200]}")
         data = json.loads(body)
         self._token = data["access_token"]
+        self._token_issued_at = time.time()
         self._session_headers = {
             "Authorization": f"Bearer {self._token}",
             "Content-Type": "application/json",
@@ -253,7 +268,7 @@ class NodeRedClient:
         return self._token
 
     def _ensure_auth(self):
-        if not self._token:
+        if not self._token_valid():
             self.login()
 
     # ── 底层请求 ──────────────────────────────────────
@@ -1711,7 +1726,8 @@ class NodeRedClient:
     def modify_node_field(self, flow_id: str, node_id: str,
                            field_updates: Dict, *,
                            dry_run: bool = False,
-                           allow_structural: bool = False) -> Dict:
+                           allow_structural: bool = False,
+                           allow_prod: bool = False) -> Dict:
         """手术刀式修改单节点字段并部署（Core 档 #7）。
 
         守卫：
@@ -1719,6 +1735,8 @@ class NodeRedClient:
             改连线请用 add_wire/remove_wire。allow_structural=True 可绕过（危险，仅内部用）。
           - dry_run=True 仅返回字段级 diff，不写、不部署（供 Core 极客预览）。
           - 部署前断言兄弟节点数 0 变化（defense-in-depth，fail-closed）。
+          - allow_prod：写 prod 实例的显式 opt-in（默认 False，fail-closed），
+            经 update_flow 的 _guard_prod 校验；WebUI 人面在「人点击应用」时传 True。
         """
         if not allow_structural:
             bad = set(field_updates) & _SURGICAL_FORBIDDEN_KEYS
@@ -1746,7 +1764,7 @@ class NodeRedClient:
             raise RuntimeError(f"Node {node_id} not found in flow {flow_id}")
 
         # 防御：手术刀编辑不得增删节点，兄弟节点数必须 0 变化
-        result = self.update_flow(flow_id, flow)
+        result = self.update_flow(flow_id, flow, allow_prod=allow_prod)
         new_count = len(flow.get("nodes", []))
         if new_count != old_count:
             raise RuntimeError(
@@ -2264,6 +2282,62 @@ ensure_latest(verbose=True)
 
 # ─── CLI ──────────────────────────────────────────────────
 
+# ── S-01：fix-nodes 安全表达式求值（替代 exec/compile，杜绝代码注入）──
+def _safe_fix_value(node: "ast.AST"):
+    """仅允许字面量 / 容器 / 基础算术构成的「安全值」，拒绝任何调用、导入、属性、下标、名字。"""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Dict):
+        return {_safe_fix_value(k): _safe_fix_value(v) for k, v in zip(node.keys, node.values)}
+    if isinstance(node, ast.List):
+        return [_safe_fix_value(e) for e in node.elts]
+    if isinstance(node, ast.Tuple):
+        return tuple(_safe_fix_value(e) for e in node.elts)
+    if isinstance(node, ast.Set):
+        return {_safe_fix_value(e) for e in node.elts}
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        v = _safe_fix_value(node.operand)
+        return -v if isinstance(node.op, ast.USub) else +v
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult,
+                                                             ast.Div, ast.Mod, ast.FloorDiv, ast.Pow)):
+        l, r = _safe_fix_value(node.left), _safe_fix_value(node.right)
+        if isinstance(node.op, ast.Add):      return l + r
+        if isinstance(node.op, ast.Sub):      return l - r
+        if isinstance(node.op, ast.Mult):     return l * r
+        if isinstance(node.op, ast.Div):      return l / r
+        if isinstance(node.op, ast.Mod):      return l % r
+        if isinstance(node.op, ast.FloorDiv): return l // r
+        if isinstance(node.op, ast.Pow):      return l ** r
+    raise ValueError(f"fix_expr 含不允许的节点: {type(node).__name__}")
+
+
+def _safe_apply_fix_expr(fix_expr: str, n: dict) -> None:
+    """安全执行节点修复表达式（替代 exec/compile，S-01）。
+
+    仅允许形如 `n["key"] = <安全值>` 或 `n.attr = <安全值>` 的赋值语句序列，
+    目标必须是名为 n 的节点 dict；值只能是字面量 / 容器 / 基础算术
+    （无调用、无导入、无属性/下标读取）。任何越界语法直接抛 ValueError，绝不执行任意代码。
+    """
+    tree = ast.parse(fix_expr, mode="exec")
+    for stmt in tree.body:
+        if not isinstance(stmt, ast.Assign):
+            raise ValueError("fix_expr 只允许赋值语句（n[...]=... 或 n.x=...）")
+        if len(stmt.targets) != 1:
+            raise ValueError("fix_expr 不支持多目标赋值")
+        tgt = stmt.targets[0]
+        if isinstance(tgt, ast.Subscript):
+            if not (isinstance(tgt.value, ast.Name) and tgt.value.id == "n"):
+                raise ValueError("下标赋值目标必须是 n[...]")
+            key = _safe_fix_value(tgt.slice)
+            n[key] = _safe_fix_value(stmt.value)
+        elif isinstance(tgt, ast.Attribute):
+            if not (isinstance(tgt.value, ast.Name) and tgt.value.id == "n"):
+                raise ValueError("属性赋值目标必须是 n")
+            n[tgt.attr] = _safe_fix_value(stmt.value)
+        else:
+            raise ValueError("fix_expr 不支持的赋值目标（仅 n[...] 或 n.x）")
+
+
 def _cli():
     import argparse
     p = argparse.ArgumentParser(description="Node-RED Admin CLI (安全增强版)")
@@ -2331,7 +2405,9 @@ def _cli():
     try:
         if args.cmd == "login":
             t = nr.login()
-            print(f"✅ 登录成功, token: {t[:20]}...")
+            # S-07 安全：登录成功不得把 token 回显到 stdout（避免凭据泄露到终端/日志捕获）
+            print("✅ 登录成功")
+            _log.debug("nr login ok (token len=%d)", len(t) if t else 0)
 
         elif args.cmd == "flows":
             flows = nr.list_flows()
@@ -2441,10 +2517,15 @@ def _cli():
             print(f"✅ 修复了 {n} 个 api-current-state 节点")
 
         elif args.cmd == "fix-nodes":
-            fix_code = compile(args.fix_expr, '<string>', 'exec')
+            # S-01：先以占位 dict 试跑一次，触发任何不安全语法的 ValueError（不触及真实节点）。
+            # 表达式只允许 n[...]=<字面量> / n.x=<字面量>，彻底移除 exec() 代码注入面。
+            try:
+                _safe_apply_fix_expr(args.fix_expr, {})
+            except ValueError as e:
+                print(f"❌ 修复表达式不安全，已拒绝: {e}")
+                return
             def fix_fn(n):
-                local_vars = {'n': n}
-                exec(fix_code, {}, local_vars)
+                _safe_apply_fix_expr(args.fix_expr, n)
                 return True
             count = nr.fix_nodes_by_type(args.flow_id, args.node_type, fix_fn)
             print(f"✅ 修复了 {count} 个 {args.node_type} 节点")

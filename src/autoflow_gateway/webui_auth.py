@@ -106,6 +106,7 @@ PERM_RULES: Tuple[Tuple[Optional[Tuple[str, ...]], str, str], ...] = (
     (("GET",), "/api/acp", "viewer"),
     (("GET",), "/api/llm/config", "viewer"),
     (("GET",), "/api/audit", "viewer"),
+    (("GET",), "/api/audit/deploys", "viewer"),   # #20 部署/回滚审计索引（只读）
     (("GET",), "/api/diagnostics", "viewer"),
     (("GET",), "/api/catalog", "viewer"),
     (("GET",), "/api/entities", "viewer"),

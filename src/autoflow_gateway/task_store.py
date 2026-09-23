@@ -28,7 +28,7 @@ import os
 import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
 from .config import get_config
@@ -113,6 +113,10 @@ class TaskStore:
         os.makedirs(self.cfg.data_dir, exist_ok=True)
         self.db_path = os.path.join(self.cfg.data_dir, "autoflow.db")
         self._init_db()
+        # D-05 安全网：claim 超时自动释放窗口（默认 30 分钟）；
+        # 死 agent 的 claimed 行超过此窗口未 submit 即被释放，任务可被重新领用。
+        # 可通过配置 claim_ttl_seconds 覆盖。
+        self.claim_ttl = int(getattr(self.cfg, "claim_ttl_seconds", 30 * 60))
 
     # ───────────── DB ─────────────
     def _conn(self):
@@ -214,6 +218,23 @@ class TaskStore:
             finally:
                 conn.close()
 
+    # ───────────── claim 超时释放（D-05） ─────────────
+    def _release_stale_claims(self, conn) -> int:
+        """释放超时未提交的 claim，让任务可被重新领用（D-05 安全网）。
+
+        仅清理 status='claimed' 且 claimed_at 早于 TTL 的行（已 submitted 的保留）。
+        需在 self._lock 内调用（claim/claim_specific 已持有锁）。返回释放行数。
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=self.claim_ttl)).isoformat()
+        cur = conn.execute(
+            "DELETE FROM task_claims WHERE status='claimed' AND claimed_at < ?",
+            (cutoff,),
+        )
+        n = cur.rowcount
+        if n:
+            conn.commit()
+        return n
+
     # ───────────── 实体 hint 富化 ─────────────
     def _enrich_entities(self, entity_ids: List[str], catalog: dict) -> List[dict]:
         """把 entity_id 列表富化成 hint（含 friendly_name/domain/area/possible_states）。
@@ -301,6 +322,7 @@ class TaskStore:
           · 全部任务本 agent 都做过了 → 返回 None（让 agent 知道可以收工或换身份）。"""
         with self._lock:
             conn = self._conn()
+            self._release_stale_claims(conn)
             try:
                 if prefer_mine:
                     sql = ("SELECT task_id FROM task_claims "
@@ -347,6 +369,7 @@ class TaskStore:
         - 任务不存在或 tier 不允许 → 返回 None。"""
         with self._lock:
             conn = self._conn()
+            self._release_stale_claims(conn)
             try:
                 t = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
                 if t is None:
