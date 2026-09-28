@@ -850,9 +850,17 @@ class TestEntityResolutionTelemetryAndDisambiguation(unittest.TestCase):
     def test_verify_flow_reliability_annotation_nonblocking(self):
         base = {"entity_id": "light.lamp", "domain": "light", "friendly_name": "灯", "area": "书房",
                 "device_id": "", "integration": "hue", "platform": "hue", "connectivity_tier": "local"}
+        # 节点须为「可部署形态」：3.3 静态快检会对缺 server(S3)/entityId(R20)/无连线(R13)/
+        # 缺 service(R22)/缺 domain(R32) 的流 fast_fail，导致 verify_flow 在标注可靠性前提前
+        # 返回、entity_reliability 为空（reliability 标注在 fast_fail 之后才执行）。S3 是
+        # deploy_raw 默认硬拦项（gateway.py:5519），故 3.3 fast_fail 属对齐 deploy 的有意行为；
+        # 此处用合法 api-call-service 形态，让流抵达「可靠性标注」契约（非阻塞）。
         flow = {"id": "f1", "label": "t", "nodes": [
-            {"id": "n1", "type": "api-call-service",
-             "params": {"entity_id": "light.lamp", "domain": "light", "service": "turn_on"}}]}
+            {"id": "t1", "type": "inject", "payload": "", "payloadType": "str",
+             "repeat": "", "crontab": "", "once": True, "wires": [["n1"]]},
+            {"id": "n1", "type": "api-call-service", "domain": "light",
+             "service": "turn_on", "entityId": "light.lamp", "wires": [[]],
+             "server": "REPLACE_WITH_HA_SERVER", "data": {}}]}
         # 在线：不标不可靠
         self._set_catalog({"light.lamp": dict(base, state="on")})
         r_on = self.gw.verify_flow(flow, run_gate=False)

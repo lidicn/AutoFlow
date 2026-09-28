@@ -61,7 +61,10 @@ class TestVerifyFlowEndpoint(unittest.TestCase):
         ]}
 
     def test_endpoint_returns_evidence_structure(self):
-        r = self.client.post("/api/verify-flow", json={"flow_json": self._clean_flow()})
+        # run_gate=False：本测试只验证「证据结构」四件套，不需要真跑 staging 闸（避免测试环境
+        # 无 NR/HA 时的 60s 超时/偶发，降低全量套件下的不稳定）。
+        r = self.client.post("/api/verify-flow",
+                             json={"flow_json": self._clean_flow(), "run_gate": False})
         self.assertEqual(r.status_code, 200)
         d = r.json()
         self.assertTrue(d.get("ok"))

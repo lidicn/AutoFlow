@@ -417,6 +417,11 @@ def test_a18_whitebox_verify_actually_runs_gate_for_climate(monkeypatch):
         _call("c", "climate", "set_hvac_mode", "climate.gate_integrity_probe",
               data={"hvac_mode": "cool"}),
     ]}
+    # 3.3 will-pass 静态快检：缺 server(S3) 会被 deploy_raw 硬拦 → verify_flow 提前 fast_fail，
+    # 闸被跳过、A18 契约（climate 闸须 ran=True）无从断言。补 server 使流成为可部署形态，
+    # 方能抵达 A18 拟验证的契约（闸真跑）。S3 是 deploy_raw 默认硬拦项（gateway.py:5519），
+    # 故 3.3 fast_fail 属对齐 deploy 的有意行为，此处改为合法流而非改产品。
+    flow["nodes"][1]["server"] = "REPLACE_WITH_HA_SERVER"
     res = gw.verify_flow(flow, run_gate=True)
     layer = res["gate"]["layers"]["vhass_staging"]
     assert layer["ran"] is True, f"vhass 闸又被 skip 了（A18 原缺陷）：{res['gate']}"
