@@ -190,7 +190,13 @@ class DSLError(Exception):
                  code: str = C_PARSE, hint: Optional[str] = None):
         self.line = line
         self.code = code
+        # 机器可读的原始消息（不含"第 N 行:"前缀）。历史实现只把它传给了
+        # Exception.__init__ 而没挂为属性，导致机读/去重时拿不到原始 message。
+        self.message = message
         self.hint = hint if hint is not None else _extract_hint(message)
+        # 【v2.3.0 任务 3.1 / DCD 议题七 C】其余错误（一次性全错反馈）。
+        # 仅由 parse() 包装层填充；默认空列表，绝不影响既有 raise 与断言行为。
+        self.extra_errors: list = []
         super().__init__(f"第 {line} 行: {message}" if line else message)
 
 
@@ -460,7 +466,7 @@ def _parse_action_or_subflow(s: str, line: int) -> Step:
     return _parse_action(s, line)
 
 
-def parse(text: str) -> Scene:
+def _parse_core(text: str) -> Scene:
     lines = text.splitlines()
     scene = Scene(name="未命名场景")
     expecting_expected: bool = False
@@ -685,6 +691,63 @@ def parse(text: str) -> Scene:
         raise DSLError("缺少 触发 指令（建议：每个场景至少需要一行『触发: <实体> <状态>』"
                        "或『触发: 每天 HH:MM』或『触发: inject』）", code=C_MISSING_TRIGGER)
     return scene
+
+
+def parse(text: str) -> Scene:
+    """对外入口（v2.3.0 任务 3.1 · DCD 议题七之 C：一次性全错编译反馈）。
+
+    解析失败时**仍抛出第一个 DSLError**（行为与改造前逐字一致，既有断言不受影响），
+    但该异常额外携带 `extra_errors`（其余错误，按发现顺序且已按 (code,message) 去重）。
+    `_compile_error_envelope` 会把它输出为 `all_errors` 字段，让 agent 一次编译拿到
+    **全部问题 + 各自的 hint**，把「改一处编译一次」的 N 轮压成 1 轮。
+    """
+    try:
+        return _parse_core(text)
+    except DSLError as e:
+        _attach_extra_errors(text, e)
+        raise
+
+
+# 单个 DSL 最多额外收集的错误数（防御：避免病态文本上来回滚成 O(∞)）。
+_MULTI_ERROR_MAX = 8
+
+
+def _attach_extra_errors(text: str, first: DSLError) -> None:
+    """尽可能收集 DSL 里的其余错误，挂到 first.extra_errors（不改变抛出行为）。
+
+    做法（零侵入、复用真实 validator，杜绝二次维护漂移）：
+      1) 把首个出错行【留空】后重新解析 —— 留空不改行数，故行号天然映射回原文；
+      2) 拿到下一个错误，记录，再把该行也留空，迭代；
+      3) 直到解析干净 / 无法定位 / 遇到重复错误 / 达上限为止。
+    注意：内部调用 `_parse_core` 而非 `parse`，避免递归进入包装层。
+    """
+    lines = text.splitlines()
+    # 关键：先把【首个】出错行留空，再进入循环。否则第 0 轮重解析原文必然再撞上
+    # first 本身，被去重判为重复而立即停止，导致一条都收集不到。
+    _ln0 = getattr(first, "line", None)
+    if not isinstance(_ln0, int) or _ln0 < 1 or _ln0 > len(lines):
+        return                       # 首个错误无行号（全局性，如缺触发）→ 无法定位，不收集
+    lines[_ln0 - 1] = ""
+    seen = {(first.code, first.message)}
+    extra: list = []
+    for _ in range(_MULTI_ERROR_MAX):
+        try:
+            _parse_core("\n".join(lines))
+            break                      # 已无其余错误
+        except DSLError as e:
+            key = (e.code, e.message)
+            if key in seen:
+                break                  # 重复出现（多为全局性检查）→ 停止，防死循环
+            seen.add(key)
+            extra.append(e)
+            ln = getattr(e, "line", None)
+            if not isinstance(ln, int) or ln < 1 or ln > len(lines):
+                break                  # 无行号/越界（如缺触发这类全局错误）→ 无法继续定位
+            lines[ln - 1] = ""
+        except Exception:              # 结构性异常（非 DSLError）：不做断言，直接收手
+            break
+    if extra:
+        first.extra_errors = extra
 
 
 def _parse_raw_node(s: str, line: int) -> RawNode:

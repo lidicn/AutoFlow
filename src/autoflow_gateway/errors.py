@@ -100,8 +100,18 @@ def _compile_error_envelope(e, fix=None, candidates=None) -> dict:
     code = getattr(e, "code", "C_PARSE")
     line = getattr(e, "line", None)
     hint = getattr(e, "hint", "") or ""
+    # 【v2.3.0 任务 3.1 / DCD 议题七之 C】其余错误（一次性全错反馈）。
+    # dsl_engine.parse 会把后续错误挂到首个异常的 extra_errors 上；落到信封里，
+    # agent 一次编译即可看到全部问题 + 各自 hint，无需「改一处编译一次」的 N 轮。
+    extras = getattr(e, "extra_errors", None) or []
+    all_errors = [{"code": getattr(x, "code", "C_PARSE"),
+                   "line": getattr(x, "line", None),
+                   "message": str(x),
+                   "hint": getattr(x, "hint", "") or ""} for x in extras]
     return {"code": code, "line": line, "message": str(e), "hint": hint,
-            "fix": fix or [], "candidates": candidates or []}
+            "fix": fix or [], "candidates": candidates or [],
+            "all_errors": all_errors,
+            "error_count": 1 + len(all_errors)}
 
 
 __all__ = ["ErrCode", "AutoFlowError", "not_found", "ambiguous_count", "forbidden",
