@@ -65,10 +65,13 @@ v4.0.0 生态共存 ◄── AutoForge 成熟度（等外部信号，当前不�
 | 3.1 | **C 全错编译反馈**：dsl_engine 编译一次返回所有错误 + 结构化 fix（✅ 已收口） | 裁定七 C | 最高 |
 | 3.2 | **A ref 贯穿部署端**：deploy_proposal/deploy_raw 吃 ref，闭环零重传（✅ 已收口） | 裁定七 A | 高 |
 | 3.3 | **B will-pass 静态快检**：flow_linter 先跑，低级错秒回（✅ 已收口） | 裁定七 B | 中 |
-| 3.4 | **D token 预算条**：WebUI 展示本轮 agent token/轮次 | 裁定七 D | 低 |
+| 3.4 | **D token 预算条**：WebUI 展示本轮 agent token/轮次（✅ 已收口） | 裁定七 D | 低 |
 | 3.5 | 制品总线收口：DSL 产物与 raw flow 统一 ref 寻址（✅ 已收口） | 裁定八 C | 高 |
 
 **出口**：Pro 典型任务平均 token/轮次下降（埋点取证）；verify→deploy 整份 flow 重传次数=0；全量回归零新增红。
+
+> **3.4 实施说明（token 预算条）**：后端埋点 `TokenStatsStore`（`token_stats.py`）+ `_record_token` 已在 WebUI REST Pro 路径（propose-dsl / deploy-raw）落地，并注册 `/api/token-stats`（WebUI 内部）与 `/api/core/token-stats`（Pro API）两个读端点；前端 SPA 已有「📊 Token 统计」页签（`index.html` `data-tab="token_stats"`，由外部构建的 app.js 渲染）。本轮在后端 `get_stats` 追加向后兼容的软预算字段（`budget` / `budget_used_pct` / `today_estimated_tokens` / `today_rounds≈当天调用次数`），并新增**自包含轻量看板** `webui/static/token_stats.html`（直接访 `/static/token_stats.html`，无需改主 SPA 打包）：渲染今日预算占用条、按 agent 拆分（轮次/估算 token）、近 7 天趋势。
+> **已知缺口（留给议题二「数据先行」统一埋点）**：当前 `_record_token` 仅覆盖 WebUI REST Pro 路径，agent 经 MCP 工具（`autoflow_*`）跑的流量尚未计入；议题二要求「埋点各工具真实调用量 30 天」，届时一并把 MCP 路径纳入，看板数据即完整。
 
 ### v3.0.0 工具面收敛（等 v2.3.0 埋点数据，不排期）
 

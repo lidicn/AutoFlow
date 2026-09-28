@@ -15,6 +15,11 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
 
 
+# 软性每日 Token 预算（估算 token，≈字符数/4）。用于「token 预算条」可视化：
+# 让使用者一眼看到当天用量占预算的比例（可观测，非硬限额）。可按需调大/调小。
+DEFAULT_DAILY_TOKEN_BUDGET = 200_000
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -146,5 +151,16 @@ class TokenStatsStore:
 
         result["estimated_tokens"] = (result["total_input_chars"] + result["total_output_chars"]) // 4
         result["avg_tokens_per_call"] = result["estimated_tokens"] // max(result["total_calls"], 1)
+
+        # 【议题七 D · token 预算条】软预算可视化字段（向后兼容：纯新增，不改既有字段）。
+        # 取「今天」的估算 token 作为预算占用基准（轮次 = 当天调用次数）。
+        _today = _today_str()
+        _today_est = (data["daily"].get(_today, {}).get("input_chars", 0)
+                      + data["daily"].get(_today, {}).get("output_chars", 0)) // 4
+        _today_calls = data["daily"].get(_today, {}).get("calls", 0)
+        result["budget"] = DEFAULT_DAILY_TOKEN_BUDGET
+        result["budget_used_pct"] = round(100.0 * _today_est / max(DEFAULT_DAILY_TOKEN_BUDGET, 1), 1)
+        result["today_estimated_tokens"] = _today_est
+        result["today_rounds"] = _today_calls  # 当天调用次数 ≈ agent 迭代轮次
 
         return result

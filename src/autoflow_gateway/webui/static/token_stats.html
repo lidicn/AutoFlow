@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Token 预算条 · AutoFlow</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    :root {
+      --bg: #f5f7fa; --card: #ffffff; --ink: #1f2937; --muted: #6b7280;
+      --line: #e5e7eb; --green: #16a34a; --orange: #f59e0b; --red: #dc2626; --blue: #2563eb;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink);
+      font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 24px 20px 48px; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+      padding: 18px 20px; margin-bottom: 18px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+    .card h2 { font-size: 15px; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
+    .big { font-size: 30px; font-weight: 700; line-height: 1; }
+    .row { display: flex; gap: 14px; flex-wrap: wrap; }
+    .stat { flex: 1; min-width: 150px; }
+    .stat .k { color: var(--muted); font-size: 12px; }
+    .stat .v { font-size: 22px; font-weight: 700; margin-top: 4px; }
+    .bar { height: 22px; background: #eef2f7; border-radius: 999px; overflow: hidden; margin: 12px 0 6px; }
+    .bar > span { display: block; height: 100%; border-radius: 999px; transition: width .4s ease; }
+    .barlabel { font-size: 13px; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-weight: 600; }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .trend-row { display: grid; grid-template-columns: 92px 1fr 96px; align-items: center; gap: 10px; margin: 6px 0; font-size: 12px; }
+    .trend-bar { height: 14px; background: #eef2f7; border-radius: 999px; overflow: hidden; }
+    .trend-bar > span { display: block; height: 100%; background: var(--blue); border-radius: 999px; }
+    .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+    .muted { color: var(--muted); }
+    button.refresh { background: var(--blue); color: #fff; border: 0; border-radius: 8px;
+      padding: 8px 16px; font-size: 13px; cursor: pointer; }
+    button.refresh:disabled { opacity: .5; cursor: default; }
+    .err { color: var(--red); font-size: 13px; }
+    a.back { color: var(--blue); font-size: 13px; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>📊 Token 预算条 <span class="muted" style="font-size:13px;font-weight:400">· 议题七 D 可观测</span></h1>
+    <div class="sub">
+      软预算可视化：展示当天 agent token 估算用量与迭代轮次（轮次 ≈ 当天调用次数）。数据来自
+      <code>/api/token-stats</code>。需先登录主 WebUI 后在本标签页打开（共享会话）。
+    </div>
+
+    <div id="status" class="card" style="display:none"></div>
+
+    <div class="card">
+      <h2>今日预算占用</h2>
+      <div class="row">
+        <div class="stat"><div class="k">今日估算 Token</div><div class="v" id="m-today-tok">—</div></div>
+        <div class="stat"><div class="k">软预算</div><div class="v" id="m-budget">—</div></div>
+        <div class="stat"><div class="k">今日迭代轮次</div><div class="v" id="m-rounds">—</div></div>
+        <div class="stat"><div class="k">占用比例</div><div class="v" id="m-pct">—</div></div>
+      </div>
+      <div class="bar"><span id="m-bar" style="width:0%;background:var(--green)"></span></div>
+      <div class="barlabel" id="m-barlabel">—</div>
+    </div>
+
+    <div class="card">
+      <h2>按 Agent 拆分（今日）</h2>
+      <table id="agent-table">
+        <thead><tr><th>Agent</th><th class="num">轮次(调用)</th><th class="num">估算 Token</th><th class="num">输入字符</th><th class="num">输出字符</th></tr></thead>
+        <tbody><tr><td colspan="5" class="muted">加载中…</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>近 7 天趋势</h2>
+      <div id="trend"></div>
+    </div>
+
+    <div style="margin-top:8px">
+      <button class="refresh" id="btn-refresh">刷新</button>
+      <a class="back" href="/" style="margin-left:14px">← 返回主控制台</a>
+    </div>
+  </div>
+
+  <script>
+    const fmt = (n) => (n == null ? "—" : Number(n).toLocaleString("en-US"));
+    const pctColor = (p) => p >= 100 ? "var(--red)" : p >= 70 ? "var(--orange)" : "var(--green)";
+
+    async function load() {
+      const status = document.getElementById("status");
+      status.style.display = "none";
+      const btn = document.getElementById("btn-refresh");
+      btn.disabled = true;
+      try {
+        const [today, week] = await Promise.all([
+          fetch("/api/token-stats?days=1").then(r => r.ok ? r.json() : Promise.reject(r.status)),
+          fetch("/api/token-stats?days=7").then(r => r.ok ? r.json() : Promise.reject(r.status)),
+        ]);
+        if (!today.ok || !week.ok) throw new Error("数据返回异常");
+        render(today.stats, week.stats);
+      } catch (e) {
+        status.style.display = "block";
+        status.innerHTML = '<div class="err">加载失败：' + e + '。请确认已登录主 WebUI（同一浏览器会话），'
+          + '或后端 /api/token-stats 不可用。</div>';
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function render(t, w) {
+      const budget = t.budget || 200000;
+      const todayTok = t.today_estimated_tokens || 0;
+      const pct = t.budget_used_pct || 0;
+      document.getElementById("m-today-tok").textContent = fmt(todayTok);
+      document.getElementById("m-budget").textContent = fmt(budget);
+      document.getElementById("m-rounds").textContent = fmt(t.today_rounds || 0);
+      document.getElementById("m-pct").textContent = pct + "%";
+      const bar = document.getElementById("m-bar");
+      bar.style.width = Math.min(100, pct) + "%";
+      bar.style.background = pctColor(pct);
+      document.getElementById("m-barlabel").textContent =
+        "今日已用 " + fmt(todayTok) + " / " + fmt(budget) + " 估算 token（软预算，非硬限额）";
+
+      // 按 agent
+      const agents = Object.entries(t.by_agent || {})
+        .map(([id, s]) => ({ id, calls: s.calls, tok: (s.input_chars + s.output_chars) / 4 | 0,
+          inC: s.input_chars, outC: s.output_chars }))
+        .sort((a, b) => b.tok - a.tok);
+      const tb = document.querySelector("#agent-table tbody");
+      if (!agents.length) {
+        tb.innerHTML = '<tr><td colspan="5" class="muted">今日暂无记录</td></tr>';
+      } else {
+        tb.innerHTML = agents.map(a =>
+          '<tr><td>' + esc(a.id) + '</td><td class="num">' + fmt(a.calls) + '</td>'
+          + '<td class="num">' + fmt(a.tok) + '</td><td class="num">' + fmt(a.inC)
+          + '</td><td class="num">' + fmt(a.outC) + '</td></tr>').join("");
+      }
+
+      // 7 天趋势
+      const days = (w.daily || []).slice().reverse();
+      const maxTok = Math.max(1, ...days.map(d => d.estimated_tokens));
+      document.getElementById("trend").innerHTML = days.map(d => {
+        const w = Math.round(100 * d.estimated_tokens / maxTok);
+        return '<div class="trend-row"><div>' + d.date.slice(5) + '</div>'
+          + '<div class="trend-bar"><span style="width:' + w + '%"></span></div>'
+          + '<div class="num" style="text-align:right">' + fmt(d.estimated_tokens)
+          + ' · ' + fmt(d.calls) + '轮</div></div>';
+      }).join("");
+    }
+
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    document.getElementById("btn-refresh").addEventListener("click", load);
+    load();
+  </script>
+</body>
+</html>
