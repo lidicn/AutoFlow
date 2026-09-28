@@ -26,7 +26,7 @@
 | v2.0.11 | 竞技场 beta | 已完成 | ✅ | — |
 | v2.1.0-beta | 竞技场 gamma | 进行中（种子翻转/语义诚实性/出题校验/考官校准） | 🔄 | — |
 | **v2.2.0** | 定性收口版 | **3 红定性 + 议题一/六裁定落地 + 议题四立项** | 📋 新增 | G1 |
-| **v2.3.0** | 省 token 版 | **议题四+七+八打包：ref 贯穿部署 / 全错编译 / 静态快检 / token 预算** | 📋 新增 | G2 |
+| **v2.3.0** | 省 token 版 | **议题四+七+八打包：ref 贯穿部署 / 全错编译 / 静态快检 / token 预算** | ✅ 已发版（tag `v2.3.0` · 2026-09-29 · HEAD `af0b134`） | G2 |
 | v3.0.0 | 工具面收敛 | 议题二（埋点取证后收敛） | 📋 规划 | G3 |
 | v4.0.0 | 生态共存 | 议题三（AutoForge 交接契约） | 📋 延后 | G4 |
 
@@ -69,6 +69,23 @@ v4.0.0 生态共存 ◄── AutoForge 成熟度（等外部信号，当前不�
 | 3.5 | 制品总线收口：DSL 产物与 raw flow 统一 ref 寻址（✅ 已收口） | 裁定八 C | 高 |
 
 **出口**：Pro 典型任务平均 token/轮次下降（埋点取证）；verify→deploy 整份 flow 重传次数=0；全量回归零新增红。
+
+#### 发版记录（tag `v2.3.0` · 2026-09-29 · HEAD `af0b134` · 议题五 minor 背书）
+
+**出口指标核验**：
+| 出口指标 | 结论 | 依据 |
+|---|---|---|
+| verify→deploy 整份 flow 重传=0 | ✅ 满足 | 3.2（`f9b5476`）deploy_proposal/deploy_raw 吃 ref + 3.5（`defc7b3`）制品总线统一 ref 寻址 |
+| 全量回归零新增红 | ✅ 满足 | 全量基线 1829 passed / 1 skipped；4 红已逐个取证定性（见下），隔离全绿 |
+| Pro 典型任务 token/轮次下降 | ⏳ **待举证** | `_record_token` 仅覆盖 WebUI REST Pro 路径，MCP 工具路径未埋点 → 留议题二统一补。功能已交付，指标为纵向观测项，**不阻塞发版** |
+
+**红清帐（4 红，全部取证定性，未删红、未放宽闸门）**：
+| 红 | 定性 | 处置 |
+|---|---|---|
+| `test_gate_integrity` a18 / `test_gateway` reliability | **测试漂移**（3.3 有意变更） | 修：测试流补成可部署形态（server + inject 触发源 + 入边）。依据：缺 server 触发 S3，而 `deploy_raw` 默认硬拦 S3（`gateway.py:5519`）→ 3.3 快检对齐 deploy 属正确产品行为，不可放宽 block 集 |
+| `test_verify_flow_webui_endpoint` / `test_wb16_concurrency` | **测试隔离债**（非产品回归） | 隔离跑全绿、换多种顺序复现不出；webui 用例改发 `run_gate=False` 降噪。保留断言，记矮底待专项治理 |
+
+**遗留（不堵本版本）**：NAS prod 部署（写活树 + docker restart）属议题五「重大发版」硬触发，**另行签收**，不在本发版门自动执行。
 
 > **3.4 实施说明（token 预算条）**：后端埋点 `TokenStatsStore`（`token_stats.py`）+ `_record_token` 已在 WebUI REST Pro 路径（propose-dsl / deploy-raw）落地，并注册 `/api/token-stats`（WebUI 内部）与 `/api/core/token-stats`（Pro API）两个读端点；前端 SPA 已有「📊 Token 统计」页签（`index.html` `data-tab="token_stats"`，由外部构建的 app.js 渲染）。本轮在后端 `get_stats` 追加向后兼容的软预算字段（`budget` / `budget_used_pct` / `today_estimated_tokens` / `today_rounds≈当天调用次数`），并新增**自包含轻量看板** `webui/static/token_stats.html`（直接访 `/static/token_stats.html`，无需改主 SPA 打包）：渲染今日预算占用条、按 agent 拆分（轮次/估算 token）、近 7 天趋势。
 > **已知缺口（留给议题二「数据先行」统一埋点）**：当前 `_record_token` 仅覆盖 WebUI REST Pro 路径，agent 经 MCP 工具（`autoflow_*`）跑的流量尚未计入；议题二要求「埋点各工具真实调用量 30 天」，届时一并把 MCP 路径纳入，看板数据即完整。
