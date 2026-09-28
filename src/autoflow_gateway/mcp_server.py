@@ -916,9 +916,9 @@ for _fn in _USER_TOOLS:
 
 @mcp_admin.tool()
 @mcp.tool()
-def autoflow_deploy_raw(flow_json: str, label: str = "", target: str = "staging",
+def autoflow_deploy_raw(flow_json: str = "", label: str = "", target: str = "staging",
                         force: bool = False, require_e2e: bool = False,
-                        target_tab: str = "", deploy_token: str = "") -> str:
+                        target_tab: str = "", deploy_token: str = "", ref: str = "") -> str:
     """【⚠️逃生舱·非首选】把 Agent 产出的 Node-RED flow JSON 提交为**提案**（不直接部署到 NR）。
 
     🚨 这是**逃生舱（escape hatch）**，不是首选路径：手写裸 NR 节点 JSON 既费 token（一个 flow
@@ -936,6 +936,8 @@ def autoflow_deploy_raw(flow_json: str, label: str = "", target: str = "staging"
     - flow_json：Node-RED flow 描述。可直接传「完整 flow 对象字符串」
       '{"id":"my-flow","label":"测试","nodes":[...]}'，也可传「节点数组字符串」'[{...},{...}]'
       （网关自动包成 {nodes:[...]}）。务必是字符串（不要传已解析的对象）。
+    - ref：propose_dsl / propose_raw 返回的短引用，凭此取回暂存 flow（与 flow_json 二选一，
+      闭环零重传，省 token）。优先级高于 flow_json。
     - label：自定义标签（缺省从 flow_json 提取）。
     - target："staging"(inject 触发，默认) / "prod"(真实 HA 事件)。
     - force：是否强制覆盖同名已存在 flow（默认不覆盖）。
@@ -960,17 +962,28 @@ def autoflow_deploy_raw(flow_json: str, label: str = "", target: str = "staging"
         return _js({"ok": False, "error": "当前身份为『普通』(mode=normal)，只能用 "
                     "autoflow_propose_dsl 走 DSL 规则路径；原生手写直写请改用『原生手写身份码』。"})
     aid = agent.agent_id
-    try:
-        if isinstance(flow_json, str):
-            data = json.loads(flow_json)
-        else:
-            data = flow_json
-        if isinstance(data, list):
-            data = {"nodes": data}
+    # 【v2.3.0 任务 3.2 / DCD 议题七 A】ref 优先：凭 propose_dsl/propose_raw 返回的 ref
+    # 取回暂存 flow，免去 agent 把整份 flow 原样重传（闭环零重传，省 token）。
+    if ref:
+        from autoflow_gateway.draft_store import get_draft
+        draft = get_draft(ref)
+        if draft is None:
+            return _js({"ok": False, "error": f"草稿 ref {ref} 不存在或已过期（默认 TTL 1h），请重新提交获取新 ref。"})
+        data = draft.get("flow")
         if not isinstance(data, dict):
-            return _js({"ok": False, "error": "flow_json 必须是 JSON 对象或节点数组"})
-    except (json.JSONDecodeError, TypeError, ValueError) as e:
-        return _js({"ok": False, "error": f"flow_json 非法 JSON: {e}"})
+            return _js({"ok": False, "error": f"ref {ref} 对应的草稿不含合法 flow。"})
+    else:
+        try:
+            if isinstance(flow_json, str):
+                data = json.loads(flow_json)
+            else:
+                data = flow_json
+            if isinstance(data, list):
+                data = {"nodes": data}
+            if not isinstance(data, dict):
+                return _js({"ok": False, "error": "flow_json 必须是 JSON 对象或节点数组"})
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
+            return _js({"ok": False, "error": f"flow_json 非法 JSON: {e}"})
     # 原生手写统一：不再直写 NR，改为落提案（content.type=raw_flow），返回 proposal_id 待用户审核部署。
     return _js(_gw().propose_raw(data, agent_id=aid, label=label or None,
                                  target=target, force=force, require_e2e=require_e2e,

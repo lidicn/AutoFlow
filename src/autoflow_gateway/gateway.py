@@ -3897,14 +3897,15 @@ class Gateway:
             return {"ok": False, "fallback": "manual",
                     "reason": f"自动部署异常: {e}"}
 
-    def deploy_proposal(self, pid: str, agent_id: str = "human",
+    def deploy_proposal(self, pid: Optional[str] = None, agent_id: str = "human",
                         target_flow_id: Optional[str] = None,
                         target: str = "prod", force: bool = False,
                         validate: bool = True, allow_prod: bool = True,
                         vhass_store=None,
                         dry_run: bool = False,
                         require_e2e: Optional[bool] = None,
-                        target_tab: Optional[str] = None) -> Dict[str, Any]:
+                        target_tab: Optional[str] = None,
+                        ref: Optional[str] = None) -> Dict[str, Any]:
         """把已通过的 DSL 提案直接部署到 NR（一步确认，不再走冗余确认闸）。
 
         流程：重新编译 DSL（真相源）→ 冲突检测（同名非本流拒绝/force 改名）
@@ -3914,11 +3915,28 @@ class Gateway:
         （含 for 持久等待，WB4 #2 修复）；"staging" 在 e2e 时由 _e2e_prepare_flow
         原地转合成 inject 点燃，"prod" 走真实 HA 事件。
         返回 {ok, flow_id, created, node_count, server_resolved}；冲突/编译/防御失败 ok=False。
+        ref：propose_dsl 返回的短引用，凭此取回关联提案（与 pid 二选一，闭环零重传）。
         """
         _tid = _new_trace_id()
         _t0 = time.perf_counter()
         _slog(_tid, "deploy_proposal.start", pid=pid, agent_id=agent_id,
               target=target, validate=validate)
+        # 【v2.3.0 任务 3.2 / DCD 议题七 A】ref 解析（置于快照/编译之前，fail-closed：
+        # ref 无效时直接报错，绝不触发 NR 快照等副作用）。让「propose→deploy」闭环凭短 ref
+        # 完成，免去 agent 重传整份 flow（闭环零重传）。
+        if pid is None and ref is not None:
+            from .draft_store import get_draft
+            draft = get_draft(ref)
+            if draft is None:
+                return {"ok": False, "stage": "ref",
+                        "error": f"草稿 ref {ref} 不存在或已过期（默认 TTL 1h），请重新 propose_dsl 获取新 ref。"}
+            pid = draft.get("proposal_id")
+            if not pid:
+                return {"ok": False, "stage": "ref",
+                        "error": f"ref {ref} 对应的草稿未关联提案（需先经 propose_dsl 落提案）。"}
+        if pid is None:
+            return {"ok": False, "stage": "ref",
+                    "error": "deploy_proposal 需提供 pid（提案 id）或 ref（propose_dsl 返回的短引用）。"}
         # #16 部署前整实例快照（GET /flows 全包）——落盘前留底，失败可 autoflow_restore_snapshot 回滚
         snap_before = self.nr.take_instance_snapshot("deploy_proposal_before") if not dry_run else None
         store = ProposalStore(self.cfg)
@@ -5366,7 +5384,7 @@ class Gateway:
             "notes": notes,
         }
 
-    def deploy_raw(self, flow_json: Dict, agent_id: str = "unknown-agent",
+    def deploy_raw(self, flow_json: Optional[Dict] = None, agent_id: str = "unknown-agent",
                    label: Optional[str] = None,
                    target_flow_id: Optional[str] = None,
                    target: str = "staging", force: bool = False,
@@ -5378,7 +5396,8 @@ class Gateway:
                    block_on_schema_error: bool =
                        (os.environ.get("AUTOFLLOW_WHITEBOX_BLOCK_ON_SCHEMA_ERROR", "1") != "0"),
                    require_e2e: Optional[bool] = None,
-                   allow_prod: bool = False
+                   allow_prod: bool = False,
+                   ref: Optional[str] = None
                    ) -> Dict[str, Any]:
         """白盒部署：直接接受 Agent 产出的原始 Node-RED flow JSON，经校验后部署。
 
@@ -5427,6 +5446,16 @@ class Gateway:
         _tid = _new_trace_id()
         _t0 = time.perf_counter()
         # #16 部署前整实例快照在「实际落 NR 前」(Step 8) 才拍，避免预算/闸早期返回误触 NR
+        # 【v2.3.0 任务 3.2 / DCD 议题七 A】ref 解析：凭 propose_dsl/propose_raw 返回的 ref
+        # 取回暂存 flow，免去 agent 把整份 flow 原样重传（闭环零重传）。ref 优先于 flow_json；
+        # 解析失败 fail-closed，绝不触发后续校验/部署副作用。
+        if ref is not None:
+            from .draft_store import get_draft
+            draft = get_draft(ref)
+            if draft is None:
+                return {"ok": False, "stage": "ref",
+                        "error": f"草稿 ref {ref} 不存在或已过期（默认 TTL 1h），请重新提交获取新 ref。"}
+            flow_json = draft.get("flow")
         snap_before = None
         _slog(_tid, "deploy_raw.start", agent_id=agent_id, target=target, run_gate=run_gate,
               node_count=len(flow_json.get("nodes", []) if isinstance(flow_json, dict) else []))
@@ -5434,9 +5463,9 @@ class Gateway:
         if not isinstance(flow_json, dict) or "nodes" not in flow_json:
             _slog(_tid, "deploy_raw.error", sub_stage="input",
                   elapsed=round(time.perf_counter() - _t0, 3),
-                  error="flow_json 必须是包含 'nodes' 数组的 JSON 对象")
+                  error="flow_json 必须是包含 'nodes' 数组的 JSON 对象（或提供有效 ref）")
             return {"ok": False, "stage": "input",
-                    "error": "flow_json 必须是包含 'nodes' 数组的 JSON 对象"}
+                    "error": "flow_json 必须是包含 'nodes' 数组的 JSON 对象（或提供有效 ref）"}
 
         # Step 1.5: 【Phase C·C3】重试预算（防控制层死循环 / agent 自动改→重部署 runaway）
         # 同一 agent 在滑动窗口内的「失败部署尝试」超过上限 N 即停止部署并转人工/报告；
