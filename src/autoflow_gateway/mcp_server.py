@@ -1174,7 +1174,7 @@ def autoflow_validate_flow(flow_json: str) -> str:
 @mcp.tool()
 def autoflow_verify_flow(flow_json: str, run_gate: bool = True,
                         require_e2e: bool = False, target: str = "staging",
-                        allow_prod: bool = False) -> str:
+                        allow_prod: bool = False, ref: Optional[str] = None) -> str:
     """【质量验证·只读·绝不部署】按需跑与 deploy_raw 同源的质量闸，但不写 NR / 不登记 catalog。
 
     用法：
@@ -1233,7 +1233,7 @@ def autoflow_verify_flow(flow_json: str, run_gate: bool = True,
         return _js({"ok": False, "error": f"flow_json 非法 JSON: {e}"})
     res = _gw().verify_flow(data, agent_id=aid, run_gate=run_gate,
                             require_e2e=require_e2e, target=target,
-                            allow_prod=allow_prod)
+                            allow_prod=allow_prod, ref=ref)
     return _js(res)
 
 @mcp_admin.tool()

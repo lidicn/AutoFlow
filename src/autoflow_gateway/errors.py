@@ -20,14 +20,33 @@ class ErrCode(str, Enum):
 
 
 class AutoFlowError(Exception):
-    def __init__(self, code: ErrCode, message: str, *, detail: Optional[str] = None):
+    def __init__(self, code: ErrCode, message: str, *, detail: Optional[str] = None,
+                 fix: Optional[list] = None, candidates: Optional[list] = None,
+                 hint: Optional[str] = None):
+        # fix: 机器可直接回填的修复动作列表，元素形如 {"op": "replace", "path": "...", "value": ...}
+        # candidates: 歧义时的候选 entity_id 列表（供 agent 选择后回填）
+        # hint: 一句话「怎么改」（与 message 分离，便于 agent 机读）
         self.code = code
         self.message = message
         self.detail = detail or ""
+        self.fix = fix or []
+        self.candidates = candidates or []
+        self.hint = hint or ""
         super().__init__(f"[{code.value}] {message}")
 
     def __str__(self) -> str:
         return f"[{self.code.value}] {self.message}"
+
+    def to_dict(self) -> dict:
+        """结构化出口（mimo 亮点②）：fix / candidates 让 agent 直接回填，不必重传整份 draft。"""
+        return {
+            "code": self.code.value,
+            "message": self.message,
+            "detail": self.detail,
+            "fix": self.fix,
+            "candidates": self.candidates,
+            "hint": self.hint,
+        }
 
 
 def not_found(entity: str, ident: str) -> AutoFlowError:
@@ -57,4 +76,33 @@ def demo_resolve(target_id: str, live_ids: list) -> dict:
     return {"ok": True, "applied": target_id}
 
 
-__all__ = ["ErrCode", "AutoFlowError", "not_found", "ambiguous_count", "forbidden", "demo_resolve"]
+def fix_patch(op: str, **fields) -> dict:
+    """构造一个结构化修复动作（mimo 亮点②的 fix 元素）。
+
+    例：fix_patch("resolve", entity="前门") / fix_patch("replace", path="flow.then[0].target",
+                                                     value="light.living_room")
+    agent 拿到后可直接回填，不必重传整份 draft。
+    """
+    return {"op": op, **fields}
+
+
+def _compile_error_envelope(e, fix=None, candidates=None) -> dict:
+    """把 DSLError 转成结构化 compile_error 信封，供 agent 机读自修正（mimo 亮点②）。
+
+    字段：
+      code   —— C_* 错误码（见 dsl_engine 常量）；非 DSLError 兜底 C_PARSE。
+      line   —— 出错行号（无则 None）。
+      message—— 人类可读消息（含『第 X 行:』前缀）。
+      hint   —— 一句话『怎么改』，DSLError 自动从 message 的「（建议：…）」抽取。
+      fix    —— 机器可直接回填的修复动作列表（无则空）。
+      candidates —— 歧义时的候选 entity_id 列表（无则空）。
+    任何异常类型都安全（用 getattr 兜底）。"""
+    code = getattr(e, "code", "C_PARSE")
+    line = getattr(e, "line", None)
+    hint = getattr(e, "hint", "") or ""
+    return {"code": code, "line": line, "message": str(e), "hint": hint,
+            "fix": fix or [], "candidates": candidates or []}
+
+
+__all__ = ["ErrCode", "AutoFlowError", "not_found", "ambiguous_count", "forbidden",
+           "demo_resolve", "fix_patch", "_compile_error_envelope"]

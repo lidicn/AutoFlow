@@ -31,6 +31,7 @@ from .plan_store import PlanStore
 from .command_store import CommandStore
 from .decision_store import DecisionStore
 from .task_store import TaskStore
+from .errors import _compile_error_envelope
 
 # 决策看门狗单例守卫：网关多实例（webui / 各 mcp_server 调用）共享，只启一个后台线程，
 # 避免对同一 pending 决策重复发 Bark 催办。
@@ -66,20 +67,6 @@ from .flow_simulator import simulate_flow
 from .flow_diff import diff_flow_dicts, _node_sig
 from .lib.affordance import affordance_for
 from .telemetry import tag_action as _tag_action
-
-def _compile_error_envelope(e) -> dict:
-    """把 DSLError 转成结构化 compile_error 信封，供 agent 机读自修正。
-
-    字段：
-      code   —— C_* 错误码（见 dsl_engine 常量）；非 DSLError 兜底 C_PARSE。
-      line   —— 出错行号（无则 None）。
-      message—— 人类可读消息（含『第 X 行:』前缀）。
-      hint   —— 一句话『怎么改』，DSLError 自动从 message 的「（建议：…）」抽取。
-    任何异常类型都安全（用 getattr 兜底）。"""
-    code = getattr(e, "code", "C_PARSE")
-    line = getattr(e, "line", None)
-    hint = getattr(e, "hint", "") or ""
-    return {"code": code, "line": line, "message": str(e), "hint": hint}
 
 # 原生节点逃逸关键字（Phase 4）：DSL 含此关键字且开关关闭时，编译入口直接拒绝。
 _RAW_NODE_KW_RE = re.compile(r"^\s*(原生节点|raw_node)\s*:", re.MULTILINE)
@@ -2571,7 +2558,8 @@ class Gateway:
             flow = compile(scene)
         except DSLError as e:
             result = {"ok": False, "stage": "compile", "error": str(e),
-                      "compile_error": _compile_error_envelope(e),
+                      "compile_error": _compile_error_envelope(
+                          e, fix=[{"op": "get_help", "tool": "autoflow_dsl_help"}]),
                       "result_kind": "compile_error"}
             result["_telemetry"] = _tag_action("propose_dsl", result, agent_id,
                                                log_path=self._telemetry_log)
@@ -2640,7 +2628,10 @@ class Gateway:
                           "lint": lint_issues, "lint_summary": lint_summary,
                           "lint_error_count": lint_error_count, "lint_warning_count": lint_warning_count,
                           "message": _msg,
-                          "rogue_entities": _rogue}
+                          "rogue_entities": _rogue,
+                          # 【mimo 亮点②】结构化 fix：引导 agent 先 resolve_实体 再重写 DSL
+                          "fix": [{"op": "resolve_entity", "entity": e} for e in _rogue],
+                          "candidates": []}
                 result["_telemetry"] = _tag_action("propose_dsl", result, agent_id,
                                                    log_path=self._telemetry_log)
                 _slog(_tid, "propose_dsl.entity_whitelist", agent_id=agent_id,
@@ -2717,6 +2708,9 @@ class Gateway:
             result = {"ok": False, "stage": "entity_check",
                       "error": "R_unknown_entity",
                       "unknown_entities": _unknown,
+                      # 【mimo 亮点②】结构化 fix：agent 拿到后直接回填，不必重传整份 draft
+                      "fix": [{"op": "resolve_entity", "entity": u} for u in _unknown],
+                      "candidates": [],
                       "proposal_id": None,   # 显式声明：绝不落提案（fail-closed 自证）
                       "gate": gate,
                       "lint": lint_issues, "lint_summary": lint_summary,
@@ -2781,9 +2775,23 @@ class Gateway:
         _slog(_tid, "propose_dsl.done", elapsed=round(time.perf_counter() - _t0, 3),
               proposal_id=proposal_id, gate_passed=bool(gate.get("passed")),
               auto_deploy=auto_deploy_result.get("ok") if auto_deploy_result else None)
+        # 【mimo 亮点①】IR 暂存 + 返回短 ref：后续 verify_flow(ref=...) 可凭 ref 取回 flow，
+        # 免去 agent 把整份 IR 原样重传（ref 由内容派生，幂等；默认 TTL 1h）。
+        from .draft_store import stage_draft
+        ref = stage_draft({
+            "dsl": dsl,
+            "flow": flow,
+            "gate": gate,
+            "expected_postconditions": expected_postconditions,
+            "scene_name": scene.name,
+            "proposal_id": proposal_id,
+            "agent_id": agent_id,
+            "node_count": len(flow.get("nodes", [])),
+        })
         # lint 摘要已在 lint 阶段统一计算（lint_summary / lint_error_count / lint_warning_count）
         return {
             "ok": True,
+            "ref": ref,
             "proposal_id": proposal_id,
             "snapshot": snap,
             "_trace_id": _tid,
@@ -5930,7 +5938,8 @@ class Gateway:
 
     def verify_flow(self, flow_json: Dict, agent_id: str = "verify",
                     run_gate: bool = True, require_e2e: bool = False,
-                    target: str = "staging", allow_prod: bool = False) -> Dict[str, Any]:
+                    target: str = "staging", allow_prod: bool = False,
+                    ref: Optional[str] = None) -> Dict[str, Any]:
         """白盒质量验证（只读，绝不部署）：跑与 deploy_raw 同源的质量闸，但不写 NR / 不登记 catalog。
 
         用途：agent / WB2 在部署前或回归时，按需校验一份 flow 的质量（schema + lint + 可选 vhass
@@ -5960,9 +5969,18 @@ class Gateway:
         """
         _tid = _new_trace_id()
         _t0 = time.perf_counter()
+        # 【mimo 亮点①】ref 解析：凭 propose_dsl 返回的 ref 取回暂存 flow，
+        # 免去 agent 把整份 IR 原样重传（ref 默认 TTL 1h）。
+        if ref is not None:
+            from .draft_store import get_draft
+            draft = get_draft(ref)
+            if draft is None:
+                return {"ok": False, "stage": "ref", "deployed": False,
+                        "error": f"草稿 ref {ref} 不存在或已过期（默认 TTL 1h），请重新 propose_dsl 获取新 ref。"}
+            flow_json = draft["flow"]
         if not isinstance(flow_json, dict) or "nodes" not in flow_json:
             return {"ok": False, "stage": "input", "deployed": False,
-                    "error": "flow_json 必须是包含 'nodes' 数组的 JSON 对象"}
+                    "error": "flow_json 必须是包含 'nodes' 数组的 JSON 对象（或提供有效 ref）"}
         flow = dict(flow_json)  # 浅拷贝，避免改动入参
         nodes = flow.get("nodes", [])
         _slog(_tid, "verify_flow.start", agent_id=agent_id, run_gate=run_gate,

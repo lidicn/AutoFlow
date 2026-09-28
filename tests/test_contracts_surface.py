@@ -312,6 +312,9 @@ _STAGE_WHITELIST = {
     "lint", "lint_block", "lint_branch_required", "lint_strict",
     "link_out_unresolved", "load", "logic_block", "node_gate", "not_found",
     "nr_canary", "nr_create_subflow", "patch", "proposal_store",
+    # mimo 亮点①（2026-09-27）：verify_flow(ref=...) 凭草稿短引用取回 flow，
+    # ref 失效/过期时分诊到该 stage；与既有 load/input（入参校验类）同类。
+    "ref",
     "register_subflow", "resolve_whitelist", "restored",
     "retry_budget_exhausted", "semantic_gap", "verified",
     "direct_write_applied", "direct_write_pending",
