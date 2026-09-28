@@ -6026,6 +6026,48 @@ class Gateway:
         errors = [v for v in validation if v.get("level") == "error"]
         warnings = [v for v in validation if v.get("level") == "warning"]
 
+        # Step 2.5【议题七 B · will-pass 静态快检】：DCD 裁定「flow_linter 先跑，低级错秒回」。
+        # lint/schema 已出现硬伤 → 已知 "will-pass = False"，无需再烧昂贵的 vhass 重放 /
+        # e2e 实机追踪即可秒回低级错。这是 Pro token 优化的安全网：即便 agent 没先跑
+        # 便宜的 autoflow_validate_flow，verify_flow 也不会在注定失败的流上浪费重放。
+        # 静态阻断集必须 **对齐 deploy_raw._LINT_BLOCK_RULES**（deploy 权威硬拦口径）——只有
+        # 确定会被 deploy_raw 硬拦的流才秒回，绝不误杀「能过 deploy 的流」（保守：宁可多跑一次
+        # 重放，也不跳掉一次可能通过的验证）。schema 致命项（S1..S5）同样算确定硬拦。
+        _STATIC_BLOCK_RULES = {"R13", "R15", "R20", "R17", "R22", "R24", "R30", "R32",
+                               "R_SERVICE_PARAM", "R36", "R2-ESC", "R_NO_TRIGGER", "R16", "R40"}
+        _schema_blocking_static = schema_blocking_issues(validation)
+        _lint_blocking_static = [
+            v for v in lint_issues
+            if v.get("level") == "error" and v.get("rule") in _STATIC_BLOCK_RULES]
+        if _schema_blocking_static or _lint_blocking_static:
+            _fast_block_reasons = (
+                [f"schema:{v.get('rule', '?')}" for v in _schema_blocking_static]
+                + [f"lint:{v.get('rule', '?')}" for v in _lint_blocking_static])
+            _slog(_tid, "verify_flow.fast_fail", agent_id=agent_id,
+                  reason="static_lint_block", node_count=len(nodes),
+                  blockers=len(_fast_block_reasons))
+            # 不跑 vhass 重放 / 结构金丝雀 / e2e——静态已判死，秒回低级错省 token
+            return {
+                "ok": True,
+                "deployed": False,
+                "verdict": "block",
+                "passed": False,
+                "fast_fail": True,
+                "fast_fail_stage": "static_lint",
+                "fast_fail_reasons": _fast_block_reasons,
+                "gate": {"skipped": True, "reason":
+                         "will-pass 静态快检：lint/schema 已出现硬伤，"
+                         "跳过 vhass 重放与 e2e 以秒回低级错（省 token）"},
+                "validation": validation,
+                "lint": lint_issues,
+                "lint_error_count": sum(1 for v in lint_issues if v.get("level") == "error"),
+                "lint_warning_count": sum(1 for v in lint_issues if v.get("level") == "warning"),
+                "entity_reliability": [],
+                "_trace_id": _tid,
+                "summary": (f"静态快检拦截：检测到 {len(_fast_block_reasons)} 项低级硬伤，"
+                            f"已秒回（未跑 vhass 重放）。请先修复再重试。"),
+            }
+
         # Step 3: 可选 vhass staging 闸（只读：断言预期后条件，不部署）
         # 【A18】三处硬伤一并修：
         #   1) 旧代码把 expected 用错 kwarg（expected_postconditions=）传给 run_staging_gate，
