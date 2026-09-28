@@ -139,6 +139,47 @@ def test_deploy_raw_by_ref_resolves_flow():
         f"部署的 flow 与 ref 暂存的不一致: {fake_nr.captured.get('label')} != {expected_label}")
 
 
+# ── 任务 3.5：raw flow 也统一 ref 寻址（与 DSL 产物口径一致） ──────────────────
+
+RAW_FLOW = {
+    "id": "raw_ref_1", "label": "raw-ref-test",
+    "nodes": [
+        {"id": "n1", "type": "inject", "z": "raw_ref_1", "name": "t", "wires": [["n2"]]},
+        {"id": "n2", "type": "debug", "z": "raw_ref_1", "name": "d", "wires": [[]]},
+    ],
+}
+
+
+def test_propose_raw_returns_ref():
+    # propose_raw 落档并暂存 → 返回 ref；草稿关联 proposal_id（统一 ref 寻址）
+    GW._ensure_history_subflow_for = lambda *a, **k: None
+    res = GW.propose_raw(RAW_FLOW, agent_id="agent_test")
+    assert res["ok"] and res["ref"].startswith("af:"), res
+    draft = get_draft(res["ref"])
+    assert draft is not None, "propose_raw 未暂存 ref"
+    assert draft["proposal_id"] == res["proposal_id"], "草稿未关联落档提案"
+
+
+def test_deploy_proposal_by_ref_raw():
+    # raw 提案凭 ref 取回 proposal_id 并部署，全程不重传整份 flow（闭环零重传）。
+    GW._ensure_history_subflow_for = lambda *a, **k: None
+    res = GW.propose_raw(RAW_FLOW, agent_id="agent_test")
+    assert res["ok"] and res["ref"].startswith("af:"), res
+    ref = res["ref"]
+    expected_label = RAW_FLOW["label"]
+
+    fake_nr = _FakeNR()
+    GW.nr = fake_nr
+    GW.defense = _FakeDefense()
+    GW._inject_ha_server = lambda flow: ([], [])
+
+    r = GW.deploy_proposal(pid=None, ref=ref)
+    assert r["ok"] is True, r
+    assert fake_nr.captured is not None, "deploy_proposal 未把 flow 部署出去"
+    assert fake_nr.captured["label"] == expected_label, (
+        f"部署的 flow 与 ref 暂存的不一致: {fake_nr.captured.get('label')} != {expected_label}")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     fail = 0

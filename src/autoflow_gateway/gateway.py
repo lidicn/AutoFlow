@@ -6157,8 +6157,9 @@ class Gateway:
         dry_run=True：跑完全部校验 + HA 替换 + id 重映射后返回预览（含 remap 后的 flow），
         不落提案。供 Agent/WebUI 部署前确认「这版 flow 长啥样、会不会被 lint 拦」。
 
-        返回 {ok, proposal_id, label, node_count, validation, lint, lint_error_count,
+        返回 {ok, proposal_id, ref, label, node_count, validation, lint, lint_error_count,
               lint_warning_count, logic, node_gate_ok, flow(预览), dry_run}。
+        ref：与 propose_dsl 同款短引用，凭此可走 verify→deploy 闭环（闭环零重传，省 token）。
         """
         _tid = _new_trace_id()
         _t0 = time.perf_counter()
@@ -6344,6 +6345,18 @@ class Gateway:
                   elapsed=round(time.perf_counter() - _t0, 3))
             return {"ok": False, "stage": "proposal_store", "error": f"提案落档失败: {e}"}
 
+        # 【v2.3.0 任务 3.5 / DCD 议题八 C】统一 ref 寻址：与 propose_dsl 同款暂存 + 返回短 ref，
+        # 让 raw flow 也凭 ref 走 verify→deploy 闭环（闭环零重传），与 DSL 产物口径一致。
+        from .draft_store import stage_draft
+        ref = stage_draft({
+            "flow": flow,
+            "proposal_id": proposal_id,
+            "agent_id": agent_id,
+            "label": flow.get("label", ""),
+            "node_count": len(nodes),
+            "dsl": None,
+        })
+
         # P4 授权码自动部署
         auto_deploy_result = None
         if deploy_token and proposal_id:
@@ -6365,6 +6378,7 @@ class Gateway:
             # 无需等用户在 WebUI 部署后才知情。
             "flow_json": flow,
             "proposal_id": proposal_id,
+            "ref": ref,
             "label": flow.get("label", ""),
             "node_count": len(nodes),
             "auto_deploy": auto_deploy_result,

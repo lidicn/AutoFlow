@@ -62,11 +62,11 @@ v4.0.0 生态共存 ◄── AutoForge 成熟度（等外部信号，当前不�
 
 | # | 任务 | 依据 | 优先级 |
 |---|------|------|--------|
-| 3.1 | **C 全错编译反馈**：dsl_engine 编译一次返回所有错误 + 结构化 fix | 裁定七 C | 最高 |
-| 3.2 | **A ref 贯穿部署端**：deploy_proposal/deploy_raw 吃 ref，闭环零重传 | 裁定七 A | 高 |
+| 3.1 | **C 全错编译反馈**：dsl_engine 编译一次返回所有错误 + 结构化 fix（✅ 已收口） | 裁定七 C | 最高 |
+| 3.2 | **A ref 贯穿部署端**：deploy_proposal/deploy_raw 吃 ref，闭环零重传（✅ 已收口） | 裁定七 A | 高 |
 | 3.3 | **B will-pass 静态快检**：flow_linter 先跑，低级错秒回 | 裁定七 B | 中 |
 | 3.4 | **D token 预算条**：WebUI 展示本轮 agent token/轮次 | 裁定七 D | 低 |
-| 3.5 | 制品总线收口：DSL 产物与 raw flow 统一 ref 寻址 | 裁定八 C | 高 |
+| 3.5 | 制品总线收口：DSL 产物与 raw flow 统一 ref 寻址（✅ 已收口） | 裁定八 C | 高 |
 
 **出口**：Pro 典型任务平均 token/轮次下降（埋点取证）；verify→deploy 整份 flow 重传次数=0；全量回归零新增红。
 
