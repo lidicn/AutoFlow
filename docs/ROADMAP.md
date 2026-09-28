@@ -1,6 +1,8 @@
 # AutoFlow 版本路线图与开发计划（最终版）
 
-> **本文件是 AutoFlow 路线图的唯一有效版本**（2026-09-10 起，2026-09-14 重写定稿，2026-09-16 增补实体解析决策层）。
+> **本文件是 AutoFlow 路线图的详细记录版**（2026-09-10 起，2026-09-14 重写定稿，2026-09-16 增补实体解析决策层）。
+> ⚠️ **现行计划以 [`ROADMAP_DCD版_v2.2.md`](ROADMAP_DCD版_v2.2.md) 为准**（关键决策部 2026-09-28 出品，依据 `decisions/20260928-AutoFlow-10议题裁定.md`）；本文件保留为**历史与逐项决策细节**，两者冲突时以 DCD 版为准。此前的"唯一有效版本"表述已废止，避免双真相源。
+> 维护纪律：每完成一项打 ✅ 并注明 commit；新增项必须带验收门，无验收门不立项。
 > 旧路线图（`00_overview/ARCHITECTURE_AND_ROADMAP.md`、`03_dev/ROADMAP.md`）已作废，勿改。
 > 维护纪律：每完成一项打 ✅ 并注明 commit；新增项必须带验收门，无验收门不立项。
 > **本版最大变化**：明确 AutoFlow 在「AutoForge 已承接 agent 创作」后的定位——**AutoFlow 不再追 agent 主导创作，回归"面向人的 HA/NR 安全部署与验证网关"，分 Core（极客）/ Pro（小白）两档**。
@@ -108,6 +110,12 @@
 | 16 | ✅ **快照/回滚稳定化**（commit 4a181d8，2026-09-16） | 部署前自动整实例快照；失败/异常一键回滚（修掉 T011 逐条扁平 PUT 全 tab 归零坑，坚持 `POST /flows` 整包） | ✅ 回滚后状态 == 部署前；无归零 | — |
 | 17 | ⏸ **Arena 转正回归台**（B1 独立 staging NR 阻塞，未闭环） | 每次发版用 Arena 跑回归断言（不进生产，纯验收）；从"实验场"变"回归台" | ⏸ 发版阻塞于 Arena 回归红（B1 解除前禁止声称写类验证已闭环） | — |
 | 18 | ✅ **防假绿四件套 + 幽灵实体固化**（commit 8ebff3f，2026-09-17） | B20 空转 / B22 未激活分支 / F-R5-01 死锁 / F-R6.5 数值当字符串 + 幽灵实体检测，固化进 verify 闸门，不可旁路 | ✅ 针对性用例全绿，旁路即失败 | — |
+| 19 | ✅ **mimo 亮点① 草稿暂存（ref staging）**（2026-09-27，**DCD 议题四补立项**） | 新增 `draft_store.py`（进程内 1h TTL，内容幂等短 ref）；`propose_dsl` 返回 `ref`，`verify_flow(ref=...)` 凭 ref 取回 flow，**免 agent 重传整份 IR**（Pro token 优化地基） | ✅ `tests/test_draft_store.py` 8 例 + `tests/test_ref_fix.py` 4 例全绿；ref 幂等/TTL 过期/坏 ref 拦截齐备；stage `ref` 已登记进契约 `_STAGE_WHITELIST` | 已落地（省 token 地基） |
+| 20 | ✅ **mimo 亮点② 结构化 fix / candidates**（2026-09-27，**DCD 议题四补立项**） | `AutoFlowError` 增 `fix`/`candidates`/`hint` + `to_dict()` + `fix_patch()`；`_compile_error_envelope` 落 `errors.py`（单一真相源）；`entity_check`/`entity_whitelist`/编译错误信封带**机器可回填**的 fix | ✅ `entity_check`/`entity_whitelist` 失败信封带 `fix`；编译错误 `compile_error.fix` 非空；相关回归 94 passed / 0 failed | 已落地（省轮次） |
+
+> **v2.3.0「省 token 版」其余任务**（#19~20 之外的 token 优化与制品总线，即 DCD 议题七 C>A>B>D 与议题八）
+> **见 [`ROADMAP_DCD版_v2.2.md`](ROADMAP_DCD版_v2.2.md) §二「v2.3.0 省 token 版」任务卡 3.1~3.5**（不在此重复，避免双份维护漂移）。
+> 验收门（统一）：Pro 典型任务平均 token/轮次下降（埋点取证）；verify→deploy 整份 flow 重传次数=0；全量回归零新增红。
 
 ## 7. v3.0.0 —— 平台成熟（稳定面 + 可观测）
 
@@ -144,6 +152,9 @@
 - ❌ **替换 / 跨接 Node-RED 之外的执行后端**（保持 NR-bound）
 - ❌ **replace-all / delete-all 类工具**（安全不变量：爆炸半径上限，永不做）
 - ❌ **大型架构重构**（增量改进原则；v2.x 每个版本都是小步）
+  - ★ **DCD 背书（2026-09-28 · 议题六）**：本禁令已由关键决策部正式背书。**例外一律走 DCD 复议**——
+    「中等重构」的判定标准（命中任一须单独申请）：**触及 >3 个模块** / **变更公共接口** / **改验证语义**。
+    未经复议不得自行突破。（依据 `decisions/20260928-AutoFlow-10议题裁定.md` §议题六）
 - ❌ **多租户 / 企业网关**（单家庭单网关形态）
 - ❌ **OpenTelemetry 接入**（`_slog`/`_telemetry` 已够用）
 - ❌ **公网暴露**（只在 LAN + Tailscale 尾网）
@@ -172,6 +183,10 @@
 - **为何 vhass 不迁 pytest-homeassistant**：v1 重放 NR flow，pytest-homeassistant 只模拟 HA core 无 NR 运行时，域错配 + 维护期禁大重构；收益仅归 AutoForge。
 - **为何 v4 延后**：生态共存取决于 AutoForge 成熟度，现在定死会绑架两边；留接口、待拍板。
 - **为何补"实体解析决策层"（2026-09-16）**：架构评估确认 `resolve_entity` 检索层已稳（网关侧、不耗 token、fail-closed、`possible_states` 防猜域），但 catalog 缺 `integration`/`connectivity`/`health` 字段，致用户三大痛点（多集成双 entity_id 无优选、弱信号无降权、怪异设备易混淆）未解。属"补决策智能"而非重做检索，符合低成本增量；P0 机械零风险、可随 v2.2 速赢插队。遥测（#15）优先级最高——无它则"成功率"永远拍脑袋、优选/降权效果无法验证。
+- **★ `c4_replay_semantics` 终裁（2026-08-15 定稿，2026-09-28 DCD 复核确认 · 议题一）**：G2「重放归零」按 **`fail_closed`** 定稿——0 个 HA 意图 + 0 个外部调用被重放 = 什么都没验证，静默 pass 即假绿。`warn_only` **经 env `AUTOFLOW_REPLAY_ZERO_POLICY` 保留作 staging 调试逃生**，且其语义已非"放行"（verdict 降级为「未充分验证」），故不删除。证据：`gateway.py:868-883`（`_replay_zero_policy`）、`gateway.py:7215-7222`（处置分支）。
+  ⚠️ **订正**：此前部分记忆/摘要把本项记为"待裁决项"，**属过期表述，已更正**——本文应以本条目为准（`TI 3 红定性`时对 memory/会话摘要同步核实）。
+- **★ 大改禁令 DCD 背书（2026-09-28 · 议题六）**：见 §10「大型架构重构」条目。命中「>3 模块 / 公共接口 / 验证语义」任一即视为中等重构，须单独提 DCD 复议，不得自行推进。
+- **★ 文档双真相源处置（2026-09-28）**：本文件降为详细记录版，现行计划以 `ROADMAP_DCD版_v2.2.md` 为准（见文首说明）。此举起因于 DCD 复核发现三处前提错误（议题五 deploy 技能路径实际为用户级 `~/.workbuddy/skills/autoflow-nas-deploy/SKILL.md`、议题十 `knowledge_evo.py` 已接活、议题二工具数为 27 非 28），说明**仅凭记忆/摘要易漂移，发版前须回源码核实**。
 
 ---
 
