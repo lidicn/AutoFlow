@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>验证证据交付卡 · AutoFlow</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    :root {
+      --bg: #f5f7fa; --card: #ffffff; --ink: #1f2937; --muted: #6b7280;
+      --line: #e5e7eb; --green: #16a34a; --orange: #f59e0b; --red: #dc2626; --blue: #2563eb;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink);
+      font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+    .wrap { max-width: 1000px; margin: 0 auto; padding: 24px 20px 48px; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    .sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+      padding: 18px 20px; margin-bottom: 18px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+    .card h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+    textarea { width: 100%; min-height: 150px; font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-size: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 10px; resize: vertical; }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+    button.go { background: var(--blue); color: #fff; border: 0; border-radius: 8px;
+      padding: 9px 18px; font-size: 13px; cursor: pointer; }
+    button.go:disabled { opacity: .5; cursor: default; }
+    input.ref { flex: 1; min-width: 200px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 13px; }
+    .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+    .pill.ok { background: #dcfce7; color: var(--green); }
+    .pill.warn { background: #fef3c7; color: var(--orange); }
+    .pill.bad { background: #fee2e2; color: var(--red); }
+    .kv { display: grid; grid-template-columns: 160px 1fr; gap: 6px 12px; font-size: 13px; }
+    .kv .k { color: var(--muted); }
+    .note { font-size: 13px; color: var(--ink); background: #f8fafc; border-left: 3px solid var(--blue);
+      padding: 8px 12px; margin: 6px 0; border-radius: 0 6px 6px 0; }
+    .note.bad { border-left-color: var(--red); }
+    .note.warn { border-left-color: var(--orange); }
+    .err { color: var(--red); font-size: 13px; }
+    .muted { color: var(--muted); }
+    .layer { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 6px 0; }
+    .layer .lh { display: flex; justify-content: space-between; align-items: center; font-size: 13px; font-weight: 600; }
+    .layer .lb { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    code { background: #f1f5f9; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+    a.back { color: var(--blue); font-size: 13px; text-decoration: none; }
+    .badge-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>🔍 验证证据交付卡 <span class="muted" style="font-size:13px;font-weight:400">· 议题九「信任但验证」</span></h1>
+    <div class="sub">
+      让人看到「绿灯是怎么验出来的」，不盲信黑盒。粘贴一份 Node-RED flow JSON（或填 <code>ref</code>），
+      后端跑与 deploy_raw 同源的只读质量闸，渲染四类证据：<b>重放是否真实发生</b> /
+      <b>验证覆盖项</b> / <b>不可靠设备标注</b> / <b>防假绿 verdict</b>。需先登录主 WebUI 后在本标签页打开。
+    </div>
+
+    <div class="card">
+      <h2>输入</h2>
+      <textarea id="flow" placeholder='粘贴 flow JSON，例如 {"id":"f","label":"l","nodes":[...]}'></textarea>
+      <div class="row">
+        <input class="ref" id="ref" placeholder="或填 ref（如 af:xxxxxxxx），留空则用上方 JSON" />
+        <label style="font-size:13px"><input type="checkbox" id="rungate" checked /> 跑 vhass 重放闸</label>
+        <button class="go" id="btn-go">验证</button>
+      </div>
+      <div id="status" class="err" style="margin-top:8px"></div>
+    </div>
+
+    <div id="evidence" style="display:none">
+      <div class="card">
+        <h2>① 总 verdict（防假绿）</h2>
+        <div class="badge-row" id="verdict-badges"></div>
+        <div id="verdict-notes"></div>
+      </div>
+
+      <div class="card">
+        <h2>② 重放是否真实发生</h2>
+        <div class="kv" id="replay-kv"></div>
+      </div>
+
+      <div class="card">
+        <h2>③ 验证覆盖项（各闸层是否真跑）</h2>
+        <div id="layers"></div>
+      </div>
+
+      <div class="card">
+        <h2>④ 不可靠设备标注</h2>
+        <div id="unreliable"></div>
+      </div>
+
+      <div class="card">
+        <h2>附带：lint 概览（仅计数，不列几十项）</h2>
+        <div class="kv" id="lint-kv"></div>
+      </div>
+    </div>
+
+    <div style="margin-top:8px"><a class="back" href="/">← 返回主控制台</a></div>
+  </div>
+
+  <script>
+    const fmt = (n) => (n == null ? "—" : Number(n).toLocaleString("en-US"));
+    const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c =>
+      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const pill = (txt, cls) => '<span class="pill ' + cls + '">' + esc(txt) + '</span>';
+    const verdictCls = (v) => v === "pass" ? "ok" : v === "warn" ? "warn" : "bad";
+
+    async function go() {
+      const status = document.getElementById("status");
+      status.textContent = "";
+      const btn = document.getElementById("btn-go");
+      btn.disabled = true;
+      const flow = document.getElementById("flow").value.trim();
+      const ref = document.getElementById("ref").value.trim();
+      const rungate = document.getElementById("rungate").checked;
+      const body = {};
+      if (flow) body.flow_json = flow;
+      if (ref) body.ref = ref;
+      body.run_gate = rungate;
+      try {
+        const r = await fetch("/api/verify-flow", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(body),
+        });
+        const data = await r.json();
+        if (!r.ok || !data.ok) throw new Error(data.error || ("HTTP " + r.status));
+        render(data);
+      } catch (e) {
+        status.textContent = "验证失败：" + e;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function render(d) {
+      document.getElementById("evidence").style.display = "block";
+      const g = d.gate || {};
+      const layers = g.layers || {};
+
+      // ① 总 verdict
+      const vb = document.getElementById("verdict-badges");
+      vb.innerHTML = pill("verdict: " + (d.verdict || "?"), verdictCls(d.verdict))
+        + " " + pill("passed: " + (d.passed ? "true" : "false"), d.passed ? "ok" : "bad")
+        + " " + pill("deployed: " + (d.deployed ? "是" : "否(只读)"), "ok");
+      const vn = document.getElementById("verdict-notes");
+      const notes = g.notes || [];
+      vn.innerHTML = notes.length ? notes.map(n =>
+        '<div class="note ' + (String(n).includes("硬拦") || String(n).includes("block") ? "bad"
+          : String(n).includes("warn") ? "warn" : "") + '">' + esc(n) + '</div>').join("")
+        : '<div class="muted">无额外说明</div>';
+
+      // ② 重放是否真实发生
+      const vs = layers.vhass_staging || {};
+      const rk = document.getElementById("replay-kv");
+      const replayFlags = vs.fully_verified ? "是（fully_verified）" : (vs.ran ? "跑过但未 fully_verified" : "未跑");
+      rk.innerHTML = [
+        ["重放层 ran", vs.ran ? "是" : "否"],
+        ["真实重放(fully_verified)", vs.fully_verified ? "是" : "否"],
+        ["replay_zero(零状态策略)", String(vs.replay_zero)],
+        ["replay_zero_policy", esc(vs.replay_zero_policy || "—")],
+        ["replayed_services", (vs.replayed_services || []).join(", ") || "—"],
+        ["external_calls", (vs.external_calls || []).join(", ") || "—"],
+        ["dead_branches", (vs.dead_branches || []).join(", ") || "—"],
+        ["重放层 verdict", esc(vs.verdict || "—")],
+      ].map(([k, v]) => '<div class="k">' + k + '</div><div>' + esc(v) + '</div>').join("");
+
+      // ③ 验证覆盖项（各闸层）
+      const ld = document.getElementById("layers");
+      const layerOrder = [["vhass_staging", "vhass 重放闸"], ["e2e_trace", "e2e 实机追踪"],
+        ["structure_canary", "结构金丝雀"]];
+      ld.innerHTML = layerOrder.map(([key, name]) => {
+        const L = layers[key] || {};
+        const ran = L.ran;
+        const verdict = L.verdict || (ran === false ? "skipped" : "?");
+        const cls = ran ? verdictCls(verdict) : "warn";
+        const detail = L.detail ? esc(L.detail) : "";
+        return '<div class="layer"><div class="lh"><span>' + name
+          + '</span>' + pill(ran ? ("ran · " + verdict) : "skipped", cls) + '</div>'
+          + '<div class="lb">' + (detail || (ran ? "已真跑" : "未运行（调用方未要求或无可验项）")) + '</div></div>';
+      }).join("");
+
+      // ④ 不可靠设备
+      const ur = document.getElementById("unreliable");
+      const rel = (d.entity_reliability || []).filter(x => x.unreliable);
+      if (!rel.length) {
+        ur.innerHTML = '<span class="pill ok">无不可靠设备</span> <span class="muted">（自动化不会假绿）</span>';
+      } else {
+        ur.innerHTML = rel.map(x => '<div class="note warn">' + esc(x.entity_id)
+          + '：' + esc(x.reason || "不可靠") + '</div>').join("");
+      }
+
+      // 附带 lint 概览
+      const lk = document.getElementById("lint-kv");
+      lk.innerHTML = [
+        ["lint error 数", fmt(d.lint_error_count)],
+        ["lint warning 数", fmt(d.lint_warning_count)],
+        ["validation 项", fmt((d.validation || []).length)],
+      ].map(([k, v]) => '<div class="k">' + k + '</div><div>' + esc(v) + '</div>').join("");
+    }
+
+    document.getElementById("btn-go").addEventListener("click", go);
+  </script>
+</body>
+</html>

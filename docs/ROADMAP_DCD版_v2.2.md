@@ -73,6 +73,16 @@ v4.0.0 生态共存 ◄── AutoForge 成熟度（等外部信号，当前不�
 > **3.4 实施说明（token 预算条）**：后端埋点 `TokenStatsStore`（`token_stats.py`）+ `_record_token` 已在 WebUI REST Pro 路径（propose-dsl / deploy-raw）落地，并注册 `/api/token-stats`（WebUI 内部）与 `/api/core/token-stats`（Pro API）两个读端点；前端 SPA 已有「📊 Token 统计」页签（`index.html` `data-tab="token_stats"`，由外部构建的 app.js 渲染）。本轮在后端 `get_stats` 追加向后兼容的软预算字段（`budget` / `budget_used_pct` / `today_estimated_tokens` / `today_rounds≈当天调用次数`），并新增**自包含轻量看板** `webui/static/token_stats.html`（直接访 `/static/token_stats.html`，无需改主 SPA 打包）：渲染今日预算占用条、按 agent 拆分（轮次/估算 token）、近 7 天趋势。
 > **已知缺口（留给议题二「数据先行」统一埋点）**：当前 `_record_token` 仅覆盖 WebUI REST Pro 路径，agent 经 MCP 工具（`autoflow_*`）跑的流量尚未计入；议题二要求「埋点各工具真实调用量 30 天」，届时一并把 MCP 路径纳入，看板数据即完整。
 
+### 议题九 验证证据交付卡（独立小版本，依赖 v2.3.0 verify 后端，✅ 已收口）
+
+DCD 裁定「做，纯前端渲染，依赖 verify 后端数据已齐」。`verify_flow` 早已返回 verdict/gate/validation/lint/entity_reliability/防假绿（后端数据齐），本议题即把「绿灯怎么验出来的」呈现给使用者，不盲信黑盒；展示防过载——只展示 4 类：① 重放是否真实发生 ② 验证覆盖项 ③ 不可靠设备标注 ④ 防假绿 verdict。
+
+实施（前端为外部构建 app.js、仓库内无源码，故交付为「自包含看板页 + 薄后端端点」，与 3.4 同策略）：
+- 新增 WebUI 端点 `POST /api/verify-flow`（session 认证，只读）— `webui.py::verify_flow_view`，薄封装 `gw.verify_flow` 全量证据；
+- 新增自包含看板 `webui/static/verify_evidence.html`（直访 `/static/verify_evidence.html`）— 贴 flow_json 或 ref → 渲染上述 4 类证据 + lint 概览；
+- 新增 `tests/test_verify_flow_webui_endpoint.py`（2 例：证据结构断言 + R17 静态快检秒回经端点透出）；
+- 注：SPA（app.js）原生「验证证据卡」若后续由外部构建补上，可复用同一 `/api/verify-flow` 端点，不必另起接口。
+
 ### v3.0.0 工具面收敛（等 v2.3.0 埋点数据，不排期）
 
 - 用 30 天调用量数据决定删哪些工具（数据先行，非直觉）；

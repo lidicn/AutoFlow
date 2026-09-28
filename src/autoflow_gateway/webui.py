@@ -1607,6 +1607,28 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         except Exception as e:
             return _js({"ok": False, "error": str(e), "errors": [], "warnings": [], "total_issues": 0})
 
+    # ── 验证证据交付卡后端（议题九）──
+    async def verify_flow_view(request: Request):
+        """WebUI 验证证据交付卡：跑与 deploy_raw 同源质量闸（只读，绝不部署），返回结构化验证证据。
+
+        议题九核心「信任但验证」：让人看到「绿灯是怎么验出来的」，不盲信黑盒。
+        同一份结构化结果既供本端点驱动的独立看板页（/static/verify_evidence.html）渲染，
+        也可被 SPA 的验证证据卡复用。返回体即 gw.verify_flow 全量证据（含 gate.layers /
+        entity_reliability / lint / validation / 防假绿 notes）。"""
+        b = await _body(request)
+        flow_json = b.get("flow_json")
+        ref = b.get("ref") or None
+        run_gate = b.get("run_gate", True)
+        if not flow_json and not ref:
+            return _js({"ok": False, "error": "flow_json 或 ref 至少提供一个"}, 400)
+        try:
+            result = gw.verify_flow(
+                flow_json if flow_json is not None else {},
+                agent_id="webui", run_gate=bool(run_gate), ref=ref)
+            return _js(result)
+        except Exception as e:
+            return _js({"ok": False, "error": str(e)}, 500)
+
     async def lab_deploy(request: Request):
         """Lab: 直接部署 flow 到 NR（不需要提案审批）。"""
         b = await _body(request)
@@ -3753,6 +3775,8 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
         # Lab 沙盒部署（缺陷D修复）
         Route("/api/lab/validate", lab_validate, methods=["POST"]),
         Route("/api/lab/deploy", lab_deploy, methods=["POST"]),
+        # 验证证据交付卡（议题九）：只读质量验证，返回结构化证据
+        Route("/api/verify-flow", verify_flow_view, methods=["POST"]),
         Route("/api/lab/deploys", lab_deploys, methods=["GET"]),
         # 竞技场（v2.0）
         Route("/api/arena/arenas", arena_list, methods=["GET"]),
