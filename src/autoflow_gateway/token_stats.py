@@ -116,6 +116,7 @@ class TokenStatsStore:
             "daily": [],
             "by_agent": {},
             "by_mode": {},
+            "by_endpoint": {},
         }
 
         for i in range(days):
@@ -148,6 +149,16 @@ class TokenStatsStore:
                 result["by_mode"][mode]["calls"] += stats["calls"]
                 result["by_mode"][mode]["input_chars"] += stats["input_chars"]
                 result["by_mode"][mode]["output_chars"] += stats["output_chars"]
+
+            # 【议题二 · 埋点取证】按工具/端点聚合：v3.0 工具面收敛要靠「各工具真实调用量」
+            # 决定删哪些工具（DCD 裁定：数据先行，不靠直觉）。MCP 工具名即 endpoint。
+            for endpoint, stats in day_data.get("by_endpoint", {}).items():
+                if endpoint not in result["by_endpoint"]:
+                    result["by_endpoint"][endpoint] = {
+                        "calls": 0, "input_chars": 0, "output_chars": 0}
+                result["by_endpoint"][endpoint]["calls"] += stats["calls"]
+                result["by_endpoint"][endpoint]["input_chars"] += stats["input_chars"]
+                result["by_endpoint"][endpoint]["output_chars"] += stats["output_chars"]
 
         result["estimated_tokens"] = (result["total_input_chars"] + result["total_output_chars"]) // 4
         result["avg_tokens_per_call"] = result["estimated_tokens"] // max(result["total_calls"], 1)

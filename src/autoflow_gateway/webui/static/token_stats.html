@@ -74,6 +74,18 @@
     </div>
 
     <div class="card">
+      <h2>按工具拆分（近 30 天调用量）<span class="muted" style="font-size:12px;font-weight:400">· 议题二取证</span></h2>
+      <div class="sub" style="margin-bottom:10px">
+        各工具真实调用量 —— v3.0 工具面收敛的依据（DCD 裁定：数据先行，不靠直觉删工具）。
+        MCP 工具名即统计端点；观察满 30 天再决策删留。
+      </div>
+      <table id="tool-table">
+        <thead><tr><th>工具 / 端点</th><th class="num">调用次数</th><th class="num">估算 Token</th><th class="num">输入字符</th><th class="num">输出字符</th></tr></thead>
+        <tbody><tr><td colspan="5" class="muted">加载中…</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="card">
       <h2>近 7 天趋势</h2>
       <div id="trend"></div>
     </div>
@@ -94,12 +106,13 @@
       const btn = document.getElementById("btn-refresh");
       btn.disabled = true;
       try {
-        const [today, week] = await Promise.all([
+        const [today, week, month] = await Promise.all([
           fetch("/api/token-stats?days=1").then(r => r.ok ? r.json() : Promise.reject(r.status)),
           fetch("/api/token-stats?days=7").then(r => r.ok ? r.json() : Promise.reject(r.status)),
+          fetch("/api/token-stats?days=30").then(r => r.ok ? r.json() : Promise.reject(r.status)),
         ]);
-        if (!today.ok || !week.ok) throw new Error("数据返回异常");
-        render(today.stats, week.stats);
+        if (!today.ok || !week.ok || !month.ok) throw new Error("数据返回异常");
+        render(today.stats, week.stats, month.stats);
       } catch (e) {
         status.style.display = "block";
         status.innerHTML = '<div class="err">加载失败：' + e + '。请确认已登录主 WebUI（同一浏览器会话），'
@@ -109,7 +122,7 @@
       }
     }
 
-    function render(t, w) {
+    function render(t, w, m) {
       const budget = t.budget || 200000;
       const todayTok = t.today_estimated_tokens || 0;
       const pct = t.budget_used_pct || 0;
@@ -136,6 +149,22 @@
           '<tr><td>' + esc(a.id) + '</td><td class="num">' + fmt(a.calls) + '</td>'
           + '<td class="num">' + fmt(a.tok) + '</td><td class="num">' + fmt(a.inC)
           + '</td><td class="num">' + fmt(a.outC) + '</td></tr>').join("");
+      }
+
+      // 按工具（近 30 天）— 议题二取证：v3.0 工具面收敛的删留依据
+      const tools = Object.entries((m && m.by_endpoint) || {})
+        .map(([name, s]) => ({ name, calls: s.calls,
+          tok: (s.input_chars + s.output_chars) / 4 | 0,
+          inC: s.input_chars, outC: s.output_chars }))
+        .sort((a, b) => b.calls - a.calls);
+      const ttb = document.querySelector("#tool-table tbody");
+      if (!tools.length) {
+        ttb.innerHTML = '<tr><td colspan="5" class="muted">近 30 天暂无记录（埋点刚启用或尚无调用）</td></tr>';
+      } else {
+        ttb.innerHTML = tools.map(x =>
+          '<tr><td>' + esc(x.name) + '</td><td class="num">' + fmt(x.calls) + '</td>'
+          + '<td class="num">' + fmt(x.tok) + '</td><td class="num">' + fmt(x.inC)
+          + '</td><td class="num">' + fmt(x.outC) + '</td></tr>').join("");
       }
 
       // 7 天趋势

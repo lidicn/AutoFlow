@@ -2738,6 +2738,113 @@ async def _send_jsonrpc_error(send, req_id, code, message):
     await send({"type": "http.response.body", "body": payload, "more_body": False})
 
 # ───────────── 组合应用（MCP + WebUI + 鉴权）─────────────
+# ─────────────────────────────────────────────────────────────
+# 【议题二 · 埋点取证】MCP 工具路径 token / 调用量埋点
+# ─────────────────────────────────────────────────────────────
+# 背景：既有埋点（webui._record_token）只覆盖 WebUI REST Pro 路径（propose-dsl /
+# deploy-raw），agent 经 MCP 工具（autoflow_*）跑的流量完全没计入 → v2.3.0 出口指标
+# 「Pro token/轮次下降」无法举证，v3.0 工具面收敛也缺「各工具真实调用量」数据
+# （DCD 议题二裁定：数据先行，不靠直觉删工具）。
+#
+# 做法：全部 @mcp.tool() 注册完成后，统一给每个 Tool.fn 包一层（单一接缝覆盖全部工具）。
+#   · functools.wraps 保留函数元数据/签名（绝不改变工具对外契约与参数校验）；
+#   · 按 sync/async 分别包装——同步工具若被包成 async，框架会拿到协程而非结果；
+#   · 埋点全程 try/except 静默，绝不影响工具行为、返回值与异常传播；
+#   · env AUTOFLOW_MCP_TOKEN_STATS=0 可关（便于测试/排障）；幂等，重复导入不重复计数。
+def _mcp_token_stats_enabled() -> bool:
+    return os.environ.get("AUTOFLOW_MCP_TOKEN_STATS", "1") != "0"
+
+
+def _mcp_agent_id() -> str:
+    try:
+        agent = get_current_agent()
+        return getattr(agent, "agent_id", None) or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _mcp_payload_size(value) -> int:
+    """估算负载字符数（≈ token 口径：字符数/4）。"""
+    try:
+        if isinstance(value, (str, bytes)):
+            return len(value)
+        return len(json.dumps(value, ensure_ascii=False, default=str))
+    except Exception:
+        try:
+            return len(str(value))
+        except Exception:
+            return 0
+
+
+def _mcp_record_token(tool_name: str, agent_id: str, input_chars: int,
+                      output_chars: int, success: bool = True) -> None:
+    """记录一次 MCP 工具调用（best-effort，任何异常一律静默）。"""
+    try:
+        from .token_stats import TokenStatsStore
+        from .config import get_config
+        cfg = get_config()
+        TokenStatsStore(os.path.join(cfg.data_dir, "token_stats")).record(
+            tool_name, agent_id, input_chars, output_chars, "mcp", success)
+    except Exception:
+        pass
+
+
+def _instrument_mcp_token_stats() -> None:
+    """给 mcp / mcp_admin 的全部工具包埋点（幂等：已包过的跳过）。"""
+    if not _mcp_token_stats_enabled():
+        return
+    import functools
+    import inspect
+
+    for server in (mcp, mcp_admin):
+        tm = getattr(server, "_tool_manager", None)
+        if tm is None:
+            continue
+        try:
+            tools = tm.list_tools()
+        except Exception:
+            continue
+        for tool in tools:
+            orig = getattr(tool, "fn", None)
+            if orig is None or getattr(orig, "_af_token_instrumented", False):
+                continue
+            name = getattr(tool, "name", None) or getattr(orig, "__name__", "unknown")
+            try:
+                if inspect.iscoroutinefunction(orig):
+                    @functools.wraps(orig)
+                    async def _wrapped(*args, _af_orig=orig, _af_name=name, **kwargs):
+                        _in_chars = _mcp_payload_size(args) + _mcp_payload_size(kwargs)
+                        try:
+                            res = await _af_orig(*args, **kwargs)
+                        except Exception:
+                            _mcp_record_token(_af_name, _mcp_agent_id(), _in_chars, 0, False)
+                            raise
+                        _mcp_record_token(_af_name, _mcp_agent_id(), _in_chars,
+                                          _mcp_payload_size(res))
+                        return res
+                else:
+                    @functools.wraps(orig)
+                    def _wrapped(*args, _af_orig=orig, _af_name=name, **kwargs):
+                        _in_chars = _mcp_payload_size(args) + _mcp_payload_size(kwargs)
+                        try:
+                            res = _af_orig(*args, **kwargs)
+                        except Exception:
+                            _mcp_record_token(_af_name, _mcp_agent_id(), _in_chars, 0, False)
+                            raise
+                        _mcp_record_token(_af_name, _mcp_agent_id(), _in_chars,
+                                          _mcp_payload_size(res))
+                        return res
+
+                _wrapped._af_token_instrumented = True
+                tool.fn = _wrapped
+            except Exception:
+                continue
+
+
+# 模块导入即生效（此时全部 @mcp.tool() 已注册完毕）；幂等，重复导入不会重复计数。
+_instrument_mcp_token_stats()
+
+
 def build_app(cfg=None, with_webui: bool = True, gateway: Gateway = None):
     """返回一个可交给 uvicorn 的 ASGI app：MCP 挂 /mcp（用户面，按 mode 分层显隐工具）、
     /mcp-white（/mcp 的兼容别名，专家旧端点）、/mcp-admin（管理面，仅 developer）三端点，
