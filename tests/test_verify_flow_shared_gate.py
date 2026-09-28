@@ -48,13 +48,19 @@ def test_verify_flow_calls_shared_gate():
     gw = Gateway()
     log = []
     _install_spy(gw, log)
+    # 注：本测试验证「verify_flow 汇聚到共享 run_staging_gate」。3.3 will-pass 静态快检
+    # 会在 lint/schema 出现硬伤时【秒回】跳过重放，故此处必须用「无静态硬伤」的干净流作为
+    # 抵达闸门的载体（用含 R13 孤儿节点的流会被快检提前返回，到不了闸门，属预期行为而非缺陷）。
     flow = {"id": "f", "label": "l", "nodes": [
-        {"id": "a", "type": "api-call-service", "z": "t", "server": "s",
+        {"id": "n1", "type": "inject", "z": "t", "wires": [["svc"]]},
+        {"id": "svc", "type": "api-call-service", "z": "t", "server": "s",
          "domain": "light", "service": "turn_on", "entityId": ["light.x"],
-         "data": "", "wires": [[]]},
+         "data": {}, "wires": [["n2"]]},
+        {"id": "n2", "type": "debug", "z": "t", "wires": []},
     ]}
     r = gw.verify_flow(flow, run_gate=True)
     assert r["ok"] is True
+    assert r.get("fast_fail") is not True
     assert len(log) == 1, log
     assert log[0]["flow"] == flow                 # verify_flow 走 flow= 直通口（浅拷贝，结构等价）
     # 等价性：verify_flow 与直接调 run_staging_gate(flow=同一份) 命中的是同一函数
