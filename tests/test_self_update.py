@@ -201,6 +201,44 @@ class SelfUpdateTest(unittest.TestCase):
         self.assertIn("不可达", chk.get("reason", ""))
         self.assertNotEqual(chk.get("reason"), "远程无可用版本 tag")
 
+    def test_fallback_to_mirror_when_primary_empty(self):
+        # 主远端（默认 github.com）不可达返回空时，update_check 应自动尝试
+        # ghproxy.net 兜底镜像并列出版本，而不是退化成「无可用版本 tag」。
+        # 自动兜底只对默认主远端生效——用户显式设置的 AF_GIT_REMOTE 不自动跳镜像。
+        real = self_update.list_remote_tags
+
+        def fake(repo, remote_url=None):
+            if remote_url is None or remote_url == self_update.DEFAULT_REMOTE:
+                return []  # 主远端不可达
+            return [{"tag": "v1.0.1", "commit": self.tag_commit}]  # 兜底镜像可达
+
+        self_update.list_remote_tags = fake
+        os.environ.pop("AF_GIT_REMOTE", None)  # 模拟默认主远端（github.com）
+        try:
+            chk = self_update.update_check()
+            self.assertTrue(chk["available"], chk)
+            self.assertEqual(chk["target_ref"], "v1.0.1")
+            self.assertEqual(chk["remote_used"], self_update.FALLBACK_MIRRORS[0])
+        finally:
+            self_update.list_remote_tags = real
+
+    def test_no_auto_fallback_for_custom_remote(self):
+        # 用户显式设置 AF_GIT_REMOTE（即便是坏的）时，不自动跳 ghproxy 兜底
+        real = self_update.list_remote_tags
+
+        def fake(repo, remote_url=None):
+            # 任一远端都返回空：自定义远端不可达，且不应触发兜底
+            return []
+
+        self_update.list_remote_tags = fake
+        os.environ["AF_GIT_REMOTE"] = os.path.join(self.tmp, "no-such-repo")
+        try:
+            chk = self_update.update_check()
+            self.assertFalse(chk["available"])
+            self.assertEqual(chk["remote_used"], os.path.join(self.tmp, "no-such-repo"))
+        finally:
+            self_update.list_remote_tags = real
+
 
 if __name__ == "__main__":
     unittest.main()

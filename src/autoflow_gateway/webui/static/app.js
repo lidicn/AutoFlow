@@ -4591,17 +4591,14 @@ async function loadUpdate() {
         </div>
         <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
           ${d.available ? `<button class="btn primary" id="doUpdate">更新到 ${esc(d.target_ref || "最新版")}</button>` : ""}
-          <select id="updateMirror" class="input" style="max-width:280px">
-            <option value="">GitHub 直连（默认）</option>
-            <option value="https://ghproxy.com/https://github.com/lidicn/AutoFlow.git">ghproxy 镜像</option>
-            <option value="https://mirror.ghproxy.com/https://github.com/lidicn/AutoFlow.git">ghproxy 备用</option>
-            <option value="https://gitclone.com/github.com/lidicn/AutoFlow.git">gitclone 镜像</option>
-            <option value="https://kkgithub.com/lidicn/AutoFlow.git">kkgithub 镜像</option>
-            <option value="https://hub.gitmirror.com/https://github.com/lidicn/AutoFlow.git">gitmirror 镜像</option>
+          <select id="updateMirror" class="input" style="max-width:300px">
+            <option value="https://ghproxy.net/https://github.com/lidicn/AutoFlow.git" selected>ghproxy.net 镜像（推荐·国内默认）</option>
+            <option value="">GitHub 直连（海外）</option>
+            <option value="https://hub.gitmirror.com/https://github.com/lidicn/AutoFlow.git">gitmirror 镜像（备选）</option>
             <option value="__custom__">自定义镜像…</option>
           </select>
-          <input type="text" id="updateMirrorCustom" class="input" style="max-width:280px;display:none;margin-top:6px" placeholder="输入镜像 URL，如 https://xxx/https://github.com/...">
-          <span class="meta" id="mirrorHint" style="font-size:12px;color:var(--text-muted)">国内网络建议选镜像；若全部失败可手动 SCP 离线更新</span>
+          <input type="text" id="updateMirrorCustom" class="input" style="max-width:300px;display:none;margin-top:6px" placeholder="输入镜像 URL，如 https://xxx/https://github.com/...">
+          <span class="meta" id="mirrorHint" style="font-size:12px;color:var(--text-muted)">国内网络已默认走 ghproxy.net 镜像；自更新走 git tag，无需手动部署。</span>
         </div>
         <div id="updateProgress" style="margin-top:12px;display:none">
           <div class="tutorial-progress-bar" style="height:8px;margin-bottom:6px"><div class="tutorial-progress-fill" id="updateProgressFill" style="width:0%"></div></div>

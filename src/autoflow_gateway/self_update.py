@@ -31,6 +31,13 @@ TAG_RE = re.compile(r"^v\d+\.\d+")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DEFAULT_REMOTE = "https://github.com/lidicn/AutoFlow.git"
 
+# 中国大陆网络兜底镜像：主远端（github.com）不可达时自动尝试。
+# 仅 ghproxy.net 经 NAS 实测可达；其余镜像（ghproxy.com / mirror.ghproxy.com /
+# gitclone.com / kkgithub.com / hub.gitmirror.com）实测从 NAS 不可达，不列入自动兜底。
+# 自动兜底仅对「默认主远端」生效——用户显式设置的 AF_GIT_REMOTE 视为有意指定，
+# 失败不自动跳镜像（尊重其配置，也避免测试误用）。
+FALLBACK_MIRRORS = ["https://ghproxy.net/https://github.com/lidicn/AutoFlow.git"]
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -124,23 +131,28 @@ def _dirty_reason(st: Dict) -> str:
     return "；".join(why) or "活树状态未知"
 
 
-def _remote_probe() -> str:
-    """探测远端可达性。返回空串表示可达；否则返回人类可读原因。
+def _probe_url(url: str) -> str:
+    """探测单个远端可达性。返回空串表示可达；否则返回人类可读原因。
 
     用于区分「网络不通」与「远端真的没发版」——两者在旧实现里都退化成
     「远程无可用版本 tag」，把网络故障伪装成产品状态，误导排查方向。
     """
     try:
         subprocess.run(
-            ["git", "-c", "safe.directory=*", "ls-remote", "--heads", _remote_url()],
+            ["git", "-c", "safe.directory=*", "ls-remote", "--heads", url],
             capture_output=True, text=True, env=_git_env(), check=True, timeout=30,
         )
         return ""
     except subprocess.TimeoutExpired:
-        return (f"远端 {_remote_url()} 不可达（ls-remote 超时 30 秒）。"
-                f"NAS 所在网络可能不通 GitHub，请改用国内镜像或改用 scp 手工部署。")
+        return (f"远端 {url} 不可达（ls-remote 超时 30 秒）。"
+                f"请检查网络或切换其他镜像。")
     except Exception as e:
-        return f"远端 {_remote_url()} 不可达：{e}"
+        return f"远端 {url} 不可达：{e}"
+
+
+def _remote_probe() -> str:
+    """探测默认主远端可达性（见 _probe_url）。"""
+    return _probe_url(_remote_url())
 
 
 def _allow_shas() -> List[str]:
@@ -153,16 +165,18 @@ def _ver_key(tag: str) -> List[int]:
     return [int(x) for x in nums] if nums else [0]
 
 
-def list_remote_tags(repo: str) -> List[Dict[str, str]]:
+def list_remote_tags(repo: str, remote_url: Optional[str] = None) -> List[Dict[str, str]]:
     """返回远程版本 tag 列表 [{tag, commit}]（按版本倒序）。
 
     无法联网 / git 缺失时返回空列表（调用方据此判定「无可用更新」而非崩溃）。
+    remote_url 可显式指定远端（用于主远端失败后的兜底镜像探测）。
     """
     if not _git_present():
         return []
+    url = remote_url or _remote_url()
     try:
         r = subprocess.run(
-            ["git", "-c", "safe.directory=*", "ls-remote", "--tags", _remote_url()],
+            ["git", "-c", "safe.directory=*", "ls-remote", "--tags", url],
             capture_output=True, text=True, env=_git_env(), check=True, timeout=30,
         )
     except Exception:
@@ -229,6 +243,18 @@ def update_check(ref: Optional[str] = None) -> Dict:
     cur = current_commit(repo)
     cur_ver = read_version()
     tags = list_remote_tags(repo)
+    remote_used = _remote_url()
+    # 主远端（默认 github.com）不可达 → 自动尝试兜底镜像，别把网络故障伪装成「无发版」
+    auto_fallback = (remote_used == DEFAULT_REMOTE)
+    if not tags and auto_fallback:
+        for fm in FALLBACK_MIRRORS:
+            if fm == remote_used:
+                continue
+            ft = list_remote_tags(repo, fm)
+            if ft:
+                tags = ft
+                remote_used = fm
+                break
     target_ref, target_commit, err = _resolve_target(ref, tags)
     if err:
         reason = err
@@ -239,6 +265,7 @@ def update_check(ref: Optional[str] = None) -> Dict:
                 "reason": reason, "current": cur, "current_version": cur_ver,
                 "latest_tag": (tags[0]["tag"] if tags else None),
                 "target_ref": target_ref, "target_commit": target_commit, "tags": tags,
+                "remote_used": remote_used,
                 "repo_state": _repo_state(repo), "safe_to_update": False}
     latest_tag = tags[0]["tag"] if tags else None
     if ref:
@@ -257,7 +284,7 @@ def update_check(ref: Optional[str] = None) -> Dict:
             "current_version": cur_ver, "latest_tag": latest_tag,
             "target_ref": target_ref, "target_commit": target_commit,
             "available": bool(available) and safe,
-            "reason": reason, "tags": tags,
+            "reason": reason, "tags": tags, "remote_used": remote_used,
             "repo_state": st, "safe_to_update": safe}
 
 
@@ -328,47 +355,52 @@ def perform_update(ref: Optional[str] = None, *,
     except Exception as e:
         return {"ok": False, "error": f"备份失败：{e}", "current": cur}
 
-    # 2) fetch（支持国内镜像）
-    # ★ 修复：用 try-finally 确保 remote 一定被恢复，避免 fetch 失败后
-    #   origin 永久指向失效镜像，导致后续所有更新都失败。
-    fetch_url = mirror or _remote_url()
+    # 2) fetch（支持国内镜像 + 自动兜底）
+    # ★ 候选远端：显式 mirror 优先；否则「主远端 + 兜底镜像」依次尝试，第一个成功即用。
+    #   自动兜底仅对默认主远端（github.com）生效；用户显式选了镜像则以其为准，
+    #   失败后不再跳其它镜像（尊重用户意图）。无论成败，origin 最终都恢复原值。
+    auto_fallback = (_remote_url() == DEFAULT_REMOTE)
+    explicit = [mirror] if mirror else []
+    auto = [_remote_url()] + (FALLBACK_MIRRORS if auto_fallback else [])
+    seen: set = set()
+    candidates: List[str] = []
+    for c in explicit + auto:
+        if c and c not in seen:
+            seen.add(c)
+            candidates.append(c)
     original_remote = None
-    mirror_switched = False
-    if mirror:
-        # 临时切换 remote 到镜像，fetch 后恢复
-        try:
-            r = _run_git(repo, ["remote", "get-url", "origin"], check=False)
-            original_remote = r.stdout.strip() if r.returncode == 0 else None
-            _run_git(repo, ["remote", "set-url", "origin", mirror], check=True)
-            mirror_switched = True
-        except Exception as e:
-            mirror_switched = False
-            return {"ok": False, "error": f"切换镜像失败：{e}", "current": cur,
-                    "backup": backup_path}
-    fetch_error = None
     try:
-        # fetch 增加 60 秒超时，避免网络问题时无限等待
-        _run_git(repo, ["fetch", "--tags", "origin"], check=True, timeout=60)
-    except subprocess.TimeoutExpired:
-        fetch_error = "fetch 超时（60秒），请检查网络或切换其他镜像"
-    except Exception as e:
-        # 提取 git 的详细错误信息（stderr）
-        detail = ""
-        if hasattr(e, "stderr") and e.stderr:
-            detail = f"（{e.stderr.strip()[:200]}）"
-        elif hasattr(e, "output") and e.output:
-            detail = f"（{str(e.output).strip()[:200]}）"
-        fetch_error = f"fetch 失败：{e}{detail}"
-    finally:
-        # ★ 无论 fetch 成功还是失败，都恢复原 remote
-        if mirror_switched and original_remote:
-            try:
-                _run_git(repo, ["remote", "set-url", "origin", original_remote], check=False)
-            except Exception:
-                pass
-    if fetch_error:
+        r = _run_git(repo, ["remote", "get-url", "origin"], check=False)
+        original_remote = r.stdout.strip() if r.returncode == 0 else None
+    except Exception:
+        original_remote = None
+    fetch_error = None
+    used_remote = None
+    for cand in candidates:
+        try:
+            _run_git(repo, ["remote", "set-url", "origin", cand], check=True)
+            # fetch 增加 60 秒超时，避免网络问题时无限等待
+            _run_git(repo, ["fetch", "--tags", "origin"], check=True, timeout=60)
+            used_remote = cand
+            break
+        except subprocess.TimeoutExpired:
+            fetch_error = f"fetch 超时（60秒），远端 {cand} 不可达，请检查网络或切换其他镜像"
+        except Exception as e:
+            detail = ""
+            if hasattr(e, "stderr") and e.stderr:
+                detail = f"（{e.stderr.strip()[:200]}）"
+            elif hasattr(e, "output") and e.output:
+                detail = f"（{str(e.output).strip()[:200]}）"
+            fetch_error = f"fetch 失败：{e}{detail}（远端 {cand}）"
+    # ★ 无论成功失败，都恢复原 remote
+    if original_remote:
+        try:
+            _run_git(repo, ["remote", "set-url", "origin", original_remote], check=False)
+        except Exception:
+            pass
+    if not used_remote:
         return {"ok": False, "error": fetch_error, "current": cur,
-                "backup": backup_path, "mirror_used": mirror}
+                "backup": backup_path, "mirror_used": (mirror or "")}
 
     # 3) checkout -f（丢弃已跟踪改动，但不删未跟踪文件）
     try:
