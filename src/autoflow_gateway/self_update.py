@@ -367,16 +367,18 @@ def perform_update(ref: Optional[str] = None, *,
         return {"ok": False, "error": f"备份失败：{e}", "current": cur}
 
     # 2) fetch（支持国内镜像 + 自动兜底）
-    # ★ 候选远端：显式 mirror 优先；否则「主远端 + 兜底镜像」依次尝试，第一个成功即用。
-    #   自动兜底仅对 github.com 主远端生效（含 ssh git@github.com 与 https://github.com），
-    #   失败后自动跳 ghproxy.net 兜底镜像；用户显式选了镜像则以其为准。无论成败，
-    #   origin 最终都恢复原值。
-    auto_fallback = ("github.com" in _remote_url())
+    # ★ 候选远端：显式 mirror 优先；随后**永远包含「已配置的远端」**（AF_GIT_REMOTE 或默认
+    #   github.com），使自托管 / 本地仓库等**自定义远端也能被拉取**——此前非 github 显式远端
+    #   被 auto_fallback 排除 → candidates 为空 → perform_update 静默返回 ok=False（表现为
+    #   test_self_update 4 红，且真实自托管场景同样拉取失败）。
+    #   ghproxy 镜像兜底**仅对 github.com 主远端**生效（ghproxy 仅 github 可达，NAS 实测）；
+    #   自定义远端不跳 ghproxy（尊重用户显式配置）。无论成败，origin 最终都恢复原值。
+    conf_remote = _remote_url()
     explicit = [mirror] if mirror else []
-    # ★ 候选顺序：用户显式镜像优先；自动兜底时把 ghproxy 镜像放在 github 之前 ——
+    # ★ 候选顺序：用户显式镜像优先；github.com 主远端时把 ghproxy 镜像放在 github 之前 ——
     #   NAS（中国大陆）直连 github SSH 经常挂起（实测 fetch 卡死 60s+），ghproxy 镜像
-    #   更可靠，先试；ghproxy 偶发不可达时再回落 github。无论成败 origin 最终恢复原值。
-    auto = (list(FALLBACK_MIRRORS) + [_remote_url()]) if auto_fallback else []
+    #   更可靠，先试；ghproxy 偶发不可达时再回落 github。自定义远端则不附加 ghproxy。
+    auto = (list(FALLBACK_MIRRORS) + [conf_remote]) if ("github.com" in conf_remote) else [conf_remote]
     seen: set = set()
     candidates: List[str] = []
     for c in explicit + auto:
