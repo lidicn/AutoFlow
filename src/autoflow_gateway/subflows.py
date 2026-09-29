@@ -946,6 +946,11 @@ def seed_managed_subflows(store) -> dict:
     仅 seed 未在表中的 key（已存在则跳过，保护用户可能手动改过的 status / input_schema /
     title）。返回 {ok, seeded, skipped}。运行时机：网关启动时（Gateway.__init__ 注入 store 后）。
     """
+    # 注：曾尝试加「进程内 db_path 去重守卫」（审计报告 P1-3 配套），但会让二次调用
+    # 提前返回 skipped=0，破坏既有契约——test_subflow_seed 断言二次调用须报
+    # skipped==N（DB 层幂等的真实反映）。_gw() 单例化后 Gateway 每进程只构造一次，
+    # seed 自然只跑一次（即审计报告给的备选「或只在 Gateway 首次构造时跑」），
+    # 故不引入该守卫，保持 DB 层幂等语义 + 返回值真实。
     seeded, skipped = 0, 0
     seen = set()
     # 1) subflow 实例型（_MANAGED_SUBFLOW_KEYS）

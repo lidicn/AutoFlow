@@ -36,6 +36,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
 from .gateway import Gateway, schema_blocking_issues
 from .flow_linter import lint_flow
@@ -51,8 +52,33 @@ _log = logging.getLogger("autoflow.mcp")
 # llm_client 含 `import httpx` —— 改为惰性导入（见 autoflow_ask_llm），
 # 避免 httpx 未安装时网关启动期 ImportError 全功能宕机（ACP 属小众，不应绑架 boot）。
 
-def _gw():
-    return Gateway()
+# P1-3（审计报告第二批）：把 Gateway 改成进程级单例。
+# 原 _gw() 每次 MCP 工具调用都 new Gateway()，把项目里好不容易做的进程内缓存
+# （SharedState 的 D36 mtime 缓存）、实例级锁（ConfirmationGate 的 D-03 熔断）、
+# 单例桥（debug_bridge）全部架空，且每次调用要开约 10 次 sqlite 连接 + 9 条 DDL
+# + 一次全目录（2976 实体）解析。单例化后这些优化才真正生效。
+_gateway_singleton: "Optional[Gateway]" = None
+_gw_lock = threading.Lock()
+
+def _gw() -> "Gateway":
+    global _gateway_singleton
+    g = _gateway_singleton
+    if g is None:
+        with _gw_lock:
+            g = _gateway_singleton
+            if g is None:
+                g = Gateway()
+                _gateway_singleton = g
+    return g
+
+def reset_gateway() -> None:
+    """显式丢弃进程级 Gateway 单例，下次 _gw() 重建。
+    供：① 测试注入/隔离（autouse fixture 每用例后清理）；
+    ② 未来配置热更 / WebUI 连接设置变更兜底（层内已按 connection_revision 懒重建，
+    这里仅作显式重建点）。"""
+    global _gateway_singleton
+    with _gw_lock:
+        _gateway_singleton = None
 
 def _js(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=2)
@@ -2340,7 +2366,7 @@ class _ACPSession:
         self.session_id = session_id
         self.status = "running"
         self.history: list = []          # 累积 content 块（tool_call / text）
-        self.cancel_event = None         # asyncio.Event，由 cancel 方法 set
+        self.cancel_event = None         # threading.Event（worker 线程里 is_set() 跨线程使用，非 asyncio.Event）
         self.created_dt = datetime.now(timezone.utc)
         self.created_at = self.created_dt.isoformat()
         self.last_activity_dt = self.created_dt
@@ -2644,7 +2670,7 @@ class _ACPApp:
             return
         session_id = sid_in or _acp_new_session_id()
         session = _acp_get_or_create_session(session_id)
-        session.cancel_event = asyncio.Event()
+        session.cancel_event = threading.Event()
         session.status = "running"
         # 开启 SSE 流（先发 start，再发帧；完成帧 more_body=False）
         await send({"type": "http.response.start", "status": 200,
@@ -2853,13 +2879,15 @@ def build_app(cfg=None, with_webui: bool = True, gateway: Gateway = None):
     （/mcp-admin 仅 developer；/mcp-white 拒普通身份；/mcp 任意 active 身份；普通身份在 /mcp 仅见用户工具）。"""
     from starlette.applications import Starlette
     from starlette.routing import Mount, Route
-    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+    # StreamableHTTPSessionManager 已提到模块顶层导入（P1-7：便于 build_app 行为可测）
 
     cfg = cfg or _gw().cfg
+    # P1-7（审计报告第二批）：/mcp-white 是 /mcp 的兼容别名，二者驱动同一个
+    # mcp._mcp_server 底层实例。两个独立 SessionManager 各自持有会话表却共享同一
+    # server 进程级状态（request_ctx / 通知流 / progress token），存在会话 ID 重叠、
+    # request_ctx 被并发覆盖、一个 manager 关闭影响另一个的隐患。直接复用 sm_user——
+    # 端点级差异（filter_tools / mode 门禁）本就在 _MCPApp / 中间件层，与 manager 无关。
     sm_user = StreamableHTTPSessionManager(app=mcp._mcp_server, json_response=True)
-    # /mcp-white 是 /mcp 的兼容别名：复用同一 mcp 服务器（工具全集），
-    # 原生手写身份旧端点继续有效；mode 分层显隐由 _MCPApp 的 tools/list 过滤实现。
-    sm_white = StreamableHTTPSessionManager(app=mcp._mcp_server, json_response=True)
     sm_admin = StreamableHTTPSessionManager(app=mcp_admin._mcp_server, json_response=True)
     store = AgentStore(cfg)
     acp_store = AcpTokenStore(cfg)
@@ -2940,12 +2968,12 @@ def build_app(cfg=None, with_webui: bool = True, gateway: Gateway = None):
 
     @asynccontextmanager
     async def lifespan(app):
-        async with sm_user.run(), sm_white.run(), sm_admin.run():
+        async with sm_user.run(), sm_admin.run():
             yield
 
     routes = [
         Route(cfg.mcp_path, endpoint=_MCPApp(sm_user, filter_tools=True)),
-        Route(cfg.mcp_white_path, endpoint=_MCPApp(sm_white, filter_tools=True)),
+        Route(cfg.mcp_white_path, endpoint=_MCPApp(sm_user, filter_tools=True)),
         Route(cfg.mcp_admin_path, endpoint=_MCPApp(sm_admin)),
         # ACP 端点：独立 acp_ 令牌体系（与 /mcp 的 af_ 身份码隔离），由中间件单独鉴权
         Route(cfg.acp_path, endpoint=_ACPApp(acp_store, cfg)),

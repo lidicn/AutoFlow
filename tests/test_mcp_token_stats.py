@@ -45,20 +45,20 @@ def _stats_path() -> str:
 
 
 def _today_bucket(tool_name: str):
-    """返回今日该工具与 mcp 模式的计数（不存在则 0）。"""
-    p = _stats_path()
-    if not os.path.isfile(p):
-        return 0, 0
-    try:
-        with open(p, encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return 0, 0
-    if not data.get("daily"):
-        return 0, 0
-    day = data["daily"][sorted(data["daily"].keys())[-1]]
-    ep = day.get("by_endpoint", {}).get(tool_name, {}).get("calls", 0)
-    mode = day.get("by_mode", {}).get("mcp", {}).get("calls", 0)
+    """返回今日该工具与 mcp 模式的计数（不存在则 0）。
+
+    P1-5（审计报告第二批）：token_stats 存储改为 append-only JSONL
+    （O(1) 追加、天然并发安全、按天轮转），旧的按天聚合 JSON 已废弃
+    （首次 record/get_stats 时自动迁移并归档为 token_stats.json.migrated）。
+    故这里改走公开读接口 get_stats()，不再直读内部文件布局——
+    直读内部布局等于把「存储格式」钉死在测试里，格式一演进守卫就假红（本例即教训）。
+    落库真实性仍被守住：get_stats 读的就是磁盘上的 JSONL。
+    """
+    from autoflow_gateway.token_stats import TokenStatsStore
+    store = TokenStatsStore(os.path.dirname(_stats_path()))
+    st = store.get_stats(days=1)
+    ep = st.get("by_endpoint", {}).get(tool_name, {}).get("calls", 0)
+    mode = st.get("by_mode", {}).get("mcp", {}).get("calls", 0)
     return ep, mode
 
 

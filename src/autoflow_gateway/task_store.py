@@ -31,6 +31,10 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
+# P1-3（审计报告第二批）：已初始化 DDL 的 db_path 集合（进程内去重，
+# 避免同一库在反复构造 TaskStore 时重复跑建表 + 3 条 ALTER）。
+_INITED_DB_PATHS: "set" = set()
+
 from .config import get_config
 
 # 域名 → 可能状态（与 gateway._DOMAIN_POSSIBLE_STATES 保持一致；task_store 离线复用，不依赖 Gateway 实例）
@@ -126,6 +130,12 @@ class TaskStore:
 
     def _init_db(self):
         with self._lock:
+            # P1-3：进程内同一 db_path 只跑一次 DDL。
+            # _gw() 单例化后 TaskStore 本就只构造一次，但测试/子进程可能反复构造；
+            # 这里再兜底，避免每次构造都重跑建表 + 3 条 ALTER（虽 IF NOT EXISTS/吞异常无害，但浪费）。
+            db_path = os.path.abspath(self.db_path)
+            if db_path in _INITED_DB_PATHS:
+                return
             conn = self._conn()
             try:
                 conn.execute(
@@ -215,6 +225,7 @@ class TaskStore:
                 except Exception:
                     pass
                 conn.commit()
+                _INITED_DB_PATHS.add(db_path)
             finally:
                 conn.close()
 

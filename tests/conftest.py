@@ -88,6 +88,21 @@ def _isolate_global_env():
             os.environ[k] = v
 
 
+@pytest.fixture(autouse=True)
+def _reset_gateway_singleton():
+    """P1-3（审计报告第二批）：每个用例结束后丢弃进程级 Gateway 单例，保证用例间隔离。
+    _gw() 单例化后，若一个用例经 mcp_server._gw() 构造并改动了网关状态，会泄漏到下一用例；
+    这里强制重置，下一用例首次 _gw() 重建全新实例。仅当本进程已导入 mcp_server 才清，
+    避免对无关测试强拉重导入（mcp_server 导入会带动 gateway 大模块）。"""
+    yield
+    mod = sys.modules.get("autoflow_gateway.mcp_server")
+    if mod is not None:
+        try:
+            mod.reset_gateway()
+        except Exception:
+            pass
+
+
 @pytest.fixture
 def err_base():
     from autoflow_gateway.errors import not_found, ambiguous_count
