@@ -2724,6 +2724,10 @@ class Gateway:
             return result
 
         # 落提案（raw，等人审升格）。内容为 dsl + 闸门结果，便于人类复核。
+        # ★ 落档是真实持久化动作：DB 不可写/损坏/只读等故障必须诚实暴露，绝不能以
+        #   ok=True + proposal_id=None 静默吞掉（fail-open + 静默丢提案：既误导 agent
+        #   也丢数据）。改为 ok=False + 明确 error（不抛异常，保持对 agent 调用非阻塞）。
+        _persist_ok = True
         try:
             store = ProposalStore(self.cfg)
             p = store.submit(agent_id, scene.name, "skill",
@@ -2737,7 +2741,10 @@ class Gateway:
             proposal_id = p.id
         except Exception as e:
             proposal_id = None
-            gate.setdefault("note", f"提案落档失败(非阻塞): {e}")
+            _persist_ok = False
+            gate.setdefault("note", f"提案落档失败: {e}")
+            _slog(_tid, "propose_dsl.persist_failed", error=repr(e),
+                  elapsed=round(time.perf_counter() - _t0, 3))
         _slog(_tid, "propose_dsl.gate", passed=bool(gate.get("passed")),
               gate_stage=gate.get("stage"), proposal_id=proposal_id,
               elapsed=round(time.perf_counter() - _t0, 3))
@@ -2790,9 +2797,10 @@ class Gateway:
         })
         # lint 摘要已在 lint 阶段统一计算（lint_summary / lint_error_count / lint_warning_count）
         return {
-            "ok": True,
+            "ok": _persist_ok,
             "ref": ref,
             "proposal_id": proposal_id,
+            "error": (gate.get("note") if not _persist_ok else None),
             "snapshot": snap,
             "_trace_id": _tid,
             "auto_deploy": auto_deploy_result,
@@ -2809,7 +2817,7 @@ class Gateway:
             "require_e2e": bool(require_e2e),
             "flow": flow,
             "_telemetry": _tag_action(
-                "propose_dsl", {"ok": True}, agent_id,
+                "propose_dsl", {"ok": _persist_ok}, agent_id,
                 extra={"proposal_id": proposal_id, "scene_name": scene.name,
                        "gate_passed": gate.get("passed")},
                 log_path=self._telemetry_log),

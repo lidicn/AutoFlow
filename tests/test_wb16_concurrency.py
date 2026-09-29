@@ -12,6 +12,8 @@
 """
 import os
 import sys
+import atexit
+import shutil
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
@@ -19,14 +21,21 @@ sys.path.insert(0, str(__file__).replace("\\", "/").rsplit("/", 2)[0] + "/src")
 
 os.environ.setdefault("AUTOFLLOW_ENV", "staging")
 _tmp = tempfile.mkdtemp(prefix="af_cc_test_")
-os.environ["AUTOFLLOW_DATA_DIR"] = _tmp
+atexit.register(lambda: shutil.rmtree(_tmp, ignore_errors=True))
 
 from autoflow_gateway import gateway as G
 from autoflow_gateway import vhass as VH
-from autoflow_gateway.config import reset_config
+from autoflow_gateway.config import GatewayConfig
 
-reset_config()
-GW = G.Gateway()
+# 隔离（治理全量套件下的测试隔离债）：用显式独立 GatewayConfig（独立 data_dir），
+# 且不污染全局 AUTOFLLOW_DATA_DIR 环境变量——否则经全局 _CONFIG 单例共享同一 data_dir、
+# 其他 Gateway() 也会来打同一份 autoflow.db（各自开 4+ 长连接，WAL -wal/-shm 竞争），
+# 把 db 文件拖成只读 → ProposalStore.submit 抛 attempt to write a readonly database，
+# 被原 propose_dsl 静默吞成 ok=True + proposal_id=None（既静默丢提案又误导 agent）。
+# 显式独立 cfg + 不泄漏 env，让本测试独占一份 db，彻底隔离该竞争；断言保持不变
+# （不删断言、不放宽产品闸门）。
+CFG = GatewayConfig(data_dir=_tmp, env="staging")
+GW = G.Gateway(config=CFG)
 GW.state.add_mapping("书房主灯", "light.study_main")
 GW.state.add_mapping("客厅主灯", "light.living_room_main")
 for _eid in ("light.study_main", "light.living_room_main",
@@ -97,6 +106,11 @@ def test_concurrent_propose_dsl_thread_safe():
     # 全部成功且各自落独立提案
     for r in results:
         assert r["ok"], r
+        if not r.get("proposal_id"):
+            _note = (r.get("gate") or {}).get("note")
+            raise AssertionError(
+                f"proposal_id 缺失: note={_note!r} | gate_stage="
+                f"{ (r.get('gate') or {}).get('stage') } | {r}")
         assert r.get("proposal_id"), r
     pids = {r["proposal_id"] for r in results}
     assert len(pids) == len(results), \
