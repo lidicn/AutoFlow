@@ -21,7 +21,7 @@ from typing import Optional, Dict
 
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
-from starlette.responses import JSONResponse, FileResponse
+from starlette.responses import JSONResponse, FileResponse, RedirectResponse
 from starlette.staticfiles import StaticFiles
 from starlette.requests import Request
 
@@ -3595,6 +3595,14 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
             return FileResponse(index_path)
         return _js({"ok": False, "error": "前端未构建：缺少 webui/static/index.html"}, 500)
 
+    async def login_page_redirect(request: Request):
+        """掉线兜底：登录是前端弹窗（POST /api/auth/login），服务端没有 /login 页面。
+
+        ★ 事故教训（2026-09-28）：用户会话失效后手敲 /login 吃 404，误判为「网关挂了」。
+        这里重定向回首页，由前端 account 模块弹出登录框，消掉这个死角。
+        """
+        return RedirectResponse(url="/", status_code=307)
+
     # ── 人工抽查（spotcheck）已迁移至 archive/agent-loop-migration/（C4）──
 
     # ── debug 回读（#644，只读，从本地缓冲取，绝不现打 NR）──
@@ -3912,6 +3920,8 @@ def build_webui_asgi(cfg=None, gateway: Optional[Gateway] = None):
 
         # 静态
         Route("/", index, methods=["GET"]),
+        # ★ 掉线兜底：/login 无页面（登录是前端弹窗），曾导致用户 404 误判服务不可用。
+        Route("/login", login_page_redirect, methods=["GET"]),
     ]
     if os.path.isdir(static_dir):
         routes.append(Mount("/static", StaticFiles(directory=static_dir), name="static"))

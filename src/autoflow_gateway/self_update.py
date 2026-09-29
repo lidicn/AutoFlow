@@ -78,6 +78,71 @@ def _run_git(repo: str, args: List[str], check: bool = True,
     )
 
 
+def _env_flag(name: str) -> bool:
+    v = (os.environ.get(name) or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _repo_state(repo: str) -> Dict:
+    """活树可升级性体检。
+
+    ★ 事故教训（2026-09-28）：NAS 活树长期靠 scp 手工部署，git 侧停在
+      「detached HEAD（v1.4.5 时代）+ 27 个已跟踪文件被本地改写」的状态。
+      此时 perform_update 的 `git checkout -f <tag>` 会把这些本地改动（含
+      docker-compose.yml 的局域网端口绑定等 NAS 特有配置）整片冲掉，
+      py_compile 失败时还会回滚到一个更旧的提交 —— 等于拿升级按钮当格式化键。
+
+    只统计「已跟踪文件的改动」：checkout -f 不会删除未跟踪文件（data/、*.bak 等安全）。
+    """
+    st: Dict = {"detached": False, "dirty": False, "changed_files": 0, "branch": ""}
+    if not repo:
+        return st
+    try:
+        r = _run_git(repo, ["rev-parse", "--abbrev-ref", "HEAD"], check=False)
+        br = (r.stdout or "").strip()
+        st["branch"] = br
+        st["detached"] = (br == "HEAD")  # detached HEAD 时 abbrev-ref 恒为 "HEAD"
+    except Exception:
+        pass
+    try:
+        r = _run_git(repo, ["status", "--porcelain"], check=False)
+        tracked = [l for l in (r.stdout or "").splitlines()
+                   if l.strip() and not l.startswith("??")]
+        st["dirty"] = bool(tracked)
+        st["changed_files"] = len(tracked)
+    except Exception:
+        pass
+    return st
+
+
+def _dirty_reason(st: Dict) -> str:
+    why = []
+    if st.get("detached"):
+        why.append("HEAD 处于分离状态（活树不是任何分支的尖端）")
+    if st.get("dirty"):
+        why.append(f"{st.get('changed_files', 0)} 个已跟踪文件有本地改动")
+    return "；".join(why) or "活树状态未知"
+
+
+def _remote_probe() -> str:
+    """探测远端可达性。返回空串表示可达；否则返回人类可读原因。
+
+    用于区分「网络不通」与「远端真的没发版」——两者在旧实现里都退化成
+    「远程无可用版本 tag」，把网络故障伪装成产品状态，误导排查方向。
+    """
+    try:
+        subprocess.run(
+            ["git", "-c", "safe.directory=*", "ls-remote", "--heads", _remote_url()],
+            capture_output=True, text=True, env=_git_env(), check=True, timeout=30,
+        )
+        return ""
+    except subprocess.TimeoutExpired:
+        return (f"远端 {_remote_url()} 不可达（ls-remote 超时 30 秒）。"
+                f"NAS 所在网络可能不通 GitHub，请改用国内镜像或改用 scp 手工部署。")
+    except Exception as e:
+        return f"远端 {_remote_url()} 不可达：{e}"
+
+
 def _allow_shas() -> List[str]:
     raw = os.environ.get("AF_UPDATE_ALLOW_REFS") or ""
     return [s.strip().lower() for s in raw.split(",") if SHA_RE.match(s.strip().lower())]
@@ -159,16 +224,22 @@ def update_check(ref: Optional[str] = None) -> Dict:
                 "available": False, "reason": "git 不可用或仓库未初始化（需重建含 git 的镜像）",
                 "current": current_commit(repo) if repo else "",
                 "current_version": "", "latest_tag": None, "target_ref": None,
-                "target_commit": None, "tags": []}
+                "target_commit": None, "tags": [],
+                "repo_state": _repo_state(repo), "safe_to_update": False}
     cur = current_commit(repo)
     cur_ver = read_version()
     tags = list_remote_tags(repo)
     target_ref, target_commit, err = _resolve_target(ref, tags)
     if err:
+        reason = err
+        if not tags:
+            # 区分「网络不通」与「远端没发版」，别把网络故障伪装成产品状态。
+            reason = _remote_probe() or "远程无可用版本 tag（远端没有 v* 形式的发布标签）"
         return {"ok": True, "git_present": True, "repo_dir": repo, "available": False,
-                "reason": err, "current": cur, "current_version": cur_ver,
+                "reason": reason, "current": cur, "current_version": cur_ver,
                 "latest_tag": (tags[0]["tag"] if tags else None),
-                "target_ref": target_ref, "target_commit": target_commit, "tags": tags}
+                "target_ref": target_ref, "target_commit": target_commit, "tags": tags,
+                "repo_state": _repo_state(repo), "safe_to_update": False}
     latest_tag = tags[0]["tag"] if tags else None
     if ref:
         available = bool(target_commit) and target_commit != cur
@@ -177,12 +248,17 @@ def update_check(ref: Optional[str] = None) -> Dict:
         available = _ver_key(latest_tag) > _ver_key(cur_ver)
     else:
         available = bool(target_commit) and target_commit != cur
+    st = _repo_state(repo)
+    safe = not (st["detached"] or st["dirty"]) or _env_flag("AF_UPDATE_ALLOW_DIRTY")
+    reason = ("已是最新" if not available else f"可更新到 {target_ref}")
+    if not safe:
+        reason = ("活树不干净，在线升级已禁用（会把本地改动整片冲掉）：" + _dirty_reason(st))
     return {"ok": True, "git_present": True, "repo_dir": repo, "current": cur,
             "current_version": cur_ver, "latest_tag": latest_tag,
             "target_ref": target_ref, "target_commit": target_commit,
-            "available": available,
-            "reason": ("已是最新" if not available else f"可更新到 {target_ref}"),
-            "tags": tags}
+            "available": bool(available) and safe,
+            "reason": reason, "tags": tags,
+            "repo_state": st, "safe_to_update": safe}
 
 
 def _resolve_target(ref: Optional[str], tags: List[Dict[str, str]]):
@@ -232,6 +308,15 @@ def perform_update(ref: Optional[str] = None, *,
     if target_commit == cur:
         return {"ok": True, "already_latest": True, "current": cur,
                 "target_ref": target_ref, "restart": "none"}
+
+    # ★ 0) 活树体检：detached HEAD / 工作树脏 一律先拒绝，再谈备份与 fetch。
+    #   否则 `checkout -f <tag>` 会把活树的本地改动（NAS 特有配置、手工部署的新代码）
+    #   整片冲掉，且失败回滚会退到一个更旧的提交 —— 升级按钮变格式化键。
+    st = _repo_state(repo)
+    if (st["detached"] or st["dirty"]) and not _env_flag("AF_UPDATE_ALLOW_DIRTY"):
+        return {"ok": False, "error": "活树不干净，已拒绝在线升级：" + _dirty_reason(st)
+                + "。请先把活树改动纳入 git 管理（或设置 AF_UPDATE_ALLOW_DIRTY=1 强制升级）。",
+                "current": cur, "repo_state": st, "blocked": "dirty_worktree"}
 
     # 1) 备份（不含 .git / data）
     backup_dir = data_dir or os.environ.get("AUTOFLLOW_DATA_DIR", "/data")

@@ -61,8 +61,10 @@ class SelfUpdateTest(unittest.TestCase):
         self.tag_commit = _git_out(self.repo, "rev-parse", "v1.0.1").strip()
         # 一个非版本 tag（不应被自动更新纳入）
         _git(self.repo, "tag", "nightly")
-        # 让活树停在一个「旧提交」上：存在更新的版本 tag 即表示「可更新」
-        _git(self.repo, "checkout", "-f", self.base_commit)
+        # 让活树停在一个「旧提交」上：存在更新的版本 tag 即表示「可更新」。
+        # ★ 必须挂在真实分支上：detached HEAD 会被活树体检判为「不可升级」
+        #   （checkout -f 会把本地改动整片冲掉，见 _repo_state / NAS 2026-09-28 事故）。
+        _git(self.repo, "checkout", "-b", "prod", self.base_commit)
 
         os.environ["AF_REPO_DIR"] = self.repo
         os.environ["AF_GIT_REMOTE"] = self.repo
@@ -74,6 +76,7 @@ class SelfUpdateTest(unittest.TestCase):
         os.environ.pop("AF_REPO_DIR", None)
         os.environ.pop("AF_GIT_REMOTE", None)
         os.environ.pop("AF_UPDATE_ALLOW_REFS", None)
+        os.environ.pop("AF_UPDATE_ALLOW_DIRTY", None)
 
     def test_update_check_finds_latest_tag(self):
         chk = self_update.update_check()
@@ -137,6 +140,66 @@ class SelfUpdateTest(unittest.TestCase):
         res = self_update.perform_update(ref="v1.0.1", repo_dir=self.repo, data_dir=self.data)
         self.assertTrue(res.get("ok"))
         self.assertTrue(res.get("already_latest"))
+
+    # ── 活树体检守卫（NAS 2026-09-28 事故：升级险些冲掉手工部署的活树）──
+
+    def test_clean_tree_is_safe(self):
+        chk = self_update.update_check()
+        self.assertTrue(chk["safe_to_update"], chk)
+        self.assertFalse(chk["repo_state"]["detached"])
+        self.assertFalse(chk["repo_state"]["dirty"])
+
+    def test_dirty_worktree_blocks_update(self):
+        # 模拟 NAS 活树：已跟踪文件被本地改写（端口绑定、NAS 特有配置等）
+        with open(os.path.join(self.repo, "run.py"), "w", encoding="utf-8") as f:
+            f.write("# local hack\nprint('local')\n")
+        head_before = _git_out(self.repo, "rev-parse", "HEAD").strip()
+        res = self_update.perform_update(ref="v1.0.1", repo_dir=self.repo, data_dir=self.data)
+        self.assertFalse(res.get("ok"), res)
+        self.assertEqual(res.get("blocked"), "dirty_worktree")
+        self.assertIn("活树不干净", res.get("error", ""))
+        # 关键：绝不能动代码，也绝不能走到备份/重启
+        self.assertEqual(_git_out(self.repo, "rev-parse", "HEAD").strip(), head_before)
+        self.assertEqual(os.listdir(self.data), [])
+        # update_check 也应如实标记为不可升级
+        chk = self_update.update_check()
+        self.assertFalse(chk["safe_to_update"])
+        self.assertFalse(chk["available"])
+        self.assertEqual(chk["repo_state"]["changed_files"], 1)
+
+    def test_detached_head_blocks_update(self):
+        _git(self.repo, "checkout", "--detach", self.base_commit)
+        chk = self_update.update_check()
+        self.assertTrue(chk["repo_state"]["detached"])
+        self.assertFalse(chk["safe_to_update"])
+        res = self_update.perform_update(ref="v1.0.1", repo_dir=self.repo, data_dir=self.data)
+        self.assertFalse(res.get("ok"), res)
+        self.assertEqual(res.get("blocked"), "dirty_worktree")
+        self.assertIn("分离状态", res.get("error", ""))
+
+    def test_untracked_files_do_not_block(self):
+        # 未跟踪文件（data/、*.bak 等）不会被 checkout -f 删除 → 不该算脏
+        with open(os.path.join(self.repo, "docker-compose.yml.bak"), "w", encoding="utf-8") as f:
+            f.write("backup\n")
+        chk = self_update.update_check()
+        self.assertTrue(chk["safe_to_update"], chk)
+        res = self_update.perform_update(ref="v1.0.1", repo_dir=self.repo, data_dir=self.data)
+        self.assertTrue(res.get("ok"), res)
+
+    def test_allow_dirty_env_overrides(self):
+        with open(os.path.join(self.repo, "run.py"), "w", encoding="utf-8") as f:
+            f.write("# local hack\n")
+        os.environ["AF_UPDATE_ALLOW_DIRTY"] = "1"
+        res = self_update.perform_update(ref="v1.0.1", repo_dir=self.repo, data_dir=self.data)
+        self.assertTrue(res.get("ok"), res)
+
+    def test_unreachable_remote_reports_network_not_missing_tag(self):
+        # 远端不可达时，不能退化成「远程无可用版本 tag」（会把网络故障伪装成产品状态）
+        os.environ["AF_GIT_REMOTE"] = os.path.join(self.tmp, "no-such-repo")
+        chk = self_update.update_check(ref="v1.0.1")
+        self.assertFalse(chk["available"])
+        self.assertIn("不可达", chk.get("reason", ""))
+        self.assertNotEqual(chk.get("reason"), "远程无可用版本 tag")
 
 
 if __name__ == "__main__":
