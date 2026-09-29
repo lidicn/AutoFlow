@@ -27,6 +27,8 @@
 | v2.1.0-beta | 竞技场 gamma | 进行中（种子翻转/语义诚实性/出题校验/考官校准） | 🔄 | — |
 | **v2.2.0** | 定性收口版 | **3 红定性 + 议题一/六裁定落地 + 议题四立项** | 📋 新增 | G1 |
 | **v2.3.0** | 省 token 版 | **议题四+七+八打包：ref 贯穿部署 / 全错编译 / 静态快检 / token 预算** | ✅ 已发版（tag `v2.3.0` · 2026-09-29 · HEAD `af0b134`） | G2 |
+| v2.3.5 | 隔离债治理补丁 | 测试隔离债（test_verify_flow_webui_endpoint / test_wb16_concurrency）专项治理收口 + propose_dsl 落档诚实化 | ✅ 已发版（tag `v2.3.5` · 2026-09-29 · HEAD `2f228bc`） | — (patch) |
+| v2.3.6 | self_update 补丁 | 修复 self_update 自托管/本地远端 fetch 候选缺失（test_self_update 4 红转绿） | ✅ 已发版（tag `v2.3.6` · 2026-09-29 · HEAD `971dfdb`） | — (patch) |
 | v3.0.0 | 工具面收敛 | 议题二（埋点取证后收敛） | 📋 规划 | G3 |
 | v4.0.0 | 生态共存 | 议题三（AutoForge 交接契约） | 📋 延后 | G4 |
 
@@ -89,6 +91,22 @@ v4.0.0 生态共存 ◄── AutoForge 成熟度（等外部信号，当前不�
 
 > **3.4 实施说明（token 预算条）**：后端埋点 `TokenStatsStore`（`token_stats.py`）+ `_record_token` 已在 WebUI REST Pro 路径（propose-dsl / deploy-raw）落地，并注册 `/api/token-stats`（WebUI 内部）与 `/api/core/token-stats`（Pro API）两个读端点；前端 SPA 已有「📊 Token 统计」页签（`index.html` `data-tab="token_stats"`，由外部构建的 app.js 渲染）。本轮在后端 `get_stats` 追加向后兼容的软预算字段（`budget` / `budget_used_pct` / `today_estimated_tokens` / `today_rounds≈当天调用次数`），并新增**自包含轻量看板** `webui/static/token_stats.html`（直接访 `/static/token_stats.html`，无需改主 SPA 打包）：渲染今日预算占用条、按 agent 拆分（轮次/估算 token）、近 7 天趋势。
 > **已知缺口（留给议题二「数据先行」统一埋点）**：当前 `_record_token` 仅覆盖 WebUI REST Pro 路径，agent 经 MCP 工具（`autoflow_*`）跑的流量尚未计入；议题二要求「埋点各工具真实调用量 30 天」，届时一并把 MCP 路径纳入，看板数据即完整。
+
+#### 发版记录（tag `v2.3.5` · 2026-09-29 · HEAD `2f228bc` · patch 不强制 DCD）
+
+两朵测试隔离债专项治理收口：
+- `test_wb16_concurrency`：去全局 `AUTOFLLOW_DATA_DIR` env 泄漏，改显式 `GatewayConfig(data_dir=, env="staging")` + `Gateway(config=CFG)`，消除多 Gateway 共享同一 `autoflow.db` 引发的 `attempt to write a readonly database` 竞争。
+- `test_verify_flow_webui_endpoint`：配套降噪（发 `run_gate=False`）。
+- `gateway.py::propose_dsl` 落档失败路径诚实化：`ok=False` + `error`（原 fail-open 静默吞 readonly，提案丢失无痕）。新增 `tests/test_propose_dsl_persist_guard.py` 3 例守卫。
+- 全量回归 `4 failed, 1845 passed, 1 skipped`：原 2 朵隔离债已不在失败名单（修复成功）；4 红全在 test_self_update.py 且 `self_update.py` 未改动（既存，见 v2.3.6）。
+
+#### 发版记录（tag `v2.3.6` · 2026-09-29 · HEAD `971dfdb` · patch 不强制 DCD）
+
+- 修复 `perform_update` fetch 候选生成：此前仅对 github.com 主远端生成候选，自托管/本地远端（含 test_self_update 临时仓库）被排除 → `candidates=[]` → 静默 `ok=False`，表现为 test_self_update 4 红，真实自托管场景同样拉取失败。
+- 修复后候选列表**永远包含「已配置的远端」**；仅当其为 github.com 主远端时，才在前面附加 ghproxy 兜底镜像（尊重自定义远端配置、不跳镜像）。
+- 验证：`tests/test_self_update.py` 隔离全跑 **16 passed**（禁沙箱跑——沙箱会拦截 git 子进程导致 SIGTERM，非代码挂起）。
+
+**遗留（不堵本版本）**：NAS prod 部署（写活树 + docker restart）属议题五「重大发版」硬触发，按纪律走 WebUI「GitHub 升级」自更新，**另行签收**，不在此自动执行。
 
 ### 议题九 验证证据交付卡（独立小版本，依赖 v2.3.0 verify 后端，✅ 已收口）
 
