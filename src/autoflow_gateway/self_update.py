@@ -244,8 +244,9 @@ def update_check(ref: Optional[str] = None) -> Dict:
     cur_ver = read_version()
     tags = list_remote_tags(repo)
     remote_used = _remote_url()
-    # 主远端（默认 github.com）不可达 → 自动尝试兜底镜像，别把网络故障伪装成「无发版」
-    auto_fallback = (remote_used == DEFAULT_REMOTE)
+    # 主远端（任一 github.com 地址，http/ssh 皆可）不可达 → 自动尝试兜底镜像，
+    # 别把网络故障伪装成「无发版」。非 github 的自定义远端（如用户自建）不自动跳镜像。
+    auto_fallback = ("github.com" in remote_used)
     if not tags and auto_fallback:
         for fm in FALLBACK_MIRRORS:
             if fm == remote_used:
@@ -276,7 +277,10 @@ def update_check(ref: Optional[str] = None) -> Dict:
     else:
         available = bool(target_commit) and target_commit != cur
     st = _repo_state(repo)
-    safe = not (st["detached"] or st["dirty"]) or _env_flag("AF_UPDATE_ALLOW_DIRTY")
+    # 安全判定只认「是否有未提交的本地改动（dirty）」：clean 的 detached tag 也允许升级
+    # （否则自更新后停在 tag 上会再也升不了）。AF_UPDATE_ALLOW_DIRTY 仍用于强制升级
+    # 那些确属脏改动、用户确认要丢弃的场景。
+    safe = (not st["dirty"]) or _env_flag("AF_UPDATE_ALLOW_DIRTY")
     reason = ("已是最新" if not available else f"可更新到 {target_ref}")
     if not safe:
         reason = ("活树不干净，在线升级已禁用（会把本地改动整片冲掉）：" + _dirty_reason(st))
@@ -340,7 +344,14 @@ def perform_update(ref: Optional[str] = None, *,
     #   否则 `checkout -f <tag>` 会把活树的本地改动（NAS 特有配置、手工部署的新代码）
     #   整片冲掉，且失败回滚会退到一个更旧的提交 —— 升级按钮变格式化键。
     st = _repo_state(repo)
-    if (st["detached"] or st["dirty"]) and not _env_flag("AF_UPDATE_ALLOW_DIRTY"):
+    # ★ 只拦截「已跟踪文件有本地改动（dirty）」——这才是 checkout -f 会整片冲掉的风险。
+    #   单独 detached（如自更新后停在 tag 上）不算危险：clean 的 detached tag 上执行
+    #   checkout -f 只是移动 HEAD，不会冲掉任何本地改动；若在此拦截，会导致「自更新一次后
+    #   再也无法自更新」的死锁。本地改动才是真正的炸弹。
+    if st["detached"] and not st["dirty"]:
+        # 仅提示，不拦截：clean 分离头可正常升级
+        pass
+    if st["dirty"] and not _env_flag("AF_UPDATE_ALLOW_DIRTY"):
         return {"ok": False, "error": "活树不干净，已拒绝在线升级：" + _dirty_reason(st)
                 + "。请先把活树改动纳入 git 管理（或设置 AF_UPDATE_ALLOW_DIRTY=1 强制升级）。",
                 "current": cur, "repo_state": st, "blocked": "dirty_worktree"}
@@ -357,9 +368,10 @@ def perform_update(ref: Optional[str] = None, *,
 
     # 2) fetch（支持国内镜像 + 自动兜底）
     # ★ 候选远端：显式 mirror 优先；否则「主远端 + 兜底镜像」依次尝试，第一个成功即用。
-    #   自动兜底仅对默认主远端（github.com）生效；用户显式选了镜像则以其为准，
-    #   失败后不再跳其它镜像（尊重用户意图）。无论成败，origin 最终都恢复原值。
-    auto_fallback = (_remote_url() == DEFAULT_REMOTE)
+    #   自动兜底仅对 github.com 主远端生效（含 ssh git@github.com 与 https://github.com），
+    #   失败后自动跳 ghproxy.net 兜底镜像；用户显式选了镜像则以其为准。无论成败，
+    #   origin 最终都恢复原值。
+    auto_fallback = ("github.com" in _remote_url())
     explicit = [mirror] if mirror else []
     auto = [_remote_url()] + (FALLBACK_MIRRORS if auto_fallback else [])
     seen: set = set()

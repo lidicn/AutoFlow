@@ -62,8 +62,9 @@ class SelfUpdateTest(unittest.TestCase):
         # 一个非版本 tag（不应被自动更新纳入）
         _git(self.repo, "tag", "nightly")
         # 让活树停在一个「旧提交」上：存在更新的版本 tag 即表示「可更新」。
-        # ★ 必须挂在真实分支上：detached HEAD 会被活树体检判为「不可升级」
-        #   （checkout -f 会把本地改动整片冲掉，见 _repo_state / NAS 2026-09-28 事故）。
+        # 自更新后 HEAD 必停在 detached tag 上，因此活树体检只拦「脏树（dirty）」，
+        # 不放行 detached —— 否则会陷入「自更新一次后再也无法自更新」的死锁。
+        # 这里先挂一个 prod 分支作为基线（detached 场景由下面的专项测试覆盖）。
         _git(self.repo, "checkout", "-b", "prod", self.base_commit)
 
         os.environ["AF_REPO_DIR"] = self.repo
@@ -167,15 +168,33 @@ class SelfUpdateTest(unittest.TestCase):
         self.assertFalse(chk["available"])
         self.assertEqual(chk["repo_state"]["changed_files"], 1)
 
-    def test_detached_head_blocks_update(self):
+    def test_clean_detached_tag_is_safe(self):
+        # ★ 回归测试：自更新后 HEAD 必停在 detached tag 上。clean 的 detached 必须允许
+        #   升级，否则会陷入「自更新一次后再也无法自更新」的死锁（2026-09-29 守卫修复）。
         _git(self.repo, "checkout", "--detach", self.base_commit)
         chk = self_update.update_check()
         self.assertTrue(chk["repo_state"]["detached"])
-        self.assertFalse(chk["safe_to_update"])
+        self.assertTrue(chk["safe_to_update"], chk)  # clean detached 不再拦截
+        # 执行更新应成功切到目标 tag：clean detached 上 checkout -f 仅移动 HEAD，
+        # 不会冲掉任何本地改动（与 dirty 拦截互为对照）。
+        res = self_update.perform_update(ref="v1.0.1", repo_dir=self.repo, data_dir=self.data)
+        self.assertTrue(res.get("ok"), res)
+        head = _git_out(self.repo, "rev-parse", "HEAD").strip()
+        self.assertEqual(head, self.tag_commit)
+
+    def test_dirty_detached_still_blocks(self):
+        # detached + 脏树：危险的是「脏」而非「detached」。守卫必须按 dirty 拦截，
+        # 证明修复后守卫的判据是本地改动，而不是简单的 detached 状态。
+        _git(self.repo, "checkout", "--detach", self.base_commit)
+        with open(os.path.join(self.repo, "run.py"), "w", encoding="utf-8") as f:
+            f.write("# local hack on detached\n")
+        chk = self_update.update_check()
+        self.assertTrue(chk["repo_state"]["detached"])
+        self.assertTrue(chk["repo_state"]["dirty"])
+        self.assertFalse(chk["safe_to_update"], chk)
         res = self_update.perform_update(ref="v1.0.1", repo_dir=self.repo, data_dir=self.data)
         self.assertFalse(res.get("ok"), res)
         self.assertEqual(res.get("blocked"), "dirty_worktree")
-        self.assertIn("分离状态", res.get("error", ""))
 
     def test_untracked_files_do_not_block(self):
         # 未跟踪文件（data/、*.bak 等）不会被 checkout -f 删除 → 不该算脏
