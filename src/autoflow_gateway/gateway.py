@@ -1161,12 +1161,26 @@ class Gateway:
         # debug 回读桥：后台线程旁路订阅 NR5.0.1 原生 ws://<nr>/comms debug 事件流，
         # 落本地内存环形缓冲；绝不往 flow 插采集节点（两条热路径都不碰，#644）。
         # 共享进程内唯一 bridge 单例（见文件顶部 _get_debug_bridge 注释，#649 修复）
-        self.debug_bridge = _get_debug_bridge(
-            nr_client=self.nr.client,
-            nr_url=self.cfg.nr_url,
-            enabled=self.cfg.debug_bridge_enabled,
-        )
-        self.debug_bridge.start()
+        # fail-open（P1-4，审计报告）：NR 不可用 / nr_client 构造失败 绝不能阻断网关启动，
+        # 否则 _gw() 每次 new Gateway() 都会抛 → 45 个 MCP 工具全 500。降级为禁用态单例桥。
+        try:
+            _nr_client = self.nr.client
+            _db_enabled = self.cfg.debug_bridge_enabled
+        except Exception as _e:
+            _gw_logger.warning("debug_bridge 取 nr_client 失败，降级为禁用态桥（fail-open）：%s", _e)
+            _nr_client = None
+            _db_enabled = False
+        try:
+            self.debug_bridge = _get_debug_bridge(
+                nr_client=_nr_client,
+                nr_url=self.cfg.nr_url,
+                enabled=_db_enabled,
+            )
+            self.debug_bridge.start()
+        except Exception as _e:
+            _gw_logger.warning("debug_bridge 初始化失败，降级为禁用态单例桥（fail-open）：%s", _e)
+            self.debug_bridge = _get_debug_bridge(
+                nr_client=None, nr_url=self.cfg.nr_url, enabled=False)
         self._start_watchdog()
 
     @property

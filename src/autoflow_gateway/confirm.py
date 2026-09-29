@@ -7,6 +7,7 @@ AutoFlow Gateway — 人工确认闸（写必人工确认）
 由人类（或受限 elevated 通道）批准后才真正落地。这是零信任的最后一道闸。
 """
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -15,6 +16,8 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 
 from .config import get_config
+
+logger = logging.getLogger(__name__)
 
 
 class ConfirmationError(RuntimeError):
@@ -51,12 +54,18 @@ class PendingOp:
 
 
 class ConfirmationGate:
+    # 类级锁：跨 Gateway 实例共享。修复 P0-1（审计报告）：原实例级
+    # `self._lock = threading.Lock()` 在「每调用 new Gateway() 自带新锁」的场景下
+    # 失效，并发请求可绕过 max_pending_per_agent 速率熔断。改为类级共享锁后，
+    # 无论多少个 Gateway 实例，request() 的「读后写」都串行化。
+    _lock = threading.RLock()
+
     def __init__(self, config=None):
         self.cfg = config or get_config()
         self.base = os.path.join(self.cfg.data_dir, self.cfg.env_subdir(), "pending")
         os.makedirs(self.base, exist_ok=True)
-        # 序列化 request() 的「读后写」，防止并发绕过速率熔断（D-03）
-        self._lock = threading.Lock()
+        # 速率熔断「读后写」串行化：复用类级共享锁（见上方 _lock 注释，P0-1）。
+        self._lock = ConfirmationGate._lock
 
     def _path(self, op_id: str) -> str:
         return os.path.join(self.base, f"{op_id}.json")
@@ -129,8 +138,15 @@ class ConfirmationGate:
         for fn in os.listdir(self.base):
             if not fn.endswith(".json"):
                 continue
-            with open(os.path.join(self.base, fn), "r", encoding="utf-8") as f:
-                op = PendingOp.from_dict(json.load(f))
+            p = os.path.join(self.base, fn)
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    op = PendingOp.from_dict(json.load(f))
+            except (json.JSONDecodeError, OSError, ValueError, KeyError, TypeError) as e:
+                # 坏文件（半截写入/手工改坏）绝不能让整个 list_pending / request 速率熔断崩溃（P0-1 加固）。
+                # 跳过并告警，由运维/原子写修复，不阻断正常待确认项读取。
+                logger.warning("list_pending 跳过损坏的待确认文件 %s：%s", p, e)
+                continue
             if op.status not in statuses:
                 continue
             if agent_id and op.agent_id != agent_id:

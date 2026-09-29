@@ -91,6 +91,9 @@ _*.jsonl
 src_backup_*/
 skills_backup*/
 *.bak-*/
+# 任意位置的 .bak 时间戳/日期备份（gateway.py.bak.20260812* / webui.py.bak-20260806* 等）
+*.bak.*
+*.bak-*
 
 # ===== 例外：dw 接手手册（2026-09-02）=====
 # 上方 `HANDOFF_*` 是防敏感信息（内网 IP / 明文令牌 / NAS 拓扑）的宽规则，

@@ -542,7 +542,7 @@ def autoflow_list_decisions(status: str = "", limit: int = 50) -> str:
 
 # ───────────── DSL 验证任务池（分布式多 agent 协作）─────────────
 @mcp.tool()
-def autoflow_list_tasks(only_mine: bool = False, status: str = "", limit: int = 0,
+def autoflow_list_tasks(only_mine: bool = False, status: str = "", limit: int = 50,
                         offset: int = 0, fields: str = "") -> str:
     """【任务池·看板】列出 DSL 验证任务池里可领的任务。每条含：场景说明(task_text) +
     已注入的真实实体 hint(entity_id/friendly_name/domain/area/possible_states) +
@@ -550,7 +550,7 @@ def autoflow_list_tasks(only_mine: bool = False, status: str = "", limit: int = 
     先看本工具挑任务；再用 autoflow_claim_task 领一条开始写 DSL。
     - only_mine=True：只回显本 agent 已领用/已提交的任务（用于断点续传回顾）。
     - status：按状态过滤（如 claimed/unclaimed/submitted/done），留空=全部。
-    - limit：最多返回几条（默认 0=不限制，但建议设 50 避免大包倾倒；任务池满载时尤其重要）。
+    - limit：最多返回几条（默认 50；硬性上限 200 防止大包倾倒；传 0=不限制，但不推荐）。
     - offset：分页偏移（配合 limit 翻页）。
     - fields：只返回指定字段（逗号分隔，如 "id,title,status"），留空=全字段。
     返回体附 summary：{total, returned, by_status} 便于一眼看清池子状态。"""
@@ -565,9 +565,10 @@ def autoflow_list_tasks(only_mine: bool = False, status: str = "", limit: int = 
     if fields:
         keep = [f.strip() for f in fields.split(",") if f.strip()]
         tasks = [{k: t.get(k) for k in keep} for t in tasks]
-    # 分页
+    # 分页（P1-9，审计报告）：默认 50；硬性上限 200 防止任务池满载时大包倾倒撑爆上下文。
     if limit and limit > 0:
-        tasks = tasks[offset:offset + limit]
+        eff_limit = min(limit, 200)
+        tasks = tasks[offset:offset + eff_limit]
     by_status = {}
     for t in tasks:
         s = t.get("status", "unknown")

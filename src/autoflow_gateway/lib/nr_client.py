@@ -138,16 +138,21 @@ def _register_authority() -> None:
         pass
 
 
-def ensure_latest(verbose: bool = True) -> Optional[bool]:
-    """若本文件落后于权威源，则拉取最新版覆盖自身（仅在 import 时、且本文件非权威源时触发）。
+def ensure_latest(verbose: bool = True, force: bool = False) -> Optional[bool]:
+    """若本文件落后于权威源，则拉取最新版覆盖自身。
 
     返回:
       False -> 已是最新（或本就是权威源）
       True  -> 已拉取更新
       None  -> 无法解析权威源 / 同步被禁用 / 拉取失败
+
+    安全（P0-2，审计报告）：自动同步**默认关闭**。原因——import 期自改写源码
+    （shutil.copyfile(src, __file__)）是供应链风险：一旦 src 解析到半截文件或写入
+    中途崩溃，本文件变成 SyntaxError，网关再也起不来。故仅当显式 NR_CLIENT_AUTOSYNC=1
+    开启，或 CLI `sync` 命令显式 force=True 时才尝试。import 期不再调用本函数。
     """
-    if os.environ.get("NR_CLIENT_DISABLE_AUTOSYNC") == "1":
-        return None
+    if not force and os.environ.get("NR_CLIENT_AUTOSYNC") != "1":
+        return None  # 默认关闭自动同步（P0-2）
     if _is_authoritative():
         _register_authority()   # 权威源：保持注册表最新
         return False
@@ -2276,9 +2281,10 @@ class NodeRedClient:
         return warnings
 
 
-# ── 自动同步：import 时对齐权威源 ────────────────────
-# 权威源（autoflow lib fork）被 import 时自登记；其余副本 import 时若落后则自动拉取最新版。
-ensure_latest(verbose=True)
+# ── 自动同步：默认关闭（P0-2，审计报告）──────────────
+# 历史实现：import 期调用 ensure_latest(verbose=True) 自改写源码，存在供应链风险
+# （半截文件 → SyntaxError 再也起不来）。已移除 import 期调用；现在仅在显式
+# NR_CLIENT_AUTOSYNC=1 或 CLI `sync` 命令（force=True）时才会尝试对齐权威源。
 
 # ─── CLI ──────────────────────────────────────────────────
 
@@ -2539,7 +2545,7 @@ def _cli():
             print(f"  是否权威源: {_is_authoritative()}")
 
         elif args.cmd == "sync":
-            r = ensure_latest(verbose=True)
+            r = ensure_latest(verbose=True, force=True)
             if r is True:
                 print("✅ 已拉取最新版")
             elif r is False:
