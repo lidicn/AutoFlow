@@ -395,8 +395,10 @@ def perform_update(ref: Optional[str] = None, *,
         try:
             _run_git(repo, ["remote", "set-url", "origin", cand], check=True)
             # 只拉取目标 tag/commit（不再 --tags 全量），更轻量、避免大数据量挂起；
+            # --force 确保本地同名 tag 与远端对齐（仅影响目标 tag，不波及其它 tag，
+            # 已规避旧实现 `fetch --tags` 因 v1.4.5 等本地/远端 tag 分歧而整体 rejected 的坑）；
             # 60 秒超时防网络卡死（NAS 直连 github 实测会挂起）。
-            _run_git(repo, ["fetch", "origin", target_ref], check=True, timeout=60)
+            _run_git(repo, ["fetch", "--force", "origin", target_ref], check=True, timeout=60)
             used_remote = cand
             break
         except subprocess.TimeoutExpired:
