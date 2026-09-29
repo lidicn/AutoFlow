@@ -373,7 +373,10 @@ def perform_update(ref: Optional[str] = None, *,
     #   origin 最终都恢复原值。
     auto_fallback = ("github.com" in _remote_url())
     explicit = [mirror] if mirror else []
-    auto = [_remote_url()] + (FALLBACK_MIRRORS if auto_fallback else [])
+    # ★ 候选顺序：用户显式镜像优先；自动兜底时把 ghproxy 镜像放在 github 之前 ——
+    #   NAS（中国大陆）直连 github SSH 经常挂起（实测 fetch 卡死 60s+），ghproxy 镜像
+    #   更可靠，先试；ghproxy 偶发不可达时再回落 github。无论成败 origin 最终恢复原值。
+    auto = (list(FALLBACK_MIRRORS) + [_remote_url()]) if auto_fallback else []
     seen: set = set()
     candidates: List[str] = []
     for c in explicit + auto:
@@ -391,8 +394,9 @@ def perform_update(ref: Optional[str] = None, *,
     for cand in candidates:
         try:
             _run_git(repo, ["remote", "set-url", "origin", cand], check=True)
-            # fetch 增加 60 秒超时，避免网络问题时无限等待
-            _run_git(repo, ["fetch", "--tags", "origin"], check=True, timeout=60)
+            # 只拉取目标 tag/commit（不再 --tags 全量），更轻量、避免大数据量挂起；
+            # 60 秒超时防网络卡死（NAS 直连 github 实测会挂起）。
+            _run_git(repo, ["fetch", "origin", target_ref], check=True, timeout=60)
             used_remote = cand
             break
         except subprocess.TimeoutExpired:
