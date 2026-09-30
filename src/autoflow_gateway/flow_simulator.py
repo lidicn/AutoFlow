@@ -32,7 +32,7 @@ except ImportError:  # 允许作为独立脚本运行
 # 动作终点：消息流到这些节点 = flow 对外部世界产生了作用（调 HA 服务 / 发 HTTP）。
 _ACTION_TYPES = {"api-call-service", "ha-call-service", "http request"}
 # 仅作观测/转发的终节点（不参与「动作可达」断言，但用于覆盖率说明）。
-_TERMINAL_TYPES = {"debug", "link out", "link out"}
+_TERMINAL_TYPES = {"debug", "link out"}
 
 _UNK = object()  # 符号「未知值」哨兵
 

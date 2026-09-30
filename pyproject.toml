@@ -1,6 +1,8 @@
 [project]
 name = "autoflow-gateway"
-version = "0.1.0"
+# 权威版本号见仓库根 VERSION 文件（self_update.py 据此判定升级）；此处仅作包元数据，
+# 需与之保持同步（或改用 hatch 动态读取）。审计报告 BUG-6：曾长期停在 0.1.0 与 VERSION 不一致。
+version = "2.3.11"
 description = "AutoFlow Gateway — agent-agnostic gateway for HA discovery + NR scene building"
 requires-python = ">=3.12"
 dependencies = [
@@ -45,3 +47,11 @@ packages = ["autoflow_gateway"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/autoflow_gateway" = "autoflow_gateway"
+
+# ── pytest 配置（审计报告 BUG-1：此前缺失，裸跑 `pytest` 会递归扫 tmp/ 影子测试崩溃）──
+# testpaths 约束只收 tests/；norecursedirs 防 tmp/src_backup_*/outputs/scratch 被收集。
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["tmp", "src_backup_*", "outputs", "scratch", ".git"]
+addopts = "-ra"
+
