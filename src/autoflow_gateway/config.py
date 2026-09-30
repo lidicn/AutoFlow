@@ -51,6 +51,13 @@ except Exception:
 _load_local_env()
 
 
+# ── 环境变量前缀约定（已知债，勿新增 AUTOFLLOW_）────────────────────────────
+# 历史上 env 前缀不统一：既用 AUTOFLLOW_ 也用 AUTOFLOW_（审计报告 #14）。现状两套前缀都在
+# 活代码被真实读取，NAS/HA 部署已按现有前缀配置，盲改会静默 fallback 到默认值、可能无声破坏
+# prod 护栏与 LLM 接入 → 高险低优。
+# 约定：新代码一律用 AUTOFLOW_ 前缀；AUTOFLLOW_ 为冻结遗留，除修复 bug 外不得新增 AUTOFLLOW_
+# 变量。统一改名留待 v3.0 有专门协调改动窗口（届时需同步改部署 env）。
+
 @dataclass
 class GatewayConfig:
     # ── 运行时数据目录（共享态 / 待确认 / 备份 持久化）──
