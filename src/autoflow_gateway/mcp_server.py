@@ -83,6 +83,84 @@ def reset_gateway() -> None:
 def _js(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=2)
 
+
+def _md_sections(text: str):
+    """按 markdown 二级标题（## ）切分文档，返回 [(标题, 正文), ...]。
+
+    无 ## 标题时整篇作为一节（标题="全文"）。供 autoflow_get_skill 分节按需取回，
+    避免一次性把 56KB 技能文档灌进上下文（审计报告 #6 / §4.2）。
+
+    ★ 定义为**普通模块级函数**（绝不能带 @mcp.tool()）：它只是内部helper，
+    曾因误置于装饰器与工具函数之间而被注册成工具、同时让 autoflow_get_skill 丢失注册
+    （被 tests/mcp_toolface_contract.py 的集合对账当场抓出）。
+    """
+    lines = text.splitlines()
+    sections = []
+    cur_h, cur = "全文", []
+    for ln in lines:
+        if ln.startswith("## "):
+            sections.append((cur_h, "\n".join(cur).strip()))
+            cur_h = ln[3:].strip()
+            cur = [ln]
+        else:
+            cur.append(ln)
+    sections.append((cur_h, "\n".join(cur).strip()))
+    return [(h, b) for h, b in sections if b]
+
+
+# 出口预算（审计报告 §4.2③）：单次响应的软上限，超出则裁掉体积最大的"可裁字段"。
+# 默认 64KB —— 取宽松值，正常调用根本不会触发，只在异常膨胀时兜底。
+_MCP_MAX_RESPONSE_BYTES = int(os.getenv("AF_MCP_MAX_RESPONSE_BYTES", "65536"))
+
+# 可裁字段的类型：list / dict / str。标量（int/bool/None）裁了就丢语义，不裁。
+_TRIMMABLE = (list, dict, str)
+
+
+def _js_capped(obj, cap: int = None, hint: str = "") -> str:
+    """序列化后若超过 cap 字节，裁掉体积最大的可裁字段，保证：
+    ① 返回仍是**合法 JSON**（绝不吐半截字符串让客户端解析崩）；
+    ② 顶层键与标量字段全部保留（调用方仍看得懂骨架）；
+    ③ 附 `_truncated` / `_hint`，告知调用方如何取完整结果。
+
+    ★★ 严禁全局套用 ★★
+    flow JSON / DSL / 已部署制品一旦被裁就是**残缺制品**——agent 拿去部署会直接产出坏流。
+    故本函数只应在"结果可再查询、裁掉不影响正确性"的**列表/诊断类出口**显式调用
+    （当前仅 autoflow_list_tasks；新增调用点必须在注释里写明为什么该出口可裁）。
+    """
+    cap = int(cap if cap is not None else _MCP_MAX_RESPONSE_BYTES)
+    if cap <= 0:
+        return _js(obj)
+    if len(_js(obj).encode("utf-8")) <= cap:
+        return _js(obj)
+
+    if not isinstance(obj, dict):
+        # 非 dict 无法安全地局部裁剪，退化成"整体预览 + 明确告知"（仍保持 JSON 合法）
+        return _js({"ok": True, "_truncated": True,
+                    "_hint": hint or f"响应超过 {cap} 字节出口预算且无法局部裁剪，已省略正文。",
+                    "preview": _js(obj)[:2000]})
+
+    out = dict(obj)
+    markers = {"_truncated": True,
+               "_hint": hint or (f"响应超过 {cap} 字节出口预算，已裁掉最大的字段；"
+                                 f"请用更窄的过滤条件 / 分页参数重新调用获取完整结果。")}
+
+    def _size(d) -> int:
+        return len(_js(d).encode("utf-8"))
+
+    # 判定必须把 _truncated/_hint 标记一并计入，否则"裁到刚好达标 + 再加标记"会二次超预算。
+    while _size({**out, **markers}) > cap:
+        cand = [k for k, v in out.items()
+                if not k.startswith("_") and isinstance(v, _TRIMMABLE)]
+        if not cand:
+            break
+        cand.sort(key=lambda k: len(json.dumps(out[k], ensure_ascii=False)), reverse=True)
+        k = cand[0]
+        v = out[k]
+        n = len(v) if isinstance(v, (list, str)) else len(v)
+        out[k] = f"…已省略（{n} 项/字符），请用更窄的过滤条件或分页参数获取完整结果"
+    out.update(markers)
+    return _js(out)
+
 def _with_ok(r, ok: bool = True):
     """给只读类工具的原始数据字典补上统一的 ok 字段（仅当尚未包含时），
     消除 MCP 工具返回格式不一致——两份测试报告共同核实的真 bug：
@@ -263,43 +341,21 @@ def autoflow_render_template(name: str, values_json: str = "{}") -> str:
 async def autoflow_propose_dsl(dsl: Optional[str] = None, expected_postconditions_json: str = "[]",
                                resolved_entities_json: str = "[]", strict: bool = False,
                                require_e2e: bool = False, deploy_token: str = "") -> str:
-    """【★推荐·提交场景首选入口】经 DSL 提案：解析→静态校验→编译→staging 闸门(vhass 重放断言)→落提案(raw)。
-
-    ⭐ 这是 agent 提交场景的**首选**路径：用高层语义 DSL 描述意图，编译器自动生成合规 flow，
-    比手写 Node-RED JSON 短一个数量级、且天然规避接线/节点类型坑。仅在 DSL 语法无法表达
-    你的特定结构时，才退到 autoflow_deploy_raw（逃生舱）。
-
-    用法：
-      autoflow_propose_dsl(
-        dsl="场景: 书房入户播报\\n触发: <传感器entity_id> on\\n动作: light.turn_on(<灯entity_id>)\\n调用子流程: demo_notify(text=欢迎回家, room=书房, level=一般)",
-        expected_postconditions_json='[{"entity_id":"<灯entity_id>","state":"on"},{"subflow":"demo_notify"}]'
-      )
-    - dsl：语义 DSL 文本（场景/触发/动作/调用子流程/分支/否则/延时/并行）。语法与子流程清单调 autoflow_dsl_help()。
-    - expected_postconditions_json：JSON 数组；元素为 {"entity_id","state"} 或 {"subflow":"<名>"}。
-    - resolved_entities_json：差异式实体白名单，接受三种形式之一：① 字符串数组
-      '["light.x","switch.y"]'；② 对象数组 '[{"entity_id":"light.x"}, ...]'；③ 不传或 "[]"
-      （仅依赖 DSL 内实体引用 + 闸门强制校验）。闸门只放行白名单内实体，引用白名单外实体直接判 FAIL。
-    - 注意：实体一律用 autoflow_resolve_entity 返回的真实 entity_id；引用目录外的实体闸门直接判 FAIL。
-    - agent_id 由已认证身份自动注入；提案进入 raw，等待用户在 WebUI 审核升格。
-    - deploy_token：【P4 授权码自动部署】部署授权码。如果提供且有效且闸门通过，提案将自动部署到 NR，
-      无需用户在 WebUI 手动确认。授权码无效或需要人工审批时，自动回退到正常人工审批流程。
-    - 返回 {ok, proposal_id, scene_name, gate, flow, ..., auto_deploy}；gate 实际含
-      {passed, fully_verified, verdict, reasons, warnings, dead_branches,
-       entity_count, external_calls, failures, replay_zero, replay_zero_policy,
-       replayed_services, assertions}（写码以实际返回为准，勿仅依赖本节列举）。
-    - strict：True 时 lint 存在任何 error/warning 即阻断提案（默认 False，仅随回执透出）。
-    - require_e2e：True 时提案带 e2e 意图，用户在 WebUI 点「部署到 NR」时会真正先跑一次
-      实机验证闸（verdict≠通过即拦截部署）。默认 False（沿用 env AUTOFLLOW_WHITEBOX_REQUIRE_E2E）。
-      修复 iss_8d3cffaa96：此前该意图被静默吞掉、主部署路径从不调 e2e 闸。
-    - target_tab：【P4 混合模式】指定部署到哪个 Node-RED tab（按 tab id 或 label 匹配，不存在则自动创建）。
-      留空（默认）则按当前 Tab 组织模式部署（per_flow=独立tab / single_tab=AutoFlow集中tab）。
-      示例：target_tab="客厅" → 该 flow 部署到「客厅」tab 中，与其他 flow 共存。
-    - deploy_token：【P4 授权码自动部署】部署授权码。如果提供且有效，提案将自动通过审批并直接部署到 NR，
-      无需用户在 WebUI 手动确认。授权码由用户在 WebUI「授权码管理」页面创建，绑定目标 tab、有效期、权限等。
-      授权码无效或需要人工审批时，自动回退到正常人工审批流程（不会拒绝部署）。
-      示例：deploy_token="dt_xxxxxxxxxxxxxxxx" → 自动部署到授权码绑定的 tab。
-    - 返回 {ok, proposal_id, scene_name, gate:{passed,...}, require_e2e, flow}。
-    ⚠️ 不要用已废弃的 autoflow_propose_scene。"""
+    """
+    【★推荐·场景首选入口】语义 DSL 提案：解析→静态校验→编译→staging 闸门(vhass 重放)→落提案(raw)。
+    用高层语义 DSL 描述意图，编译器自动生成合规 flow，比手写 NR JSON 短一个数量级且天然规避接线/节点坑；
+    仅 DSL 语法无法表达时才退到 autoflow_deploy_raw（逃生舱）。完整语法与示例调 autoflow_dsl_help()。
+    参数：
+    - dsl：语义 DSL 文本（场景/触发/动作/调用子流程/分支/否则/延时/并行）。
+    - expected_postconditions_json：JSON 数组，元素 {"entity_id","state"} 或 {"subflow":"<名>"}。
+    - resolved_entities_json：实体白名单，'["light.x"]' 或 '[{"entity_id":"light.x"}]'；"[]"=仅用 DSL 内引用。
+      闸门只放行白名单内实体——实体一律用 autoflow_resolve_entity 返回的真实 entity_id，目录外直接判 FAIL。
+    - strict：True 时 lint 有 error/warning 即阻断（默认 False，仅随回执透出）。
+    - require_e2e：True 时部署前真跑一次实机验证闸（verdict≠通过即拦截）；默认 False（env AUTOFLLOW_WHITEBOX_REQUIRE_E2E）。
+    - deploy_token：有效授权码可直接自动部署到 NR，无需 WebUI 人工确认；无效或需审批则退回人工流程。
+    返回 {ok, proposal_id, scene_name, gate:{passed,fully_verified,verdict,reasons,...}, require_e2e, flow}。
+    ⚠️ 勿用已废弃的 autoflow_propose_scene。
+    """
     agent = get_current_agent()
     if agent is None:
         return _js({"ok": False, "error": "未识别 agent：MCP 连接需携带有效身份码。"})
@@ -599,10 +655,13 @@ def autoflow_list_tasks(only_mine: bool = False, status: str = "", limit: int = 
     for t in tasks:
         s = t.get("status", "unknown")
         by_status[s] = by_status.get(s, 0) + 1
-    return _js({"agent_id": aid, "total": total, "returned": len(tasks),
-                "by_status": by_status, "tasks": tasks,
-                "next": "用 autoflow_claim_task() 领一条；写完 DSL 调 "
-                        "autoflow_submit_result(task_id, dsl) 提交。语法随时调 autoflow_dsl_help()。"})
+    # 出口预算（审计报告 §4.2③）：本出口**可裁**——tasks 是列表型、可按 limit/offset/fields
+    # 重新精确查询，裁掉不会产出残缺制品（对比：get_flow / propose_dsl 返回的 flow/DSL 是制品，
+    # 一旦被裁就是坏流，故那些出口绝不能走 _js_capped）。
+    return _js_capped({"agent_id": aid, "total": total, "returned": len(tasks),
+                       "by_status": by_status, "tasks": tasks,
+                       "next": "用 autoflow_claim_task() 领一条；写完 DSL 调 "
+                               "autoflow_submit_result(task_id, dsl) 提交。语法随时调 autoflow_dsl_help()。"})
 
 @mcp.tool()
 def autoflow_claim_task(task_id: str = "") -> str:
@@ -894,12 +953,20 @@ def autoflow_report_issue(title: str, body: str, task_id: str = "",
                 "note": "已登记到缺陷 backlog；人类会在审阅时看到并处理。"})
 
 @mcp.tool()
-def autoflow_get_skill(name: str) -> str:
-    """【技能指导自愈】读取最新的 skill 指导文档全文（如 autoflow），返回 markdown。
+def autoflow_get_skill(name: str, section: str = "", max_bytes: int = 12000) -> str:
+    """【技能指导自愈·按需取回】读取 skill 指导文档（如 autoflow），支持分节与字节截断。
     MCP 重连只刷新工具 schema，不会刷新 agent 系统提示里加载的 skill 文档；当发现本工具说明与
     系统提示里的 skill 不一致、或技能已更新时，调用本工具拉取最新版即可自愈，无需重启 agent。
+
+    参数：
     - name：技能名，仅允许字母/数字/下划线/连字符，映射到 <skills_dir>/<name>.md。
-    返回 {ok, name, path, content, bytes}；找不到或非法名返回 {ok:false}。只读，绝不修改文件。"""
+    - section：只取某一节（按 markdown 二级标题匹配，大小写不敏感、子串匹配）；留空=取全文。
+      先用 section="" 调一次即可看到全部 sections 清单，再按需要精确取某节。
+    - max_bytes：返回正文的字节上限（默认 12000 ≈ 3 千 token；<=0 表示不截断取全文）。
+      截断时正文末尾附标记，并返回 bytes_total / sections 供继续取。
+    返回 {ok, name, path, content, bytes, bytes_returned, truncated, sections, section}；
+    其中 bytes=文档**总**字节（保持原语义），bytes_returned=本次实际返回字节。
+    找不到或非法名返回 {ok:false}（section 找不到时会一并给出 sections 清单）。只读，绝不改文件。"""
     if not re.match(r"^[A-Za-z0-9_-]+$", name or ""):
         return _js({"ok": False, "error": "invalid skill name (allowed: [A-Za-z0-9_-]+)"})
     cfg = _gw().cfg
@@ -917,8 +984,32 @@ def autoflow_get_skill(name: str) -> str:
             text = f.read()
     except Exception as e:
         return _js({"ok": False, "error": f"read failed: {e}"})
+
+    sections = _md_sections(text)
+    headings = [h for h, _ in sections]
+    body = text
+    picked = ""
+    if section:
+        low = section.strip().lower()
+        hit = next(((h, b) for h, b in sections if low in h.lower()), None)
+        if hit is None:
+            return _js({"ok": False, "error": f"section '{section}' not found",
+                        "sections": headings})
+        picked = hit[0]
+        body = hit[1]
+
+    total = len(text.encode("utf-8"))
+    truncated = False
+    limit = int(max_bytes or 0)
+    if limit > 0 and len(body.encode("utf-8")) > limit:
+        truncated = True
+        raw = body.encode("utf-8")[:limit]
+        body = raw.decode("utf-8", errors="ignore") + \
+            "\n\n…（已截断：请用 section 参数按节取回，或调大 max_bytes）"
+    returned = len(body.encode("utf-8"))
     return _js({"ok": True, "name": name, "path": target,
-                "content": text, "bytes": len(text.encode("utf-8"))})
+                "content": body, "bytes": total, "bytes_returned": returned,
+                "truncated": truncated, "sections": headings, "section": picked})
 
 # 用户工具挂到三个端点：/mcp（用户面，任何身份）、/mcp-white（原生手写面）、/mcp-admin（管理面）。
 # 专家/开发者在各自端点都拿到完整用户能力；原生手写部署刀/运维刀分别只在对应端点追加。
