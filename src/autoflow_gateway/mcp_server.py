@@ -1907,6 +1907,10 @@ def autoflow_set_tab_state(flow_id: str, enabled: bool, reason: str = "") -> str
 # （C4）Golden/Acceptance 评测工作台（autoflow_golden_eval / autoflow_golden_status /
 # autoflow_acceptance_eval）已从网关剥离，迁移至 archive/agent-loop-migration/。
 
+# P1-13：自重启互斥锁——保证同一时刻只有一个重启在发起（见 autoflow_restart_gateway），
+# 避免并发 admin 请求各自 spawn self_destruct 线程、重复设 AppExit=Restart。
+_RESTART_LOCK = threading.Lock()
+
 @mcp_admin.tool()
 def autoflow_restart_gateway() -> str:
     """热重启网关进程，使刚改的代码/配置立即生效，无需人工在终端操作。
@@ -1935,6 +1939,11 @@ def autoflow_restart_gateway() -> str:
     _pkg = _os.path.dirname(_os.path.abspath(__file__))   # .../src/autoflow_gateway
     _gateway_dir = _os.path.dirname(_os.path.dirname(_pkg))  # .../autoflow_gateway/（含 run.py 与 nssm.exe）
     _nssm = _os.path.join(_gateway_dir, "nssm.exe")
+    # P1-13：防并发自重启竞态——同一时刻只允许一个重启发起，避免重复设 AppExit /
+    # 重复 spawn self_destruct 线程。已在重启中的并发请求立即返回 restart_in_progress，
+    # 不重复触发（自杀路径进程会退出，锁随之消亡；其余路径由 finally 释放）。
+    if not _RESTART_LOCK.acquire(blocking=False):
+        return _js({"ok": False, "error": "网关正在自重启中，请稍候再试。", "status": "restart_in_progress"})
     try:
         if _os.path.exists(_nssm):
             # 可靠自重启方案（已验证）：
@@ -1974,6 +1983,8 @@ def autoflow_restart_gateway() -> str:
                     "note": "旧网关即将被 detached 脚本杀掉并重拉起；约数秒后 8000 端口恢复。"})
     except Exception as e:
         return _js({"ok": False, "error": f"重启发起失败: {e}"})
+    finally:
+        _RESTART_LOCK.release()
 
 # ───────────── DSL 验证任务池（管理面：发布/重置/统计）─────────────
 @mcp_admin.tool()
