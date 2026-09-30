@@ -67,6 +67,7 @@ from .flow_simulator import simulate_flow
 from .flow_diff import diff_flow_dicts, _node_sig
 from .lib.affordance import affordance_for
 from .telemetry import tag_action as _tag_action
+from .envutil import get_env  # BUG-3 双读：AUTOFLOW_ 优先，AUTOFLLOW_ 回退
 
 # 原生节点逃逸关键字（Phase 4）：DSL 含此关键字且开关关闭时，编译入口直接拒绝。
 _RAW_NODE_KW_RE = re.compile(r"^\s*(原生节点|raw_node)\s*:", re.MULTILINE)
@@ -144,7 +145,7 @@ def _flow_has_branch_node(flow: Optional[Dict[str, Any]]) -> bool:
 # 装的是网关自有的 4 个 af_hist_* managed 子流程定义：增量 append、幂等、不碰任何用户
 # flow，与「禁止 agent 写 prod 用户流」的护栏语义不冲突，故默认放行；
 # 需要关闭时设 AUTOFLLOW_HIST_AUTOINSTALL=0。
-_HIST_AUTOINSTALL = os.environ.get("AUTOFLLOW_HIST_AUTOINSTALL", "1") != "0"
+_HIST_AUTOINSTALL = get_env("AUTOFLOW_HIST_AUTOINSTALL", "1") != "0"
 
 # ── A9 结构化日志（trace_id + 各阶段耗时）──
 # 纯增量：网关此前无任何日志输出，加 logging 不影响既有行为。
@@ -924,7 +925,7 @@ def _vg_dead_branch_reach(flow, dead_rules):
                 _d, _s, targets, _data = _ha_node_call(nd)
                 ents.update(t for t in targets if t)
             except Exception:
-                pass
+                _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [_walk]", exc_info=True)
         elif _vg_is_external_call(nd.get("type")):
             subs.add(nd.get("name") or nd.get("type") or "subflow")
         for outs in wires.get(nid, []) or []:
@@ -2046,7 +2047,7 @@ class Gateway:
                 try:
                     self.state.add_mapping(name, _eid)
                 except Exception:
-                    pass
+                    _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [resolve_entity]", exc_info=True)
         outcome = self._resolve_outcome(len(out), top)
         self._record_resolve_outcome(outcome, name, len(out))
         disambiguation = self._build_disambiguation(name, len(out), top, out, device_groups)
@@ -2870,7 +2871,7 @@ class Gateway:
                 if self.state.get_flow_meta(flow_id):
                     stale = True
             except Exception:
-                pass
+                _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [get_flow]", exc_info=True)
             result = {"ok": False, "error": f"NR 取 flow 失败: {e}", "stage": "get_flow",
                       "flow_id": flow_id}
             if stale:
@@ -3889,7 +3890,7 @@ class Gateway:
                             label=f"自动部署前快照（提案 {proposal_id}）",
                             created_by=agent_id)
             except Exception:
-                pass  # 快照失败不阻断部署
+                _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [_try_auto_deploy_with_token]", exc_info=True)
 
             # 执行自动部署
             deploy_result = self.deploy_proposal(
@@ -4075,7 +4076,7 @@ class Gateway:
                 _non_tab_nodes = [n for n in _existing_flow.get("nodes", []) if n.get("type") != "tab"]
                 is_empty_tab = len(_non_tab_nodes) == 0
             except Exception:
-                pass
+                _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [deploy_proposal]", exc_info=True)
             if is_empty_tab:
                 # 空 tab 是撤回后残留，直接覆盖原 tab（设置 target_flow_id 走 update_flow 分支）
                 target_flow_id = existing["id"]
@@ -4412,7 +4413,7 @@ class Gateway:
                 "created": created,
             })
         except Exception:
-            pass
+            _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [deploy_proposal]", exc_info=True)
         # D5-a（C5）：回显 authored→minted 映射，与 deploy_raw 一致
         _resp = {
             "ok": True,
@@ -4487,7 +4488,7 @@ class Gateway:
                                  "failed_count": len(failed)},
                 })
             except Exception:
-                pass
+                _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [_rollback]", exc_info=True)
 
         try:
             for pid in ids:
@@ -4541,7 +4542,7 @@ class Gateway:
                              "dry_run": bool(dry_run)},
             })
         except Exception:
-            pass
+            _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [deploy_proposals]", exc_info=True)
         return {
             "ok": True, "rolled_back": False, "snapshot": snap,
             "deployed": deployed, "failed": failed,
@@ -5093,7 +5094,7 @@ class Gateway:
             from .flow_linter import detect_subflow_drift
             issues.extend(detect_subflow_drift(nodes, _cur))
         except Exception:
-            pass
+            _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [validate_flow_schema]", exc_info=True)
 
         return issues
 
@@ -5412,11 +5413,11 @@ class Gateway:
                    target: str = "staging", force: bool = False,
                    run_gate: bool = True, dry_run: bool = False,
                    block_on_lint_error: bool =
-                       (os.environ.get("AUTOFLLOW_WHITEBOX_BLOCK_ON_LINT_ERROR", "1") != "0"),
+                       (get_env("AUTOFLOW_WHITEBOX_BLOCK_ON_LINT_ERROR", "1") != "0"),
                    block_on_logic_error: bool =
-                       (os.environ.get("AUTOFLLOW_WHITEBOX_BLOCK_ON_LOGIC_ERROR", "0") != "0"),
+                       (get_env("AUTOFLOW_WHITEBOX_BLOCK_ON_LOGIC_ERROR", "0") != "0"),
                    block_on_schema_error: bool =
-                       (os.environ.get("AUTOFLLOW_WHITEBOX_BLOCK_ON_SCHEMA_ERROR", "1") != "0"),
+                       (get_env("AUTOFLOW_WHITEBOX_BLOCK_ON_SCHEMA_ERROR", "1") != "0"),
                    require_e2e: Optional[bool] = None,
                    allow_prod: bool = False,
                    ref: Optional[str] = None
@@ -5492,8 +5493,8 @@ class Gateway:
         # Step 1.5: 【Phase C·C3】重试预算（防控制层死循环 / agent 自动改→重部署 runaway）
         # 同一 agent 在滑动窗口内的「失败部署尝试」超过上限 N 即停止部署并转人工/报告；
         # 仅记录 ok=False 的失败（成功清零），避免误伤正常多次部署。
-        _budget = int(os.environ.get("AUTOFLLOW_WHITEBOX_RETRY_BUDGET", "5"))
-        _window = float(os.environ.get("AUTOFLLOW_WHITEBOX_RETRY_WINDOW_MIN", "10")) * 60
+        _budget = int(get_env("AUTOFLOW_WHITEBOX_RETRY_BUDGET", "5"))
+        _window = float(get_env("AUTOFLOW_WHITEBOX_RETRY_WINDOW_MIN", "10")) * 60
         if not hasattr(self, "_retry_budget"):
             self._retry_budget = {}
         _hist = self._retry_budget.setdefault(agent_id, [])
@@ -5754,7 +5755,7 @@ class Gateway:
         # require_e2e=None 读 env（默认值由 "1" 改为 "0"：每次部署不再强制重跑 e2e，
         # 结构性金丝雀 Step 8.5 已接管每次快速把关；e2e 退为手动/周期回归，显式 True 才跑）。
         _require_e2e = require_e2e if require_e2e is not None \
-            else (os.environ.get("AUTOFLLOW_WHITEBOX_REQUIRE_E2E", "0") != "0")
+            else (get_env("AUTOFLOW_WHITEBOX_REQUIRE_E2E", "0") != "0")
         _e2e = None  # 默认未运行；仅当 require_e2e 开启且非 dry_run 才赋值（避免成功返回 NameError）
         if _require_e2e and not dry_run:
             try:
@@ -6612,7 +6613,7 @@ class Gateway:
                         try:
                             ProposalStore(self.cfg).clear_deployed(src)
                         except Exception:
-                            pass
+                            _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [undeploy]", exc_info=True)
                     return {"ok": True, "action": "already_gone", "flow_id": flow_id,
                             "label": label, "gateway_nodes_removed": 0,
                             "user_nodes_preserved": 0,
@@ -6628,7 +6629,7 @@ class Gateway:
                 try:
                     ProposalStore(self.cfg).clear_deployed(src)
                 except Exception:
-                    pass
+                    _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [undeploy]", exc_info=True)
             return {"ok": True, "action": "already_gone", "flow_id": flow_id,
                     "label": label, "gateway_nodes_removed": 0, "user_nodes_preserved": 0}
 
@@ -6663,7 +6664,7 @@ class Gateway:
                 try:
                     ProposalStore(self.cfg).clear_deployed(src)
                 except Exception:
-                    pass
+                    _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [undeploy]", exc_info=True)
             return {"ok": True, "action": "already_gone", "flow_id": flow_id,
                     "label": label, "gateway_nodes_removed": 0,
                     "user_nodes_preserved": len(user_nodes),
@@ -6717,7 +6718,7 @@ class Gateway:
             try:
                 ProposalStore(self.cfg).clear_deployed(src)
             except Exception:
-                pass
+                _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [undeploy]", exc_info=True)
         return {"ok": True, "action": action, "flow_id": flow_id, "label": label,
                 "gateway_nodes_removed": g_removed, "user_nodes_preserved": u_preserved}
 
@@ -6909,14 +6910,14 @@ class Gateway:
                 from .dsl_engine import _STATE_ALIAS as _ALIAS
                 tstate = _ALIAS.get(tstate, tstate)
             except Exception:
-                pass
+                _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [run_staging_gate]", exc_info=True)
             # F-R6.5：数值条件原文净化（>28 → 合成值 29），见 _sanitize_trigger_state
             tstate = _sanitize_trigger_state(tstate)
             try:
                 store.inject_trigger(trig.entity, tstate)
                 _trig_injected[trig.entity] = tstate
             except Exception:
-                pass
+                _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [run_staging_gate]", exc_info=True)
         elif scene is None:
             # 白箱直通口：无 scene，从 server-state-changed 节点还原触发态
             for nd in flow.get("nodes", []):
@@ -6933,7 +6934,7 @@ class Gateway:
                         store.inject_trigger(_eid, _sanitize_trigger_state(_st))
                         _trig_injected[_eid] = _sanitize_trigger_state(_st)
                     except Exception:
-                        pass
+                        _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [run_staging_gate]", exc_info=True)
                 break
 
         # 1.5) 验收种子覆盖（F-R8-04）：调用方可指定断言目标的**初始态**（通常是期望的反态）。
@@ -7014,7 +7015,7 @@ class Gateway:
                 try:
                     store.inject_trigger(eid, st)
                 except Exception:
-                    pass
+                    _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [run_staging_gate]", exc_info=True)
             vt = step.get("virtual_time", virtual_time)
             step_report = {}
             # 2b) 评估当前世界态下应执行的 api-call-service（分支感知）
@@ -8016,7 +8017,7 @@ class Gateway:
                             installed.add(sid)
                             installed.add(f"subflow:{sid}")
         except Exception:
-            pass  # 取不到子流程清单不阻塞
+            _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [_gate_node_types]", exc_info=True)
         unknown = check_unknown_node_types(flow, installed)
         if unknown:
             raise RuntimeError(
@@ -8287,7 +8288,7 @@ class Gateway:
                 if self._resolve_best(eid) is None:
                     warns.append(f"{n.get('type')} 引用实体无法无歧义解析：{eid}")
             except Exception:
-                pass
+                _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [_e2e_soft_check_entities]", exc_info=True)
         return warns
 
     @staticmethod
@@ -8767,7 +8768,7 @@ class Gateway:
                         "reason": "modify_flow node_patches 直写（已落盘，可回滚）",
                     })
                 except Exception:
-                    pass
+                    _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [modify_flow]", exc_info=True)
         except Exception as e:
             return {"ok": False, "stage": "deploy", "error": f"部署失败：{e}"}
         _ret = {"ok": True, "flow_id": real_fid, "label": target.get("label"),
@@ -9121,8 +9122,8 @@ class Gateway:
         except (TypeError, ValueError, AttributeError):
             _budget = None
         if _budget is None:
-            _budget = int(os.environ.get("AUTOFLLOW_SELFHEAL_BUDGET", "3"))
-        _window = float(os.environ.get("AUTOFLLOW_SELFHEAL_WINDOW_MIN", "10")) * 60
+            _budget = int(get_env("AUTOFLOW_SELFHEAL_BUDGET", "3"))
+        _window = float(get_env("AUTOFLOW_SELFHEAL_WINDOW_MIN", "10")) * 60
         if not hasattr(self, "_apply_selfheal_budget"):
             self._apply_selfheal_budget = {}
         _hist = self._apply_selfheal_budget.setdefault((agent_id, flow_id), [])
@@ -9306,7 +9307,7 @@ class Gateway:
                 for e in seed.get("entities", []):
                     store.entities[e["entity_id"]] = _vh.VHassStore._normalize(e)
             except Exception:
-                pass
+                _gw_logger.warning("BUG-2 关键路径异常被静默吞没 [_build_vhass_from_staging]", exc_info=True)
         return store
 
     def _seed_read_value_entities_from_ha(self, flow, store):

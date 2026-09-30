@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import contextvars
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from .subflows import get_subflow, SubflowSpec, HISTORY_SUBFLOW_IDS
 from .flow_linter import lint_flow, _check_jsonata, _strip_strings_and_comments
+
+logger = logging.getLogger(__name__)  # BUG-2 关键路径日志
 
 
 # ── 实体解析钩子（友好名/语义标签 → entity_id）─────────────────────────────
@@ -2218,7 +2221,7 @@ def _self_lint(nodes: list) -> list:
     try:
         out = list(lint_flow({"nodes": nodes}))
     except Exception:
-        pass
+        logger.warning("BUG-2 关键路径异常被静默吞没 [_self_lint]", exc_info=True)
     out.extend(_lint_layout(nodes))  # 布局级 lint：重叠 / 连线回退
     return out
 

@@ -29,6 +29,23 @@ import logging
 
 _log = logging.getLogger("autoflow.nr_client")
 
+
+# ── BUG-3 双读（AUTOFLOW_ 优先 / AUTOFLLOW_ 回退）──────────────────────────────
+# nr_client 同时作为独立脚本被 node-red-kai-dai 技能直接运行（不在 autoflow_gateway
+# 包内），故不复用 autoflow_gateway.envutil，这里就地实现一份等价双读。
+def get_env(name, default=None):
+    """双读环境变量：AUTOFLOW_ 优先，AUTOFLLOW_ 回退（与 autoflow_gateway/envutil.py 同语义）。"""
+    if name.startswith("AUTOFLOW_"):
+        fallback = "AUTOFLLOW_" + name[len("AUTOFLOW_"):]
+    elif name.startswith("AUTOFLLOW_"):
+        fallback = "AUTOFLOW_" + name[len("AUTOFLLOW_"):]
+    else:
+        return os.environ.get(name, default)
+    primary = os.environ.get(name)
+    if primary is not None:
+        return primary
+    return os.environ.get(fallback, default)
+
 # ── 配置 ─────────────────────────────────────────────
 
 # 默认实例 = 1880。日常测试与编写都在 1880；prod 环境写操作需 allow_prod opt-in。
@@ -230,7 +247,7 @@ class NodeRedClient:
         self.password  = password or NR_PASS
         self._token: Optional[str] = None
         self._token_issued_at: float = 0.0           # D-16：token 签发时间（time.time）
-        self._token_ttl: float = float(os.environ.get("AUTOFLLOW_NR_TOKEN_TTL", 24 * 3600))
+        self._token_ttl: float = float(get_env("AUTOFLOW_NR_TOKEN_TTL", 24 * 3600))
         self._session_headers: Dict[str, str] = {}  # 复用 Authorization 等头
         self._flow_cache: Dict[str, Dict] = {}  # flow_id -> {nodes_count, timestamp}
 
@@ -741,7 +758,7 @@ class NodeRedClient:
         以 AUTOFLLOW_ENV 为准（不再按端口 1880 判定），使单实例 1880 部署也能正常写；
         只有显式 AUTOFLLOW_ENV=prod（或 NR_PROD=1）才进入受保护模式。
         """
-        if os.getenv("AUTOFLLOW_ENV", "staging").lower() == "prod":
+        if get_env("AUTOFLOW_ENV", "staging").lower() == "prod":
             return True
         if os.getenv("NR_PROD") == "1":
             return True

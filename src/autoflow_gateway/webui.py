@@ -36,6 +36,7 @@ from .proposals import ProposalStore
 from .notes import NoteStore
 from .device_guard import DeviceGuardStore
 from .audit import AuditStore
+from .envutil import get_env  # BUG-3 双读：AUTOFLOW_ 优先，AUTOFLLOW_ 回退
 from .subflows import (
     introspect_nr_subflow, validate_subflow_registration,
     introspect_nr_tab, _parse_tab_url, _KEY_RE,
@@ -199,10 +200,10 @@ class _TokenBucketRateLimiter:
         return False, max(0.0, need)
 
 
-_RATE_LIMIT_ENABLED = os.environ.get("AUTOFLLOW_RATE_LIMIT_ENABLED", "1") != "0"
+_RATE_LIMIT_ENABLED = get_env("AUTOFLOW_RATE_LIMIT_ENABLED", "1") != "0"
 _RATE_LIMITER = _TokenBucketRateLimiter(
-    os.environ.get("AUTOFLLOW_RATE_LIMIT_GLOBAL_PER_MIN", 1000),
-    os.environ.get("AUTOFLLOW_RATE_LIMIT_LOGIN_PER_MIN", 30),
+    get_env("AUTOFLOW_RATE_LIMIT_GLOBAL_PER_MIN", 1000),
+    get_env("AUTOFLOW_RATE_LIMIT_LOGIN_PER_MIN", 30),
 )
 
 

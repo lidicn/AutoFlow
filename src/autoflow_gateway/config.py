@@ -11,6 +11,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Set, Dict, Any
+from .envutil import get_env  # BUG-3 双读：AUTOFLOW_ 优先，AUTOFLLOW_ 回退
 
 
 def _load_local_env():
@@ -51,18 +52,21 @@ except Exception:
 _load_local_env()
 
 
-# ── 环境变量前缀约定（已知债，勿新增 AUTOFLLOW_）────────────────────────────
-# 历史上 env 前缀不统一：既用 AUTOFLLOW_ 也用 AUTOFLOW_（审计报告 #14）。现状两套前缀都在
-# 活代码被真实读取，NAS/HA 部署已按现有前缀配置，盲改会静默 fallback 到默认值、可能无声破坏
-# prod 护栏与 LLM 接入 → 高险低优。
-# 约定：新代码一律用 AUTOFLOW_ 前缀；AUTOFLLOW_ 为冻结遗留，除修复 bug 外不得新增 AUTOFLLOW_
+# ── 环境变量前缀约定（已知债；双读兼容，勿新增 AUTOFLLOW_ 变量）────────────────
+# 历史上 env 前缀不统一：既用 AUTOFLLOW_ 也用 AUTOFLOW_（审计报告 #14 / BUG-3）。现状两套前缀
+# 都在活代码被真实读取，NAS/HA 部署历史按 AUTOFLLOW_ 配置。
+# 修复（BUG-3）：所有读取点改为「双读」——优先 AUTOFLOW_（新约定），回退 AUTOFLLOW_（遗留），
+# 最后用默认值。由 autoflow_gateway/envutil.py:get_env 统一实现（nr_client 因独立脚本另有一份
+# 等价副本）。这样两种前缀都生效、新前缀优先，零破坏既有 AUTOFLLOW_ 部署，也关掉了
+# 「设了正确前缀却被静默忽略」的安全缺口。
+# 约定：新变量一律用 AUTOFLOW_ 前缀；AUTOFLLOW_ 为冻结遗留，除修复 bug 外不得新增 AUTOFLLOW_
 # 变量。统一改名留待 v3.0 有专门协调改动窗口（届时需同步改部署 env）。
 
 @dataclass
 class GatewayConfig:
     # ── 运行时数据目录（共享态 / 待确认 / 备份 持久化）──
-    data_dir: str = field(default_factory=lambda: os.environ.get(
-        "AUTOFLLOW_DATA_DIR",
+    data_dir: str = field(default_factory=lambda: get_env(
+        "AUTOFLOW_DATA_DIR",
         os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "data")
     ))
 
@@ -73,7 +77,7 @@ class GatewayConfig:
     ))
 
     # ── 环境分级：staging / prod（仅用于 data/ 子目录隔离，避免两套状态混淆）──
-    env: str = field(default_factory=lambda: os.environ.get("AUTOFLLOW_ENV", "staging"))
+    env: str = field(default_factory=lambda: get_env("AUTOFLOW_ENV", "staging"))
 
     # ── HA 连接（网关独占，agent 不可见）──
     hass_server: str = field(default_factory=lambda: os.environ.get("HASS_SERVER", "http://<NAS_IP>:8123"))
@@ -89,7 +93,7 @@ class GatewayConfig:
     # ── debug 回读桥（#644）：后台线程旁路订阅 NR5.0.1 原生 ws://<nr>/comms debug 事件流 ──
     # 默认开启；设 0 关闭（纯增量只读功能，fail-open，不影响任何热路径）。
     # 缓冲容量/TTL 等内部调参走 debug_bridge.py 内的 AUTOFLLOW_DEBUG_* env，不动此处。
-    debug_bridge_enabled: bool = field(default_factory=lambda: os.environ.get("AUTOFLLOW_DEBUG_BRIDGE", "1").lower() in ("1", "true", "yes"))
+    debug_bridge_enabled: bool = field(default_factory=lambda: get_env("AUTOFLOW_DEBUG_BRIDGE", "1").lower() in ("1", "true", "yes"))
 
     # ── ds_bridge 地址（golden 评测『点燃』chrome deepseek++ 用）──
     # 桌面机 <DESKTOP_LAN_IP> 永久跑 ds_bridge 控 Chrome；网关现同机用 localhost:9090，

@@ -25,17 +25,18 @@ import logging
 import collections
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
+from .envutil import get_env  # BUG-3 双读：AUTOFLOW_ 优先，AUTOFLLOW_ 回退
 
 logger = logging.getLogger("autoflow.debug_bridge")
 
 # ── 默认护栏（均可经 env 覆盖；属内部调参，不动 config.py）──
-DEFAULT_TTL_SECONDS = int(os.environ.get("AUTOFLLOW_DEBUG_TTL", "300"))
-DEFAULT_MAX_PER_NODE = int(os.environ.get("AUTOFLLOW_DEBUG_MAX_PER_NODE", "200"))
-DEFAULT_MAX_TOTAL = int(os.environ.get("AUTOFLLOW_DEBUG_MAX_TOTAL", "5000"))
-DEFAULT_MAX_PAYLOAD_CHARS = int(os.environ.get("AUTOFLLOW_DEBUG_MAX_PAYLOAD", "2000"))
-DEFAULT_PREVIEW_CHARS = int(os.environ.get("AUTOFLLOW_DEBUG_PREVIEW", "160"))
-DEFAULT_RECONNECT_BASE = float(os.environ.get("AUTOFLLOW_DEBUG_RECONN_BASE", "2"))
-DEFAULT_RECONNECT_MAX = float(os.environ.get("AUTOFLLOW_DEBUG_RECONN_MAX", "30"))
+DEFAULT_TTL_SECONDS = int(get_env("AUTOFLOW_DEBUG_TTL", "300"))
+DEFAULT_MAX_PER_NODE = int(get_env("AUTOFLOW_DEBUG_MAX_PER_NODE", "200"))
+DEFAULT_MAX_TOTAL = int(get_env("AUTOFLOW_DEBUG_MAX_TOTAL", "5000"))
+DEFAULT_MAX_PAYLOAD_CHARS = int(get_env("AUTOFLOW_DEBUG_MAX_PAYLOAD", "2000"))
+DEFAULT_PREVIEW_CHARS = int(get_env("AUTOFLOW_DEBUG_PREVIEW", "160"))
+DEFAULT_RECONNECT_BASE = float(get_env("AUTOFLOW_DEBUG_RECONN_BASE", "2"))
+DEFAULT_RECONNECT_MAX = float(get_env("AUTOFLOW_DEBUG_RECONN_MAX", "30"))
 DEFAULT_WS_PATH = "/comms"
 DEBUG_TOPICS = ("debug",)  # 只关心 debug 主题；其余（notification/event）一律忽略
 

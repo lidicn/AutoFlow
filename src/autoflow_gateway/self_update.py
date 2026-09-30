@@ -25,6 +25,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
+from .envutil import get_env  # BUG-3 双读：AUTOFLOW_ 优先，AUTOFLLOW_ 回退
 
 # 只认版本 tag（v1.0 / v1.2.3 ...）；非版本 tag 一律不纳入自动更新。
 TAG_RE = re.compile(r"^v\d+\.\d+")
@@ -357,7 +358,7 @@ def perform_update(ref: Optional[str] = None, *,
                 "current": cur, "repo_state": st, "blocked": "dirty_worktree"}
 
     # 1) 备份（不含 .git / data）
-    backup_dir = data_dir or os.environ.get("AUTOFLLOW_DATA_DIR", "/data")
+    backup_dir = data_dir or get_env("AUTOFLOW_DATA_DIR", "/data")
     os.makedirs(backup_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_path = os.path.join(backup_dir, f"autoflow-update-{ts}.tar.gz")

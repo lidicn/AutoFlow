@@ -47,6 +47,7 @@ from .webui import build_webui_asgi
 from .config import get_config, is_task_pool_enabled, is_submit_gate_enabled, is_acp_enabled
 from typing import Optional
 from . import acp_client  # 仅用 stdlib(urllib)，安全常驻导入
+from .envutil import get_env  # BUG-3 双读：AUTOFLOW_ 优先，AUTOFLLOW_ 回退
 
 _log = logging.getLogger("autoflow.mcp")
 # llm_client 含 `import httpx` —— 改为惰性导入（见 autoflow_ask_llm），
@@ -2395,8 +2396,8 @@ _ACP_SESSIONS: "dict[str, _ACPSession]" = {}
 _ACP_SESSIONS_LOCK = threading.Lock()
 # ACP 会话内存 TTL（D-08）：超过此时间无活动的会话在下次访问时被惰性清理，防内存无限增长。
 # 可调：AUTOFLLOW_ACP_SESSION_TTL_SECONDS（默认 30 分钟）、AUTOFLLOW_ACP_SESSION_SWEEP_INTERVAL_SECONDS（清理节流间隔，默认 5 分钟）。
-_ACP_SESSION_TTL_SECONDS = float(os.environ.get("AUTOFLLOW_ACP_SESSION_TTL_SECONDS", 30 * 60))
-_ACP_SESSION_SWEEP_INTERVAL_SECONDS = float(os.environ.get("AUTOFLLOW_ACP_SESSION_SWEEP_INTERVAL_SECONDS", 5 * 60))
+_ACP_SESSION_TTL_SECONDS = float(get_env("AUTOFLOW_ACP_SESSION_TTL_SECONDS", 30 * 60))
+_ACP_SESSION_SWEEP_INTERVAL_SECONDS = float(get_env("AUTOFLOW_ACP_SESSION_SWEEP_INTERVAL_SECONDS", 5 * 60))
 _acp_last_sweep_dt: "Optional[datetime]" = None
 _ACP_VERSION = "1.0.0"
 
